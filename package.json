@@ -1,0 +1,20 @@
+{
+  "name": "intelligent-db",
+  "version": "0.0.0",
+  "private": true,
+  "description": "A memory substrate for AI agents: latent memory surfaced by spreading activation, with first-class provenance and an external source-identity layer.",
+  "type": "module",
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "build": "tsc -p .",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.0",
+    "typescript": "^5.7.0",
+    "vitest": "^2.1.0"
+  }
+}

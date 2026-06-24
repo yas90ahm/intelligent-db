@@ -1,0 +1,14 @@
+node_modules/
+dist/
+
+# logs / editor noise
+*.log
+.DS_Store
+.vscode/
+.idea/
+
+# runtime db artifacts
+*.db
+*.db-wal
+*.db-shm
+*.sqlite
