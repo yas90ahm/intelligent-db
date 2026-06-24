@@ -95,6 +95,28 @@ export interface SqliteStrandStore extends StrandStore {
   close(): void;
 
   /**
+   * BULK INGEST: insert/replace MANY strands under ONE prepared statement and ONE
+   * transaction (one `BEGIN`/`COMMIT`, hence one durability barrier) instead of N
+   * autocommitted writes. Additive, SQLite-only widening of the {@link StrandStore}
+   * contract (like {@link SqliteStrandStore.beginTxn}) — the engine and the in-memory
+   * backend are untouched. Nestable: if called inside an open {@link beginTxn}, the
+   * rows enroll in the outer transaction (no inner `BEGIN`/`COMMIT`). Semantically
+   * identical to calling {@link putStrand} for each element; the only difference is
+   * that the whole batch commits atomically and pays one fsync-class barrier.
+   */
+  putStrandsBatch(strands: Iterable<Strand>): void;
+
+  /**
+   * BULK INGEST: insert/replace MANY edges under ONE prepared statement and ONE
+   * transaction. Same atomicity/nesting semantics as {@link putStrandsBatch}.
+   *
+   * NOTE: like {@link putEdge}, this does NOT recompute share-normalization
+   * denominators — the caller must still call {@link recomputeOutWeightSum} for each
+   * affected `from` node afterward (ideally inside the SAME outer transaction).
+   */
+  putEdgesBatch(edges: Iterable<Edge>): void;
+
+  /**
    * Begin an all-or-nothing unit of work over the shared db handle (BEGIN; COMMIT on
    * `commit()`, ROLLBACK on `rollback()`). Always present on the durable backend so a
    * compound engine/ledger operation (an adjudication, an approve, a disown sweep, a
@@ -208,7 +230,11 @@ class SqliteStrandStoreImpl implements SqliteStrandStore {
   readonly #allStrands;
   readonly #allEdges;
 
-  constructor(opts: { db: DatabaseSyncType; ownsDb: boolean }) {
+  constructor(opts: {
+    db: DatabaseSyncType;
+    ownsDb: boolean;
+    synchronous?: "NORMAL" | "FULL";
+  }) {
     this.#db = opts.db;
     this.#ownsDb = opts.ownsDb;
 
@@ -218,10 +244,36 @@ class SqliteStrandStoreImpl implements SqliteStrandStore {
     // handle already had them set by its owner — re-running them is harmless but the
     // owner is the authoritative place, mirroring the ledger drop-ins).
     if (opts.ownsDb) {
+      // WAL: one writer + many concurrent readers; a crash cannot corrupt committed
+      // data. This is the durability floor and is NOT negotiable.
       this.#db.exec("PRAGMA journal_mode=WAL");
-      this.#db.exec("PRAGMA synchronous=NORMAL");
+      // synchronous=NORMAL (the DEFAULT) — under WAL, a power-cut/OS-crash can lose
+      // only the LAST committed txn, never corrupt the file or leave a half-applied
+      // compound op. FULL (fsync on every commit) is the opt-in zero-loss-on-power-cut
+      // knob at a throughput cost; the bank may set { synchronous: "FULL" }. We never
+      // SILENTLY weaken durability — NORMAL is the deliberate, documented operating
+      // point (see CLAUDE.md GAP LIST) and the default stays NORMAL.
+      this.#db.exec(`PRAGMA synchronous=${opts.synchronous ?? "NORMAL"}`);
       // FK off (we manage adjacency ourselves; the contract permits dangling edges).
       this.#db.exec("PRAGMA foreign_keys=OFF");
+      // --- PERFORMANCE-ONLY pragmas (none weaken crash-safety) ---------------------
+      // 16 MiB page cache (negative => KiB): keeps hot strand/edge pages resident so
+      // reads and the write-side index probes avoid re-faulting from the OS cache.
+      this.#db.exec("PRAGMA cache_size=-16384");
+      // Temp B-trees / sorters live in RAM, not a spill file — helps index maintenance
+      // and any ORDER BY/GROUP BY without touching disk.
+      this.#db.exec("PRAGMA temp_store=MEMORY");
+      // Memory-map up to 256 MiB of the database file: reads become pointer derefs into
+      // the mapped region instead of read() syscalls + buffer copies. Pure read-path
+      // acceleration; the WAL write path and its durability are unchanged.
+      this.#db.exec("PRAGMA mmap_size=268435456");
+      // Wait (up to 5s) on a transient lock instead of immediately throwing SQLITE_BUSY
+      // (e.g. a reader vs the WAL checkpointer). Operational robustness, not durability.
+      this.#db.exec("PRAGMA busy_timeout=5000");
+      // Checkpoint the WAL back into the main file roughly every 1000 pages so the WAL
+      // does not grow unbounded under a long write burst. Default behavior, made
+      // explicit; does not affect per-commit crash-safety.
+      this.#db.exec("PRAGMA wal_autocheckpoint=1000");
     }
 
     // Schema is idempotent so reopening an existing database is a no-op create.
@@ -267,14 +319,27 @@ class SqliteStrandStoreImpl implements SqliteStrandStore {
   }
 
   putStrand(s: Strand): void {
-    // `attribute` is nullable; a SQL NULL keeps strandsByAttribute(null) from ever
-    // matching (matching the in-memory store, which never indexes null attributes).
+    this.#runPutStrand(s);
+  }
+
+  /**
+   * Bind one strand to the reused #putStrand statement (shared by put + batch).
+   * `attribute` is nullable; a SQL NULL keeps strandsByAttribute(null) from ever
+   * matching (matching the in-memory store, which never indexes null attributes).
+   */
+  #runPutStrand(s: Strand): void {
     this.#putStrand.run(
       s.id as string,
       JSON.stringify(s),
       s.entity as string,
       s.attribute === null ? null : (s.attribute as string),
     );
+  }
+
+  putStrandsBatch(strands: Iterable<Strand>): void {
+    this.#batched(() => {
+      for (const s of strands) this.#runPutStrand(s);
+    });
   }
 
   // -------------------------------------------------------------------------
@@ -288,6 +353,11 @@ class SqliteStrandStoreImpl implements SqliteStrandStore {
   }
 
   putEdge(e: Edge): void {
+    this.#runPutEdge(e);
+  }
+
+  /** Bind one edge to the reused #putEdge statement (shared by put + batch + recompute). */
+  #runPutEdge(e: Edge): void {
     this.#putEdge.run(
       e.id as string,
       JSON.stringify(e),
@@ -295,6 +365,34 @@ class SqliteStrandStoreImpl implements SqliteStrandStore {
       e.to as string,
       e.edgeType as EdgeType as string,
     );
+  }
+
+  putEdgesBatch(edges: Iterable<Edge>): void {
+    this.#batched(() => {
+      for (const e of edges) this.#runPutEdge(e);
+    });
+  }
+
+  /**
+   * Run `fn` under ONE transaction (one `BEGIN`/`COMMIT`, one durability barrier) when
+   * called standalone, turning N writes into N inserts + 1 commit. NESTABLE: if a
+   * transaction is already open (`#txnDepth > 0`) the writes simply enroll in it — no
+   * inner `BEGIN`/`COMMIT` (which would either throw a nested-BEGIN or prematurely
+   * commit the outer compound op). On throw the standalone case rolls the batch back.
+   */
+  #batched(fn: () => void): void {
+    if (this.#txnDepth > 0) {
+      fn();
+      return;
+    }
+    this.#db.exec("BEGIN");
+    try {
+      fn();
+      this.#db.exec("COMMIT");
+    } catch (err) {
+      this.#db.exec("ROLLBACK");
+      throw err;
+    }
   }
 
   outEdges(id: StrandId): Edge[] {
@@ -354,37 +452,14 @@ class SqliteStrandStoreImpl implements SqliteStrandStore {
     let sum = 0;
     for (const e of edges) sum += e.w;
 
-    const writeAll = (): void => {
+    // Rewrite every out-edge row carrying the new denominator, under one transaction
+    // (or enrolled in the open outer txn — #batched handles both, no nested BEGIN).
+    this.#batched(() => {
       for (const e of edges) {
         // Edge views are frozen; build a fresh object carrying the new denominator.
-        const updated: Edge = { ...e, out_weight_sum: sum };
-        this.#putEdge.run(
-          updated.id as string,
-          JSON.stringify(updated),
-          updated.from as string,
-          updated.to as string,
-          updated.edgeType as EdgeType as string,
-        );
+        this.#runPutEdge({ ...e, out_weight_sum: sum });
       }
-    };
-
-    // When already inside an outer unit of work, just write — the rows enroll in the
-    // open transaction; emitting our own BEGIN here would be a forbidden nested BEGIN,
-    // and emitting our own COMMIT would prematurely commit the outer compound op.
-    if (this.#txnDepth > 0) {
-      writeAll();
-      return;
-    }
-
-    // Standalone call: rewrite each out-edge row under its own atomic transaction.
-    this.#db.exec("BEGIN");
-    try {
-      writeAll();
-      this.#db.exec("COMMIT");
-    } catch (err) {
-      this.#db.exec("ROLLBACK");
-      throw err;
-    }
+    });
   }
 
   // -------------------------------------------------------------------------
@@ -499,12 +574,25 @@ class SqliteStrandStoreImpl implements SqliteStrandStore {
  *   const rep   = createSqliteReputationLedger(repCapOf, { db: handle });
  *   const audit = createSqlitePendingLedger({ db: handle, reputation: rep });
  *   // a compound op over store + rep + audit commits as ONE txn; handle.close() at end.
+ *
+ * DURABILITY KNOB: `opts.synchronous` (owner-opened paths only) selects the WAL
+ * `PRAGMA synchronous` level. DEFAULT `"NORMAL"` is the documented crash-safe/throughput
+ * operating point (a power cut can lose only the last committed txn, never corrupt the
+ * file or leave a half-applied compound op). Pass `"FULL"` for zero-loss-on-power-cut at
+ * a throughput cost. We never silently weaken durability — omit it to keep NORMAL. The
+ * `{ db }` (borrowed-handle) overload ignores it: the single owner of the shared handle
+ * sets the connection pragmas.
  */
 export function createSqliteStore(
   arg: string | { db: DatabaseSyncType },
+  opts?: { synchronous?: "NORMAL" | "FULL" },
 ): SqliteStrandStore {
   if (typeof arg === "string") {
-    return new SqliteStrandStoreImpl({ db: new DatabaseSync(arg), ownsDb: true });
+    return new SqliteStrandStoreImpl({
+      db: new DatabaseSync(arg),
+      ownsDb: true,
+      ...(opts?.synchronous !== undefined ? { synchronous: opts.synchronous } : {}),
+    });
   }
   return new SqliteStrandStoreImpl({ db: arg.db, ownsDb: false });
 }

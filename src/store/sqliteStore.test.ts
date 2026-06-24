@@ -218,6 +218,51 @@ describe("SqliteStrandStore — mirrors the in-memory contract", () => {
     expect(() => store.recomputeOutWeightSum("b" as StrandId)).not.toThrow();
   });
 
+  it("putStrandsBatch is parity with N putStrand calls (and indexes correctly)", () => {
+    store.putStrandsBatch([
+      makeStrand("a", "E1", "E1.color"),
+      makeStrand("b", "E1", "E1.size"),
+      makeStrand("c", "E2", null),
+    ]);
+    expect(store.getStrand("a" as StrandId)).toEqual(makeStrand("a", "E1", "E1.color"));
+    expect(ids(store.strandsByEntity("E1" as EntityId))).toEqual(["a", "b"]);
+    expect(ids(store.strandsByEntity("E2" as EntityId))).toEqual(["c"]);
+    expect(ids(store.strandsByAttribute("E1.color" as AttributeKey))).toEqual(["a"]);
+    // A null-attribute batch row is never matched by strandsByAttribute.
+    expect(store.strandsByAttribute("null" as AttributeKey)).toEqual([]);
+  });
+
+  it("putStrandsBatch over an empty iterable is a no-op (no throw)", () => {
+    expect(() => store.putStrandsBatch([])).not.toThrow();
+    expect([...store.allStrands()]).toEqual([]);
+  });
+
+  it("putEdgesBatch is parity with N putEdge calls (adjacency follows)", () => {
+    store.putStrand(makeStrand("a", "E1", null));
+    store.putStrand(makeStrand("b", "E1", null));
+    store.putStrand(makeStrand("c", "E1", null));
+    store.putEdgesBatch([
+      makeEdge("a->b", "a", "b", 0.5),
+      makeEdge("a->c", "a", "c", 0.25),
+    ]);
+    expect(store.outEdges("a" as StrandId).map((e) => e.id).sort()).toEqual([
+      "a->b",
+      "a->c",
+    ]);
+    expect(store.inEdges("b" as StrandId).map((e) => e.id)).toEqual(["a->b"]);
+  });
+
+  it("batch methods enroll in an open beginTxn (one atomic unit; rollback discards)", () => {
+    const txn = store.beginTxn();
+    store.putStrandsBatch([makeStrand("a", "E1", null), makeStrand("b", "E1", null)]);
+    store.putEdgesBatch([makeEdge("a->b", "a", "b", 0.5)]);
+    txn.rollback();
+    // Nothing committed: the whole unit of work was abandoned.
+    expect(store.getStrand("a" as StrandId)).toBeNull();
+    expect(store.getStrand("b" as StrandId)).toBeNull();
+    expect(store.outEdges("a" as StrandId)).toEqual([]);
+  });
+
   it("hands out frozen edge views", () => {
     store.putStrand(makeStrand("a", "E1", null));
     store.putStrand(makeStrand("b", "E1", null));
@@ -300,6 +345,26 @@ describe("SqliteStrandStore — persistence across a simulated restart", () => {
     for (const e of reopened.outEdges("a" as StrandId)) {
       expect(e.out_weight_sum).toBeCloseTo(0.75);
     }
+  });
+
+  it("REOPEN: a committed putStrandsBatch / putEdgesBatch survives close+reopen", () => {
+    store.putStrandsBatch([makeStrand("a", "E1", null), makeStrand("b", "E1", null)]);
+    store.putEdgesBatch([makeEdge("a->b", "a", "b", 0.5)]);
+
+    store.close();
+    const reopened = createSqliteStore(dbPath);
+    store = reopened;
+
+    expect(ids(reopened.strandsByEntity("E1" as EntityId))).toEqual(["a", "b"]);
+    expect(reopened.inEdges("b" as StrandId).map((e) => e.id)).toEqual(["a->b"]);
+  });
+
+  it("the opt-in synchronous=FULL knob still opens, writes, and persists", () => {
+    store.close();
+    const full = createSqliteStore(dbPath, { synchronous: "FULL" });
+    store = full;
+    full.putStrand(makeStrand("a", "E1", null));
+    expect(full.getStrand("a" as StrandId)).toEqual(makeStrand("a", "E1", null));
   });
 });
 
