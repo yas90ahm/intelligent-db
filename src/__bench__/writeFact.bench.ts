@@ -1,15 +1,19 @@
 /**
- * writeFact.bench.ts — ENGINE WRITE PATH (mint strand + shared-entity edge attach +
- * recomputeOutWeightSum) on memory and SQLite, at a few existing-strand counts.
+ * writeFact.bench.ts — ENGINE WRITE PATH (mint strand + putStrand) on memory and
+ * SQLite, at a few existing-strand counts.
  *
- * writeFact attaches the fresh strand to EVERY existing strand about the same entity
- * with two SHARED_ENTITY edges each, then recomputes out_weight_sum on every touched
- * node — so its cost is O(existing strands about the entity). We bench at 100 / 1k /
- * 10k existing same-entity strands to expose that fan-out, on both backends.
+ * SHARED_ENTITY is now an INDEX, not a materialized clique: writeFact mints NO
+ * sibling edges (the old O(N^2) mesh is gone) — it only `putStrand`s the fresh
+ * strand, and the store's entity index (already maintained by putStrand) is the
+ * shared-entity join the activation walk derives siblings from at read time. So the
+ * shared-entity part of writeFact is O(1), NOT O(existing strands about the entity).
+ * We still bench at 100 / 1k / 10k existing same-entity strands — the curve should
+ * now be ~FLAT across all three (no fan-out), where it used to be a steep O(siblings)
+ * cliff (~95 → ~16 → ~1.3 hz on SQLite).
  *
- * Because writeFact's fan-out GROWS the web each iteration (every new strand attaches
- * to all priors), we re-seed a fixed-size web in a closure and measure ONE writeFact
- * against it; the heavy 10k-SQLite case is bounded with low time/iterations.
+ * We re-seed a fixed-size web in a closure and measure ONE writeFact against it; the
+ * heavy 10k-SQLite case is bounded with low time/iterations (the re-seed, not
+ * writeFact, dominates that case now).
  */
 
 import { rmSync } from "node:fs";
@@ -72,37 +76,54 @@ function freshSqlite(tag: string): SqliteStrandStore {
 
 const EXISTING = [100, 1_000, 10_000] as const;
 
+// Pre-seed each fixed-size web ONCE (outside the timed body), exactly like
+// recall.bench. SHARED_ENTITY is now an INDEX: writeFact no longer reads or rewrites
+// siblings, so it costs the SAME regardless of how many priors the entity already
+// has — and it does NOT matter that repeated timed iterations keep growing the web,
+// because the cost of one writeFact is independent of the web size. Measuring ONE
+// writeFact against a pre-seeded web therefore isolates the (now O(1)) write cost and
+// the 100 / 1k / 10k curve should be ~FLAT (it used to be a steep O(siblings) cliff:
+// ~95 → ~16 → ~1.3 hz on SQLite).
+interface SeededWf {
+  readonly db: IntelligentDb;
+  readonly entity: EntityId;
+}
+
+const memWebs = new Map<number, SeededWf>();
+const sqWebs = new Map<number, SeededWf>();
+for (const existing of EXISTING) {
+  const memEntity = (`ent:wf:mem:${existing}` as EntityId);
+  const memStore: StrandStore = createMemoryStore();
+  seedEntity(memStore, `m:${existing}`, existing, memEntity);
+  memWebs.set(existing, {
+    db: createIntelligentDb(memStore, makeIdentity().identity),
+    entity: memEntity,
+  });
+
+  const sqEntity = (`ent:wf:sq:${existing}` as EntityId);
+  const sqStore = freshSqlite(`${existing}`);
+  seedEntity(sqStore, `s:${existing}`, existing, sqEntity);
+  sqWebs.set(existing, {
+    db: createIntelligentDb(sqStore, makeIdentity().identity),
+    entity: sqEntity,
+  });
+}
+
 for (const existing of EXISTING) {
   describe(`WRITEFACT · ${existing} existing same-entity strands`, () => {
-    // MEMORY: re-seed a fresh fixed-size web each iteration so the fan-out stays at
-    // `existing` (writeFact would otherwise grow the web unboundedly across iterations).
-    bench(
-      "memory",
-      () => {
-        const entity = (`ent:wf:mem:${existing}` as EntityId);
-        const store: StrandStore = createMemoryStore();
-        seedEntity(store, `m:${existing}`, existing, entity);
-        const db: IntelligentDb = createIntelligentDb(store, makeIdentity().identity);
-        db.writeFact({ entity, payload: { fresh: true }, stamp: STAMP });
-      },
-      // Re-seeding dominates; keep the heaviest case bounded so the run finishes.
-      existing >= 10_000 ? { time: 400, iterations: 5 } : undefined,
-    );
+    // MEMORY: one writeFact against a pre-seeded `existing`-strand entity. Flat in
+    // `existing` (the shared-entity part is one putStrand, no fan-out).
+    bench("memory", () => {
+      const w = memWebs.get(existing)!;
+      w.db.writeFact({ entity: w.entity, payload: { fresh: true }, stamp: STAMP });
+    });
 
-    // SQLITE: same shape on the durable backend. The 10k case is the heaviest in the
-    // whole harness (10k×2 edge inserts + 10k recomputes per iteration over WAL), so it
-    // is tightly bounded.
-    bench(
-      "sqlite",
-      () => {
-        const entity = (`ent:wf:sq:${existing}` as EntityId);
-        const store = freshSqlite(`${existing}-${Math.random().toString(36).slice(2)}`);
-        seedEntity(store, `s:${existing}`, existing, entity);
-        const db: IntelligentDb = createIntelligentDb(store, makeIdentity().identity);
-        db.writeFact({ entity, payload: { fresh: true }, stamp: STAMP });
-        store.close();
-      },
-      existing >= 10_000 ? { time: 500, iterations: 3 } : existing >= 1_000 ? { time: 800 } : undefined,
-    );
+    // SQLITE: same shape on the durable backend. No longer the harness's heaviest
+    // case — there is no 10k×2 edge insert + 10k recompute fan-out anymore, just one
+    // row insert, so it stays flat across 100 / 1k / 10k.
+    bench("sqlite", () => {
+      const w = sqWebs.get(existing)!;
+      w.db.writeFact({ entity: w.entity, payload: { fresh: true }, stamp: STAMP });
+    });
   });
 }

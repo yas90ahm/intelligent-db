@@ -48,7 +48,6 @@ import {
   EdgeType,
   Tier,
   DEFAULT_WALK_CONFIG,
-  computeEdgeWeight,
   asEpochMs,
   asStrandId,
   asEdgeId,
@@ -64,7 +63,6 @@ import type {
   SourceId,
   ProvenanceRootId,
   EpochMs,
-  Unit,
   IdentityStamp,
   ProvenanceRoot,
   Edge,
@@ -232,10 +230,13 @@ export interface IntelligentDb {
    * to the web.
    *
    * Scaffold attachment policy: the librarian (the AI model that decides WHERE a
-   * strand attaches) is out of scope here, so this scaffold attaches purely by the
-   * mechanical, checkable rule — SHARED_ENTITY — joining the new strand to existing
-   * strands about the same entity. Confirmed-relationship (CONFIRMED_LINK) edges
-   * are the librarian's job and are not minted here.
+   * strand attaches) is out of scope here, so attachment is purely the mechanical,
+   * checkable rule — SHARED_ENTITY. That relation is an INDEX, not a materialized
+   * clique: the store's `strandsByEntity` index (maintained by `putStrand`) IS the
+   * shared-entity join, and the activation walk DERIVES same-entity siblings from it
+   * at read time. No SHARED_ENTITY edges are minted here, so the shared-entity part
+   * of writeFact is O(1) (one put), not O(siblings). Confirmed-relationship
+   * (CONFIRMED_LINK) and CROSS_WEB_BRIDGE edges are the librarian's job, unchanged.
    *
    * @returns the id of the newly created strand.
    */
@@ -445,21 +446,6 @@ function hashPayload(entity: EntityId, payload: unknown): ContentHash {
 }
 
 /**
- * Read the per-edge `provenance_independence` halting weight FROM the identity
- * stamp (invariant 2: the web does not self-compute this). The stamp's
- * `anchor_cost` is the sublinear "price" of the source's identity; we use it
- * directly as the independence the source contributes to a thread, clamped to
- * [0,1]. (A richer reading — pairwise anchor-set disjointness against the
- * thread's other endpoint — is a later refinement; the contract is "read it from
- * the stamp", which this honors.)
- */
-function independenceFromStamp(stamp: IdentityStamp): Unit {
-  const c = stamp.anchor_cost;
-  if (!Number.isFinite(c)) return 0;
-  return c < 0 ? 0 : c > 1 ? 1 : c;
-}
-
-/**
  * Build the provenance root-set for a newly observed strand from its stamp. The
  * source's passport key becomes the root's source; the independence CLASS is
  * offline-assigned elsewhere, so the scaffold seeds it from the source id (one
@@ -518,46 +504,6 @@ function makeObservedStrand(input: WriteFactInput, at: EpochMs): Strand {
     last_tier_reason: null,
     register: null,
   };
-}
-
-/**
- * Mint a single directed SHARED_ENTITY edge `from -> to`, reading
- * `provenance_independence` from `stamp`. `link_confidence` is 1 for a purely
- * mechanical shared-entity join (the relationship is checkable, not inferred);
- * `recency` is 1 for a just-minted thread. `out_weight_sum` is left at `w` here and
- * corrected by {@link StrandStore.recomputeOutWeightSum} after the batch.
- */
-function makeSharedEntityEdge(
-  from: StrandId,
-  to: StrandId,
-  stamp: IdentityStamp,
-): Edge {
-  const link_confidence: Unit = 1;
-  const provenance_independence: Unit = independenceFromStamp(stamp);
-  const recency: Unit = 1;
-  const w = computeEdgeWeight(link_confidence, provenance_independence, recency);
-  const id: EdgeId = asEdgeId(`edge:${randomUUID()}`);
-  return {
-    id,
-    from,
-    to,
-    edgeType: EdgeType.SHARED_ENTITY,
-    link_confidence,
-    provenance_independence,
-    recency,
-    w,
-    out_weight_sum: w, // provisional; recomputed across all of `from`'s out-edges
-  };
-}
-
-/** Return a copy of `strand` with `edgeId` appended to its out-edge list. */
-function withOutEdge(strand: Strand, edgeId: EdgeId): Strand {
-  return { ...strand, outEdges: [...strand.outEdges, edgeId] };
-}
-
-/** Return a copy of `strand` with `edgeId` appended to its in-edge list. */
-function withInEdge(strand: Strand, edgeId: EdgeId): Strand {
-  return { ...strand, inEdges: [...strand.inEdges, edgeId] };
 }
 
 // ---------------------------------------------------------------------------
@@ -654,49 +600,24 @@ class IntelligentDbImpl implements IntelligentDb {
     //    provenance root derived from the same stamp.
     const fresh = makeObservedStrand(input, at);
 
-    // 2) Mechanical attachment by SHARED_ENTITY only. The librarian (model) that
-    //    would assert CONFIRMED_LINK relationships is out of scope for the
-    //    scaffold, so we join the new strand to every existing strand about the
-    //    same entity with a mechanical, checkable shared-entity thread.
-    const siblings = this.#store.strandsByEntity(input.entity);
-
-    // ATOMIC: the multi-edge attach (one forward + one back edge per sibling), both
-    // sibling rewrites and the fresh-strand write, AND every out_weight_sum recompute
-    // commit as ONE all-or-nothing unit. A crash mid-attach must not leave a strand
-    // with half its sibling edges or a denominator that disagrees with Σw.
+    // 2) Mechanical attachment by SHARED_ENTITY — represented as an INDEX, not a
+    //    materialized clique. "All facts about entity E are related" is a lookup
+    //    (the store's `strandsByEntity` index, already maintained by `putStrand`),
+    //    NOT an O(N^2) edge mesh. We therefore mint NO SHARED_ENTITY edges here: the
+    //    fresh strand is simply put, and the activation walk DERIVES a fired strand's
+    //    same-entity siblings on the fly from `strandsByEntity` at read time,
+    //    spreading the same share-normalized energy the old per-edge fan delivered
+    //    (so a hot entity still self-starves; spam can't dominate). This makes the
+    //    shared-entity part of writeFact O(1) instead of O(siblings): a hot account
+    //    attribute hammered by a swarm no longer pays an ever-growing fan-out per
+    //    write. CONFIRMED_LINK relationships (the librarian's job, out of scope here)
+    //    and CROSS_WEB_BRIDGE edges are unchanged and still materialized.
+    //
+    // ATOMIC: a single `putStrand`. Trivially all-or-nothing (one write), and the
+    // entity index it maintains is the read-time substrate the walk now derives
+    // siblings from. No sibling rewrites, no edge inserts, no out_weight_sum recompute.
     withTxn(this.#store, () => {
-      // Accumulate edge ids so the strands' adjacency arrays stay authoritative.
-      let freshStrand: Strand = fresh;
-
-      for (const sibling of siblings) {
-        if (sibling.id === fresh.id) continue;
-
-        // Bidirectional shared-entity threads (activation must be able to spread
-        // both ways across a shared-entity join).
-        const out = makeSharedEntityEdge(fresh.id, sibling.id, input.stamp);
-        const back = makeSharedEntityEdge(sibling.id, fresh.id, input.stamp);
-
-        this.#store.putEdge(out);
-        this.#store.putEdge(back);
-
-        // Keep the sibling's adjacency arrays in sync with the new back-edge.
-        const updatedSibling = withInEdge(withOutEdge(sibling, back.id), out.id);
-        this.#store.putStrand(updatedSibling);
-
-        // Fold the forward edge into the fresh strand's out-adjacency, and the
-        // back-edge into its in-adjacency.
-        freshStrand = withInEdge(withOutEdge(freshStrand, out.id), back.id);
-      }
-
-      // 3) Persist the fresh strand (now carrying its full adjacency) and recompute
-      //    the share-normalization denominator over every node whose out-edges changed
-      //    (the fresh strand and each sibling), so the walk can read w / out_weight_sum.
-      this.#store.putStrand(freshStrand);
-      this.#store.recomputeOutWeightSum(fresh.id);
-      for (const sibling of siblings) {
-        if (sibling.id === fresh.id) continue;
-        this.#store.recomputeOutWeightSum(sibling.id);
-      }
+      this.#store.putStrand(fresh);
     });
 
     return fresh.id;

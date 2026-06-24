@@ -466,7 +466,7 @@ describe("SqliteStrandStore — engine drop-in persists writeFact across a resta
     expect(filed?.provenance[0]?.sourceId).toBe(passport.sourceId);
   });
 
-  it("two facts joined by SHARED_ENTITY threads persist their adjacency across a restart", () => {
+  it("two facts about one entity persist their shared-entity join (the entity index) across a restart", () => {
     const identity = makeIdentityLayer();
     const db = createIntelligentDb(store, identity);
 
@@ -482,15 +482,20 @@ describe("SqliteStrandStore — engine drop-in persists writeFact across a resta
     const reopened = createSqliteStore(dbPath);
     store = reopened;
 
+    // SHARED_ENTITY is an INDEX, not a materialized clique: writeFact mints no
+    // sibling edges (the O(N^2) mesh is gone), so durability is about the ENTITY
+    // INDEX, not an adjacency mesh. Both strands persisted under the entity index.
     expect(reopened.strandsByEntity(entity).map((s) => s.id).sort()).toEqual(
       [a, b].sort(),
     );
-    // The bidirectional shared-entity threads minted at write time persisted.
-    expect(reopened.outEdges(b).length).toBeGreaterThan(0);
-    expect(reopened.outEdges(a).length).toBeGreaterThan(0);
-    // And the share-normalization denominator on b's out-edges is a real Σw.
-    for (const e of reopened.outEdges(b)) {
-      expect(e.out_weight_sum).toBeGreaterThan(0);
-    }
+
+    // INTENT preserved (durable recall connectivity): after the restart, a recall
+    // seeded at `a` still lights `b` because the walk derives the same-entity
+    // siblings from the (durable) entity index on the fly.
+    const reopenedDb = createIntelligentDb(reopened, identity);
+    const result = reopenedDb.recall({ seeds: [{ strandId: a, energy: 1 }] });
+    const litIds = result.lit.map((l) => l.strandId);
+    expect(litIds).toContain(a);
+    expect(litIds).toContain(b);
   });
 });

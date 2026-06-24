@@ -344,10 +344,14 @@ describe("END-TO-END SYSTEM COHERENCE — the whole pipeline over one shared SQL
     const s1 = store.getStrand(f1)!;
     expect(s1.origin).toBe(FactOrigin.OBSERVED);
     expect(s1.provenance.some((r) => r.sourceId === winnerSrc)).toBe(true);
-    // The two same-entity strands were joined by bidirectional SHARED_ENTITY threads.
-    const sharedEdges = [...store.allEdges()].filter((e) => e.edgeType === EdgeType.SHARED_ENTITY);
-    expect(sharedEdges.length).toBeGreaterThanOrEqual(2);
-    expect(store.getStrand(f2)!.inEdges.length).toBeGreaterThanOrEqual(1);
+    // The two same-entity strands are joined by the SHARED_ENTITY relation, now an
+    // INDEX rather than a materialized clique (writeFact mints no sibling edges).
+    // INTENT preserved (connectivity): a recall seeded at f1 lights f2 because the
+    // walk derives same-entity siblings from the entity index on the fly.
+    const f1f2 = engine.recall({ seeds: [{ strandId: f1, energy: 1 }] });
+    const f1f2Lit = f1f2.lit.map((l) => l.strandId);
+    expect(f1f2Lit).toContain(f1);
+    expect(f1f2Lit).toContain(f2);
 
     // =====================================================================
     // (c) CORROBORATION -> Beta reputation + a recorded event

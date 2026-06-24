@@ -295,6 +295,35 @@ export const frontierComparator: Comparator<FrontierCandidate> = (a, b) => {
 // ===========================================================================
 
 /**
+ * The UNIFORM per-thread weight of a derived (lazy, index-backed) SHARED_ENTITY
+ * sibling: `computeEdgeWeight(link_confidence=1, provenance_independence=1,
+ * recency=1) = 1`. SHARED_ENTITY is a MECHANICAL, checkable join (not an inferred
+ * relationship), so its link_confidence is 1; a derived sibling has no aged recency
+ * to discount; and the walk reads only the store (it never witnesses identity), so
+ * the independence factor is the mechanical join's 1, not a self-computed value.
+ *
+ * What is load-bearing is that this weight is IDENTICAL for every sibling of a given
+ * entity: with a uniform `w_se`, the K-sibling fan folded into the share denominator
+ * Σ_eff gives each sibling `w_se / (materialized + K·w_se) ≈ 1/K` for a hot entity,
+ * so a high-degree entity self-starves EXACTLY as the old O(N^2) clique did — spam
+ * cannot dominate (the spam-resistance property is preserved structurally).
+ */
+const SIBLING_EDGE_WEIGHT = 1;
+
+/**
+ * Maximum number of derived shared-entity sibling candidates pushed PER POP. A hot
+ * entity (e.g. one bank account with 10k facts) would otherwise make each pop push K
+ * frontier entries, turning the eliminated O(N^2) write cost into an un-bounded
+ * O(popCap·K) read cost. Each sibling's energy is `≈ γ/K`, so beyond a small constant
+ * the candidates are negligible and best-first-dominated; capping the PUSH (while the
+ * share DENOMINATOR still uses the full K) keeps per-pop work O(cap) and total read
+ * work strictly pop-cap-bounded, with the spam-resistance / self-starve theorem
+ * mathematically intact. Connectivity for ordinary entities (a handful of facts) is
+ * unaffected — they have far fewer than `VIRTUAL_SIBLING_FANOUT_CAP` siblings.
+ */
+const VIRTUAL_SIBLING_FANOUT_CAP = 32;
+
+/**
  * Run a share-normalized best-first spreading-activation walk from `seeds`.
  *
  * THE LOOP the body must implement (CLAUDE.md "Share-normalized best-first walk"):
@@ -381,6 +410,24 @@ export function activationWalk(
   // Narrow read-only adapter the controller uses for bridge enumeration etc.
   const view: HaltStoreView = makeHaltStoreView(store);
 
+  // Per-walk cache of each entity's shared-entity sibling set. The web is not
+  // mutated during a walk, so `strandsByEntity(E)` is invariant within one
+  // traversal; caching it means a HOT entity's index is materialized ONCE (not once
+  // per pop). Without this, a 10k-fact entity would rebuild a 10k-element array on
+  // every one of up to popCap pops — re-introducing an O(popCap·K) cost the
+  // pop-cap can't bound. With it, the derived-sibling read is O(K) once + O(cap) per
+  // pop, strictly pop-cap-bounded (the cost the design wants the pop-cap to govern).
+  const entitySiblingCache = new Map<string, readonly Strand[]>();
+  const siblingsOf = (s: Strand): readonly Strand[] => {
+    const key = String(s.entity);
+    let cached = entitySiblingCache.get(key);
+    if (cached === undefined) {
+      cached = store.strandsByEntity(s.entity);
+      entitySiblingCache.set(key, cached);
+    }
+    return cached;
+  };
+
   // 1) SEED. Energize each resolvable seed strand and push it onto the frontier.
   for (const seed of seeds) {
     const s = store.getStrand(seed.strandId);
@@ -416,9 +463,42 @@ export function activationWalk(
     halting.onPop(ctx);
     if (halting.shouldStopLocal(ctx)) break; // phase 1 saturated, or a hard backstop
 
-    // Spread share-normalized, γ-decayed energy to each neighbor:
-    //   child = parent * (edge.w / edge.out_weight_sum) * γ
-    // Share-normalization (w / out_weight_sum) is what starves high-degree hubs.
+    // SHARE-NORMALIZATION DENOMINATOR with the VIRTUAL shared-entity fan folded in.
+    //
+    // SHARED_ENTITY siblings are NOT materialized as edges (writeFact stopped
+    // minting the O(N^2) clique); they are DERIVED at read time from the store's
+    // entity index. To keep a hot entity self-starving EXACTLY as the old clique
+    // did, the virtual sibling fan must share ONE denominator with the materialized
+    // out-edges: each of the K virtual siblings gets `w_se / Σ_eff` where
+    //   Σ_eff = (Σ w over materialized out-edges) + K * w_se,
+    // so a 10k-sibling entity gives each sibling ≈ γ·(w_se / (mat + 10k·w_se)) ≈
+    // γ/10k → it self-starves identically to the old per-edge clique (spam can't
+    // dominate). `w_se` is UNIFORM across siblings — a mechanical shared-entity join
+    // weight `computeEdgeWeight(1,1,1) = 1` (link_confidence 1, recency 1) — and it
+    // is uniformity, not its magnitude, that proves the self-starve property. The
+    // walk reads ONLY the store (it never witnesses identity), so the per-edge
+    // independence is the mechanical join weight, not a self-computed one.
+    // The virtual fan DEGREE is the structural sibling count (every other strand
+    // about this entity), exactly like the old clique's out-degree — it does NOT
+    // depend on which siblings have already fired (the old materialized
+    // `out_weight_sum` summed every sibling edge regardless of traversal state). So
+    // it is `K = |strandsByEntity(entity)| - 1`, read in O(1) from the index array's
+    // length — NO per-pop O(K) scan of the siblings to compute the denominator.
+    const siblings = siblingsOf(strand);
+    const virtualSiblingCount = siblings.length > 0 ? siblings.length - 1 : 0;
+
+    // Materialized Σw over the popped strand's out-edges (the store's denominator).
+    let materializedOutSum = 0;
+    const outEdges = store.outEdges(cand.strandId);
+    for (const e of outEdges) materializedOutSum += e.w;
+
+    const effectiveOutSum =
+      materializedOutSum + virtualSiblingCount * SIBLING_EDGE_WEIGHT;
+
+    // Spread share-normalized, γ-decayed energy to each MATERIALIZED neighbor:
+    //   child = parent * (edge.w / Σ_eff) * γ
+    // Share-normalization (w / Σ_eff) is what starves high-degree hubs; Σ_eff folds
+    // in the virtual sibling fan so the denominator is the true total out-strength.
     for (const nv of store.neighbors(cand.strandId)) {
       // Bridges are NOT part of normal local activation: each lit, un-crossed
       // CROSS_WEB_BRIDGE is owed EXACTLY ONE crossing by the phase-2 mandatory
@@ -428,14 +508,55 @@ export function activationWalk(
       // traversal halting").
       if (nv.edge.edgeType === EdgeType.CROSS_WEB_BRIDGE) continue;
       if (fired.has(nv.edge.to)) continue; // already fired at ≥ energy; nothing to add
-      const child = makeChildCandidate(
-        cand.energy,
-        nv.edge,
-        config.gamma,
-        orderingKeyFor(nv.strand),
-      );
-      if (child.energy <= 0) continue; // weightless / hub-starved thread
-      frontier.push(child);
+      const share = effectiveOutSum > 0 ? nv.edge.w / effectiveOutSum : 0;
+      const childEnergy = cand.energy * share * config.gamma;
+      if (childEnergy <= 0) continue; // weightless / hub-starved thread
+      frontier.push({
+        strandId: nv.edge.to,
+        energy: childEnergy,
+        orderingKey: orderingKeyFor(nv.strand),
+      });
+    }
+
+    // Spread to the DERIVED shared-entity siblings (the lazy index-derived fan).
+    // Each gets the SAME share-normalized, γ-decayed energy a materialized
+    // SHARED_ENTITY edge of uniform weight `SIBLING_EDGE_WEIGHT` would have
+    // delivered, folded into Σ_eff above. This preserves recall connectivity ("a
+    // fact written about an entity is reachable when recalling that entity") now
+    // that the clique is gone.
+    //
+    // BOUNDED FAN-OUT: a HOT entity (one account with 10k facts) must not make each
+    // pop push 10k frontier candidates — that would move the old O(N^2) write cost
+    // into an O(popCap·K) read cost (un-bounded by the pop-cap). The energy each
+    // sibling receives is `≈ γ·w_se/Σ_eff ≈ γ/K`, so beyond a small constant the
+    // candidates are vanishingly weak AND best-first-dominated; we therefore push at
+    // most `VIRTUAL_SIBLING_FANOUT_CAP` un-fired siblings per pop. The DENOMINATOR
+    // still uses the FULL K (above), so the self-starve / spam-resistance property is
+    // mathematically unchanged — a hot entity's siblings each still get the true
+    // `1/K` share; we merely stop enumerating the negligible tail. Per-pop work is
+    // thus O(cap), and total read work is O(popCap · cap) — strictly pop-cap-bounded.
+    // A sibling reachable BOTH here AND via a materialized edge (a hand-built
+    // buildWeb web) is de-duplicated by the `fired` set + best-first dominance: it
+    // fires once at the max energy any path delivers (connectivity additive, never
+    // double-counted).
+    if (virtualSiblingCount > 0) {
+      const siblingShare =
+        effectiveOutSum > 0 ? SIBLING_EDGE_WEIGHT / effectiveOutSum : 0;
+      const siblingEnergy = cand.energy * siblingShare * config.gamma;
+      if (siblingEnergy > 0) {
+        let pushed = 0;
+        for (const sib of siblings) {
+          if (pushed >= VIRTUAL_SIBLING_FANOUT_CAP) break;
+          if (sib.id === cand.strandId) continue;
+          if (fired.has(sib.id)) continue;
+          frontier.push({
+            strandId: sib.id,
+            energy: siblingEnergy,
+            orderingKey: orderingKeyFor(sib),
+          });
+          pushed += 1;
+        }
+      }
     }
   }
 

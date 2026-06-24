@@ -511,7 +511,7 @@ describe("crash recovery — a committed compound op is fully present after an u
     expect(store2.integrityCheck()).toBe(true);
   });
 
-  it("writeFact multi-edge attach is fully present (all sibling edges + denominators) after reopen", () => {
+  it("committed writeFacts survive an unclean reopen and stay recall-connected via the entity index", () => {
     const path = freshPath("writefact-crash");
     let a: StrandId;
     let b: StrandId;
@@ -530,14 +530,27 @@ describe("crash recovery — a committed compound op is fully present after an u
     trackClose(() => db2.close());
     const store2 = createSqliteStore({ db: db2 });
 
-    // All three facts + their full bidirectional shared-entity mesh survived.
+    // SHARED_ENTITY is an INDEX, not a materialized clique: writeFact mints no
+    // sibling edges (the O(N^2) mesh is gone), so the durable artifact is the ENTITY
+    // INDEX. All three committed facts survived the unclean reopen (WAL recovery).
     expect(store2.strandsByEntity(ENTITY).map((s) => s.id).sort()).toEqual([a, b, c].sort());
-    // c's write attached it to BOTH a and b (forward edges) — present after reopen.
-    expect(store2.outEdges(c).length).toBeGreaterThanOrEqual(2);
-    // And every out-edge denominator is a real Σw (the recompute committed in-txn).
-    for (const e of store2.outEdges(c)) {
-      expect(e.out_weight_sum).toBeGreaterThan(0);
-    }
+
+    // INTENT preserved (durable recall connectivity): after the unclean reopen, a
+    // recall seeded at `a` still lights `b` and `c` because the walk derives the
+    // same-entity siblings from the (durable) entity index on the fly.
+    const identity2 = createSourceIdentityLayer({
+      keys: makeKeyRegistry(),
+      anchors: makeAnchorRegistry(),
+      reputation: { scoreOf: () => 0 as Unit },
+      stake: { postedFor: () => 0 },
+    });
+    const engine2 = createIntelligentDb(store2, identity2);
+    const result = engine2.recall({ seeds: [{ strandId: a, energy: 1 }] });
+    const litIds = result.lit.map((l) => l.strandId);
+    expect(litIds).toContain(a);
+    expect(litIds).toContain(b);
+    expect(litIds).toContain(c);
+
     expect(store2.integrityCheck()).toBe(true);
   });
 });

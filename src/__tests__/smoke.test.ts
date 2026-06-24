@@ -237,7 +237,7 @@ describe("Intelligent DB scaffold smoke", () => {
     expect(filed?.provenance.length).toBeGreaterThan(0);
   });
 
-  it("attaches a second fact about the same entity with bidirectional threads", () => {
+  it("attaches a second fact about the same entity, reachable across the shared-entity join", () => {
     const store = createMemoryStore();
     const identity = makeIdentityLayer();
     const db = createIntelligentDb(store, identity);
@@ -250,15 +250,19 @@ describe("Intelligent DB scaffold smoke", () => {
     const a = db.writeFact({ entity, payload: { note: "first" }, stamp });
     const b = db.writeFact({ entity, payload: { note: "second" }, stamp });
 
-    // Both strands are about the entity; the second join minted shared-entity edges.
+    // Both strands are about the entity. SHARED_ENTITY is an INDEX, not a clique:
+    // writeFact materializes NO sibling edges (the O(N^2) mesh is gone), so the
+    // entity index — not an adjacency mesh — is the join.
     const about = store.strandsByEntity(entity);
     expect(about.map((s) => s.id).sort()).toEqual([a, b].sort());
 
-    const sa = store.getStrand(a);
-    const sb = store.getStrand(b);
-    // The mechanical SHARED_ENTITY attach wires bidirectional adjacency.
-    expect((sa?.outEdges.length ?? 0) + (sb?.outEdges.length ?? 0)).toBeGreaterThan(0);
-    expect(store.outEdges(b).length).toBeGreaterThan(0);
+    // INTENT preserved (connectivity / recall): with no materialized edges minted,
+    // the activation walk DERIVES same-entity siblings from the index, so energy
+    // seeded at `a` still reaches `b` across the shared-entity join.
+    const result = db.recall({ seeds: [{ strandId: a, energy: 1 }] });
+    const litIds = result.lit.map((l) => l.strandId);
+    expect(litIds).toContain(a);
+    expect(litIds).toContain(b);
   });
 
   it("independentRootCount collapses same-class roots to multiplicity 1", () => {
@@ -340,8 +344,11 @@ describe("Intelligent DB scaffold smoke", () => {
     const stamp = identity.stampFor(passport.sourceId);
 
     const entity = "entity:berlin" as EntityId;
-    // Two facts about the same entity are joined by bidirectional SHARED_ENTITY
-    // threads at write time, so energy seeded at `a` must reach `b`.
+    // Two facts about the same entity are joined by the SHARED_ENTITY relation,
+    // represented as the entity INDEX (no materialized clique). The activation walk
+    // derives the same-entity siblings at read time, so energy seeded at `a` must
+    // still reach `b` across the shared-entity join — this is the canonical
+    // regression guard that lazy index-derivation preserves recall connectivity.
     const a = db.writeFact({ entity, payload: { note: "first" }, stamp });
     const b = db.writeFact({ entity, payload: { note: "second" }, stamp });
 
