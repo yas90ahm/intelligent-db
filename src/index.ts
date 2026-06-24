@@ -421,3 +421,59 @@ export type {
   RecallResult,
   RatifyInput,
 } from "./api.js";
+
+// ===========================================================================
+// recall — the CUE RESOLVER (the cue→seed entry point) + its pluggable seam
+// ===========================================================================
+
+export {
+  createLexicalCueResolver,
+  tokenize,
+  strandText,
+  DEFAULT_STOPWORDS,
+  DEFAULT_TOP_K,
+  DEFAULT_ENERGY_FLOOR,
+} from "./recall/cueResolver.js";
+
+export type {
+  Cue,
+  CueResolver,
+  LexicalCueResolverOptions,
+} from "./recall/cueResolver.js";
+
+// ===========================================================================
+// agent — the ergonomic AGENT MEMORY FACADE ("attach and use")
+// ===========================================================================
+
+export { createAgentMemory, deriveEntity } from "./agent/agentMemory.js";
+
+export type {
+  AgentMemory,
+  AgentMemoryOptions,
+  RememberInput,
+  RecallOutput,
+  CitedFact,
+  SourceRef,
+} from "./agent/agentMemory.js";
+
+// ===========================================================================
+// mcp — the minimal ZERO-DEP MCP server (pure handler + stdio transport)
+// ===========================================================================
+
+export {
+  handleMcpRequest,
+  TOOLS as MCP_TOOLS,
+  SERVER_INFO as MCP_SERVER_INFO,
+  MCP_PROTOCOL_VERSION,
+  JSONRPC_METHOD_NOT_FOUND,
+  JSONRPC_INVALID_PARAMS,
+  JSONRPC_INTERNAL_ERROR,
+} from "./mcp/handler.js";
+
+export type {
+  McpRequest,
+  McpResponse,
+  McpError,
+} from "./mcp/handler.js";
+
+export { processLine as mcpProcessLine, main as mcpMain } from "./mcp/server.js";

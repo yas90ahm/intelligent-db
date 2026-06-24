@@ -7,11 +7,15 @@
   "engines": {
     "node": ">=20"
   },
+  "bin": {
+    "intelligent-db-mcp": "dist/mcp/server.js"
+  },
   "scripts": {
     "build": "tsc -p .",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
-    "bench": "vitest bench --run"
+    "bench": "vitest bench --run",
+    "mcp": "node dist/mcp/server.js"
   },
   "devDependencies": {
     "@types/node": "^22.10.0",
