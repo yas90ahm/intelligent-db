@@ -237,6 +237,25 @@ export type {
   EmailBinderDeps,
 } from "./identity/binding.js";
 
+// --- REAL DNS-01 prover (node:dns) behind an injected resolver seam ---
+
+export {
+  createDnsDomainProofChecker,
+  createNodeDnsResolver,
+  fakeResolver,
+  deriveOperatorClass,
+  bindDomainViaDns,
+  UNKNOWN_DNS_OPERATOR,
+  DEFAULT_CHALLENGE_PREFIX,
+  DEFAULT_ATTESTATION_TTL_MS as DNS_DEFAULT_ATTESTATION_TTL_MS,
+} from "./identity/binders/dnsDomainProver.js";
+
+export type {
+  DnsResolver,
+  DnsDomainProofCheckerOpts,
+  DnsDomainBindDeps,
+} from "./identity/binders/dnsDomainProver.js";
+
 export { createAnchorRegistry } from "./identity/anchorRegistry.js";
 
 export type {
