@@ -87,6 +87,19 @@ export function vectorTop1(graph: SharedGraph, cueVec: Float32Array): string {
   return bestId;
 }
 
+/**
+ * The top-k highest-cosine nodes to the cue (the vector-kNN seed set). This is the SAME
+ * vector channel the RRF hybrid consumes (its top-s); MultiSeedID seeds the activation
+ * walk at exactly these ids, so the two systems start from an identical vector-kNN entry
+ * and the only difference is expansion+ranking. Deterministic (cosine desc, id tiebreak).
+ */
+export function vectorTopK(graph: SharedGraph, cueVec: Float32Array, k: number): string[] {
+  const ranking = cosineRanking(graph, cueVec);
+  const out: string[] = [];
+  for (let i = 0; i < Math.min(k, ranking.length); i++) out.push(ranking[i]!.id);
+  return out;
+}
+
 /** SHARED SEED = entity-match nodes ∪ { vector top-1 }. Deterministic, de-duplicated. */
 export function sharedSeed(graph: SharedGraph, query: QueryRecord, cueVec: Float32Array): string[] {
   const set = new Set<string>(entityMatchSeed(graph, query));
