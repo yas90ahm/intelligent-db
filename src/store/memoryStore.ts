@@ -160,6 +160,13 @@ export class MemoryStrandStore implements StrandStore {
     this.strandMap.set(id, s);
   }
 
+  putStrandsBatch(strands: Iterable<Strand>): void {
+    // In-memory: no separate durability barrier to amortize — each put is already
+    // atomic-per-call, so the batch is exactly the per-strand loop. Index maintenance
+    // and replace semantics are therefore IDENTICAL to N {@link putStrand} calls.
+    for (const s of strands) this.putStrand(s);
+  }
+
   // -------------------------------------------------------------------------
   // Edges
   // -------------------------------------------------------------------------

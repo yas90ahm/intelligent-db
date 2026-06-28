@@ -243,6 +243,20 @@ export interface IntelligentDb {
   writeFact(input: WriteFactInput): StrandId;
 
   /**
+   * Bulk-ingest equivalent of calling {@link writeFact} N times. Mints the SAME
+   * OBSERVED strands `writeFact` would (per-fact `now()` timestamp, identical
+   * provenance/attachment semantics — see {@link writeFact}), but commits them as
+   * ONE transaction paying ONE durability barrier instead of N. Semantically there
+   * is no difference between `writeFactsBatch([a, b, c])` and
+   * `writeFact(a); writeFact(b); writeFact(c)` in the resulting stored strands; the
+   * batch verb simply amortizes the per-fact mint/serialization round-trips and the
+   * per-write commit cost across the whole input.
+   *
+   * @returns the ids of the newly created strands, in input order (one per input).
+   */
+  writeFactsBatch(inputs: readonly WriteFactInput[]): StrandId[];
+
+  /**
    * Run a traversal. Builds a {@link HaltingController} and a share-normalized
    * best-first activation walk over the store seeded by the cue, then returns the
    * lit strands plus the halt stamp. The model SPEAKS here; it does not confirm.
@@ -621,6 +635,25 @@ class IntelligentDbImpl implements IntelligentDb {
     });
 
     return fresh.id;
+  }
+
+  // -------------------------------------------------------------------------
+  // writeFactsBatch — bulk FILE (same mint path as writeFact, one txn barrier)
+  // -------------------------------------------------------------------------
+
+  writeFactsBatch(inputs: readonly WriteFactInput[]): StrandId[] {
+    // Mirror writeFact EXACTLY per fact: a per-fact `now()` timestamp and the same
+    // `makeObservedStrand` mint (provenance root from the stamp, content hash, entity
+    // index key). The ONLY difference is the put is batched: one `putStrandsBatch`
+    // under one `withTxn`, so the whole ingest pays ONE durability barrier and the
+    // store maintains the SAME entity index as N individual `putStrand` calls would.
+    const fresh = inputs.map((input) => makeObservedStrand(input, now()));
+
+    withTxn(this.#store, () => {
+      this.#store.putStrandsBatch(fresh);
+    });
+
+    return fresh.map((s) => s.id);
   }
 
   // -------------------------------------------------------------------------

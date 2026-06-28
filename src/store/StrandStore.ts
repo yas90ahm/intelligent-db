@@ -160,6 +160,17 @@ export interface StrandStore {
    */
   putStrand(s: Strand): void;
 
+  /**
+   * BULK INGEST: insert/replace MANY strands as one unit. Semantically identical to
+   * calling {@link StrandStore.putStrand} for each element (same entity /
+   * (entity, attribute) index maintenance), but a durable backend commits the whole
+   * batch under ONE transaction / ONE durability barrier instead of N autocommitted
+   * writes. On the in-memory backend this is just the per-strand loop (already
+   * atomic-per-call). Nestable on the durable backend: called inside an open
+   * {@link StrandStore.beginTxn}, the rows enroll in the outer transaction.
+   */
+  putStrandsBatch(strands: Iterable<Strand>): void;
+
   // -- Edges ---------------------------------------------------------------
 
   /**
