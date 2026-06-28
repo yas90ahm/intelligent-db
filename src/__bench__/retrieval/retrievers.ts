@@ -43,6 +43,7 @@ import type {
   ReputationLedger,
   RatificationDeps,
   AnchorBinding,
+  WalkConfig,
 } from "../../index.js";
 
 import { makeStrand, makeEdge, NOW } from "../fixtures.js";
@@ -288,8 +289,13 @@ export interface LitEnergy {
 }
 
 export interface LocomoIdRetriever {
-  /** The FULL lit set (auto-halted) with activation energy, for a precomputed seed. */
-  retrieveLit(seedIds: readonly string[]): LitEnergy[];
+  /**
+   * The FULL lit set (auto-halted) with activation energy, for a precomputed seed.
+   * `config` is passed straight through to `recall()` via `cue.config` (adapter-level
+   * walk tuning — the engine is untouched); when absent the engine's
+   * {@link DEFAULT_WALK_CONFIG} governs the walk.
+   */
+  retrieveLit(seedIds: readonly string[], config?: WalkConfig): LitEnergy[];
   readonly engine: IntelligentDb;
   readonly store: StrandStore;
 }
@@ -349,11 +355,13 @@ export function createLocomoIdRetriever(conv: LocomoConversation): LocomoIdRetri
   return {
     engine,
     store,
-    retrieveLit(seedIds) {
+    retrieveLit(seedIds, config) {
       const present = seedIds.filter((id) => store.getStrand(asStrandId(id)) !== null);
       if (present.length === 0) return [];
       const seeds = present.map((id) => ({ strandId: asStrandId(id), energy: 1 as Unit }));
-      const res = engine.recall({ seeds });
+      // ADAPTER-LEVEL widening: the optional WalkConfig rides through `cue.config`
+      // (DEFAULT_WALK_CONFIG when omitted). No engine source is touched.
+      const res = config === undefined ? engine.recall({ seeds }) : engine.recall({ seeds, config });
       return [...res.lit]
         .map((l) => ({ id: String(l.strandId), energy: l.activation }))
         .sort((a, b) => (b.energy - a.energy) || (a.id < b.id ? -1 : 1));
