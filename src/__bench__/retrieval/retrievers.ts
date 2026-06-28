@@ -47,12 +47,14 @@ import type {
 
 import { makeStrand, makeEdge, NOW } from "../fixtures.js";
 import type { Dataset, QueryRecord, ContradictionPair } from "./dataset.js";
+import { cosine } from "./embed.js";
 import {
   cosineRanking,
   graphExpand,
   sharedSeed,
   type SharedGraph,
 } from "./graph.js";
+import type { LocomoConversation } from "./locomo.js";
 
 // ---------------------------------------------------------------------------
 // Shared minimal identity ports (we exercise reputation + adjudication, not the
@@ -233,3 +235,161 @@ export function hybridRetrieve(
   scored.sort((a, b) => (b.score - a.score) || ((cosOf.get(b.id) ?? 0) - (cosOf.get(a.id) ?? 0)) || (a.id < b.id ? -1 : 1));
   return scored.map((x) => x.id);
 }
+
+// ===========================================================================
+// CYCLE B — LoCoMo arms (same graph, same embeddings, SAME per-query seed)
+// ===========================================================================
+//
+// Fairness: the runner computes ONE seed per query (entity-match ∪ vector top-1) and
+// hands the IDENTICAL seed to all three arms. The graph and the embeddings are shared.
+// The hybrid is RE-TUNED on the LoCoMo dev split; the ID+rerank blend is tuned on dev.
+
+/**
+ * RRF hybrid over a PRECOMPUTED seed (so every arm provably shares the exact seed). The
+ * fusion math is identical to {@link hybridRetrieve}; only the seed is injected rather
+ * than recomputed from a `QueryRecord`. (Cycle A's `hybridRetrieve` is unchanged.)
+ */
+export function hybridRetrieveFromSeed(
+  graph: SharedGraph,
+  seeds: readonly string[],
+  cueVec: Float32Array,
+  cfg: HybridConfig,
+): string[] {
+  const ranking = cosineRanking(graph, cueVec);
+  const cosOf = new Map<string, number>();
+  ranking.forEach((r) => cosOf.set(r.id, r.sim));
+
+  const rankVec = new Map<string, number>();
+  for (let i = 0; i < Math.min(cfg.s, ranking.length); i++) rankVec.set(ranking[i]!.id, i + 1);
+
+  const dist = graphExpand(graph, seeds, cfg.h);
+  const graphIds = [...dist.keys()].sort((a, b) => {
+    const dh = dist.get(a)! - dist.get(b)!;
+    if (dh !== 0) return dh;
+    return (cosOf.get(b)! - cosOf.get(a)!) || (a < b ? -1 : 1);
+  });
+  const rankGraph = new Map<string, number>();
+  graphIds.forEach((id, i) => rankGraph.set(id, i + 1));
+
+  const candidates = new Set<string>([...rankVec.keys(), ...rankGraph.keys()]);
+  const scored = [...candidates].map((c) => {
+    const gv = rankGraph.has(c) ? cfg.alpha / (cfg.k + rankGraph.get(c)!) : 0;
+    const vv = rankVec.has(c) ? (1 - cfg.alpha) / (cfg.k + rankVec.get(c)!) : 0;
+    return { id: c, score: gv + vv };
+  });
+  scored.sort((a, b) => (b.score - a.score) || ((cosOf.get(b.id) ?? 0) - (cosOf.get(a.id) ?? 0)) || (a.id < b.id ? -1 : 1));
+  return scored.map((x) => x.id);
+}
+
+/** A lit strand with the activation energy the walk ended holding. */
+export interface LitEnergy {
+  readonly id: string;
+  readonly energy: number;
+}
+
+export interface LocomoIdRetriever {
+  /** The FULL lit set (auto-halted) with activation energy, for a precomputed seed. */
+  retrieveLit(seedIds: readonly string[]): LitEnergy[];
+  readonly engine: IntelligentDb;
+  readonly store: StrandStore;
+}
+
+/**
+ * Arm 1 (Pure ID) substrate for ONE LoCoMo conversation: mirror every turn as a strand
+ * (entity = speaker, so the engine's bounded entity-index sibling fan carries the
+ * SAME-SPEAKER relation) and materialize every SHARED_ENTITY(mention) + CONFIRMED_LINK
+ * edge (both directions) so the activation walk can traverse them. No contradictions /
+ * reputation pre-earning (LoCoMo plants none); the minimal identity wiring just lets the
+ * engine run. `recall` energizes the shared seed and returns the lit set by activation.
+ */
+export function createLocomoIdRetriever(conv: LocomoConversation): LocomoIdRetriever {
+  const store: StrandStore = createMemoryStore();
+
+  for (const t of conv.turns) {
+    store.putStrand(
+      makeStrand(
+        t.id,
+        t.speaker as unknown as EntityId,
+        `src:${t.speaker}` as SourceId,
+        `spk:${t.speaker}`,
+        { text: t.text },
+        `${t.id}#text` as AttributeKey,
+      ),
+    );
+  }
+
+  const touched = new Set<string>();
+  let edgeSeq = 0;
+  const addDir = (from: string, to: string, type: EdgeType): void => {
+    store.putEdge(makeEdge(`e:${edgeSeq++}:${from}->${to}`, asStrandId(from), asStrandId(to), type));
+    touched.add(from);
+  };
+  for (const e of conv.edges) {
+    const type = e.type === "CONFIRMED_LINK" ? EdgeType.CONFIRMED_LINK : EdgeType.SHARED_ENTITY;
+    addDir(e.from, e.to, type);
+    addDir(e.to, e.from, type);
+  }
+  for (const id of touched) store.recomputeOutWeightSum(asStrandId(id));
+
+  const trusted = new Set<SourceId>();
+  const repCapOf = (s: SourceId): Unit => (trusted.has(s) ? 0.95 : 0.05) as Unit;
+  const clock = (): EpochMs => NOW;
+  const reputation: ReputationLedger = createReputationLedger(repCapOf, undefined, clock);
+  const reputationPort: ReputationLedgerPort = { scoreOf: (s) => reputation.scoreOf(s) };
+  const stakePort: StakeLedgerPort = { postedFor: () => 0 as Unit };
+  const identity = createSourceIdentityLayer({
+    keys: makeKeyRegistry(),
+    anchors: makeAnchorRegistry(),
+    reputation: reputationPort,
+    stake: stakePort,
+  });
+  const ratification: RatificationDeps = { ledger: createPendingLedger(), systemSigner: generatePassport() };
+  const engine = createIntelligentDb(store, identity, null, reputation, ratification);
+
+  return {
+    engine,
+    store,
+    retrieveLit(seedIds) {
+      const present = seedIds.filter((id) => store.getStrand(asStrandId(id)) !== null);
+      if (present.length === 0) return [];
+      const seeds = present.map((id) => ({ strandId: asStrandId(id), energy: 1 as Unit }));
+      const res = engine.recall({ seeds });
+      return [...res.lit]
+        .map((l) => ({ id: String(l.strandId), energy: l.activation }))
+        .sort((a, b) => (b.energy - a.energy) || (a.id < b.id ? -1 : 1));
+    },
+  };
+}
+
+/**
+ * Arm 3 (ID + vector rerank): REORDER pure ID's lit set by a dev-tuned blend of
+ *   blend * normalizedActivation + (1 - blend) * cosine(question, turn).
+ * `blend = 0` is pure cosine rerank; `blend = 1` is the original activation order. The
+ * lit SET (hence the recall ceiling) is unchanged — only the ranking discriminator is
+ * added. Activation is min-max normalized within the lit set so the two signals compose.
+ */
+export function rerankLit(
+  lit: readonly LitEnergy[],
+  graph: SharedGraph,
+  cueVec: Float32Array,
+  blend: number,
+): string[] {
+  if (lit.length === 0) return [];
+  let lo = Infinity;
+  let hi = -Infinity;
+  for (const l of lit) {
+    if (l.energy < lo) lo = l.energy;
+    if (l.energy > hi) hi = l.energy;
+  }
+  const span = hi - lo;
+  const scored = lit.map((l) => {
+    const normE = span > 0 ? (l.energy - lo) / span : 0;
+    const cos = cosine(cueVec, graph.vectorOf(l.id));
+    return { id: l.id, score: blend * normE + (1 - blend) * cos };
+  });
+  scored.sort((a, b) => (b.score - a.score) || (a.id < b.id ? -1 : 1));
+  return scored.map((x) => x.id);
+}
+
+/** Candidate blend weights for the ID+rerank arm (tuned on the LoCoMo dev split). */
+export const RERANK_BLEND_GRID: readonly number[] = [0, 0.1, 0.2, 0.3, 0.4, 0.5, 0.7, 1];
