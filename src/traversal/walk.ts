@@ -376,9 +376,6 @@ const VIRTUAL_SIBLING_FANOUT_CAP = 32;
  * @param config  - tunables (γ, ε, pop-cap, wall-clock, bridge budget, breaker).
  * @param halting - the SOLE authority on when to stop; produces the halt stamp.
  * @returns the lit cluster plus the never-silent halt stamp.
- *
- * @throws Error - the body is not yet implemented (crack-A). Signature + contract
- *   above are stable; the loop is the remaining hard work.
  */
 export function activationWalk(
   store: StrandStore,

@@ -20,47 +20,56 @@ it.
 
 ## Status
 
-**Scaffold.** Every module has complete, accurate types/interfaces, correct function
-signatures, and working implementations of the simple parts (enums, the in-memory store,
-the priority queue, the identity stamp shape, the anchor-cost table, decay pressure, echo
-collapse, demotion, the staking ledger, ed25519 passports). The hard algorithmic cores —
-the activation-walk body, the two-phase halting gates, the tier-eviction permission gates,
-contradiction adjudication, and the retroactive disown sweep — are marked
-`// TODO(crack-A)` / `// TODO(crack-B)` stubs that **throw or return typed placeholders**.
-See [CLAUDE.md](./CLAUDE.md) for the design and the open knobs.
+**Production-grade single-process prototype.** All four roadmap pillars are implemented,
+adversarially tested, and wired end-to-end; the `// TODO(crack-A/B)` stub era is over. The
+activation walk, two-phase halting, eviction gates, contradiction adjudication, the
+retroactive disown sweep, the exact maximum-independent-set independence count
+(Bron–Kerbosch/Tomita), the Beta(α,β)-LCB reputation ledger, and the RFC-6962 Merkle audit
+layer all ship complete. Persistence is SQLite/WAL with atomic, crash-consistent compound
+writes. The library is **zero runtime dependency** (`dependencies: {}` — only `node:`
+builtins; the heavy packages in `devDependencies` serve the benchmark harness only).
+
+`npm test` runs **~259 tests** (Vitest); `npm run typecheck` is clean under a strict config
+(NodeNext, `verbatimModuleSyntax`, `exactOptionalPropertyTypes`, `noUncheckedIndexedAccess`).
+The remaining gaps are deliberately out-of-scope operational/social items — cross-process
+concurrency, real external anchor/witness services, encryption-at-rest, and the unbuilt
+HARDWARE/KYC/STAKE binders — enumerated honestly in the **GAP LIST** in
+[CLAUDE.md](./CLAUDE.md), which is the canonical status document.
 
 ## Module map
 
 | Path | Role | State |
 |---|---|---|
-| `src/core/types.ts` | The shared contract: strand/edge model, enums, branded ids, identity stamp, walk config. | Complete |
-| `src/store/StrandStore.ts` | Pluggable storage contract (no deletion by design; forgetting is downward tier movement). | Complete (interface) |
-| `src/store/memoryStore.ts` | Default in-memory adjacency-map backend + share-normalization bookkeeping. | Complete |
-| `src/traversal/walk.ts` | `MaxPriorityQueue` (complete) + `activationWalk` body. | Walk body: crack-A |
-| `src/traversal/halting.ts` | Two-phase stop controller; counters/budgets/stamp complete. | Phase gates: crack-B |
-| `src/forgetting/tiers.ts` | Tier stepping + `decayPressure` (complete) + eviction permission gates. | Hard gates: crack-A/B |
-| `src/forgetting/consolidation.ts` | Echo collapse, demotion (complete) + contradiction adjudication. | Adjudication: crack-B |
-| `src/identity/keys.ts` | Passport pillar: ed25519 keypairs, sign/verify, deterministic `SourceId`. | Complete |
-| `src/identity/anchors.ts` | Anchor-cost table + independence (set-disjointness) + rep_cap rules. | Complete (self-stack cap: crack-B) |
-| `src/identity/reputation.ts` | Credit-score pillar: up-slow/down-fast rule (complete) + disown sweep. | Sweep: crack-A |
-| `src/identity/stake.ts` | Security-deposit pillar: staking ledger + stake-scaled weight. | Complete |
-| `src/identity/index.ts` | Source-Identity Layer facade composing the four pillars into a stamp. | Complete (Stage-2 disjointness: crack-A) |
-| `src/api.ts` | The three-verb engine: `writeFact` / `recall` / `ratify`. | Wiring complete; drives the cracked cores |
-| `src/index.ts` | Public barrel re-exporting the API above. | Complete |
+| `src/core/types.ts` | The shared contract: strand/edge model, enums, branded ids, identity stamp, walk config. | Implemented |
+| `src/store/StrandStore.ts` | Pluggable storage contract (no deletion by design; forgetting is downward tier movement). | Implemented |
+| `src/store/memoryStore.ts` · `sqliteStore.ts` | In-memory backend + durable SQLite/WAL backend (batch writes, nestable txns, integrity check). | Implemented |
+| `src/traversal/walk.ts` | `MaxPriorityQueue` + share-normalized `activationWalk` body. | Implemented |
+| `src/traversal/halting.ts` | Two-phase stop controller (local saturation + mandatory bridge sweep + hard backstop). | Implemented |
+| `src/forgetting/tiers.ts` | Tier stepping + `decayPressure` + fail-closed eviction permission gates. | Implemented |
+| `src/forgetting/consolidation.ts` | Echo collapse, demotion, decisive-or-defer contradiction adjudication. | Implemented |
+| `src/identity/keys.ts` | Passport pillar: ed25519 keypairs, sign/verify, deterministic `SourceId`. | Implemented |
+| `src/identity/anchors.ts` | Anchor-cost table + independence (set-disjointness) + sublinear self-stack cap + rep_cap. | Implemented |
+| `src/identity/reputation.ts` | Credit-score pillar: Beta(α,β), decay-on-read, LCB readout, exact credit reversal. | Implemented |
+| `src/identity/index.ts` | Source-Identity Layer facade; exact MIS independence count (Bron–Kerbosch/Tomita). | Implemented |
+| `src/ratification/` | Merkle/STH audit log, hash-chained pending ledger, disown taint-closure, corroboration ledger. | Implemented |
+| `src/api.ts` | The engine verbs: `writeFact` / `writeFactsBatch` / `recall` / `ratify` / `adjudicate` / `disown` / `approve`. | Implemented |
+| `src/index.ts` | Public barrel re-exporting the API above. | Implemented |
 
 ## Install / build / test
 
-Requires Node `>=20`.
+Requires Node `>=20` (developed and tested on Node 24).
 
 ```sh
-npm install        # install dev deps (typescript, vitest, @types/node)
+npm install        # install dev deps (typescript, vitest, @types/node, + bench-only DB clients)
 npm run typecheck  # tsc --noEmit (strict, NodeNext, ESM)
 npm run build      # tsc -p .  -> dist/
-npm test           # vitest run  (smoke test: src/__tests__/smoke.test.ts)
+npm test           # vitest run  (~259 tests; benchmark suites are env-gated and skipped)
 ```
 
-The smoke test (`src/__tests__/smoke.test.ts`) imports the public barrel, constructs the
-in-memory store and the Source-Identity Layer, files a fact through the api, and recalls it
-from the shared-entity index. Paths that depend on a crack stub (e.g. `recall()` driving
-the activation walk) are asserted to **throw**, so the suite stays green against the
-scaffold rather than pretending an unfinished core works.
+The suite spans adversarial security tests (Sybil-fleet collapse, contradiction-bomb
+defusal, audit byte-flip detection, Merkle rollback/fork rejection, demote-never-delete,
+mid-op crash rollback) and one end-to-end integration test (`systemCoherence.test.ts`) that
+wires the whole pipeline over a shared SQLite handle. The competitive benchmark suites
+(cross-DB, deployment, retrieval, QA) live under `src/__bench__/` and are gated behind env
+flags (`CROSSDB_BENCH`, `DEPLOY_BENCH`, `RETRIEVAL_BENCH`, `QA_BENCH`) so `npm test` stays
+fast; see `.arbor/sessions/` for their result artifacts and `PAPER.md` for the synthesis.
