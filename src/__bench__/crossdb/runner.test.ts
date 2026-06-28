@@ -34,6 +34,9 @@ import { createLmdbAdapter } from "./adapters/lmdbStore.js";
 import { createDuckDbAdapter } from "./adapters/duckdbStore.js";
 import { createVectorBruteforceAdapter } from "./adapters/vectorBruteforce.js";
 import { createIntelligentDbAdapter } from "./adapters/intelligentDb.js";
+import { createQdrantAdapter } from "./adapters/qdrant.js";
+import { createPgVectorAdapter } from "./adapters/pgvector.js";
+import { createRedisVectorAdapter } from "./adapters/redisVector.js";
 
 // --- Fixed, identical workload across every engine -------------------------------
 
@@ -43,7 +46,7 @@ const H = 3; // honest witnesses asserting TRUE
 const A_VALUES = [5, 50, 200]; // attacker fleet sizes
 const TRIALS_PER_A = 8; // 3 x 8 = 24 attack trials (>= 20)
 
-const OUT_DIR = "D:/Intelligent DB/.arbor/sessions/cross-db-bench/experiments/1";
+const OUT_DIR = "D:/Intelligent DB/.arbor/sessions/cross-db-bench/experiments/1.1";
 
 /** Deterministic generic write workload (N facts, no attack). */
 function genericFacts(): Fact[] {
@@ -75,14 +78,25 @@ function recallCues(): Cue[] {
   return cues;
 }
 
+/** Footprint provenance for a row. The first two are on-disk-fair (comparable). */
+type FootprintKind = "on-disk file" | "db-reported size" | "in-memory estimate";
+
+/** Whether a footprint kind counts toward the FAIR on-disk `bytes_per_fact_disk` column. */
+function isDiskFair(kind: FootprintKind): boolean {
+  return kind === "on-disk file" || kind === "db-reported size";
+}
+
 interface AdapterResult {
   name: string;
   write_hz: number;
   recall_ms: number;
   poison_correct_rate: number;
-  bytes_per_fact: number;
   footprint_bytes: number;
   footprint_source: string;
+  /** FAIR on-disk bytes/fact (on-disk file or DB-reported size); NaN ⇒ not measured on disk. */
+  bytes_per_fact_disk: number;
+  /** Heap-delta bytes/fact over the write loop (kept from cycle-1; approximate). */
+  bytes_per_fact_heap: number;
   poison_trials: number;
   poison_correct: number;
 }
@@ -94,7 +108,7 @@ interface SkipResult {
 
 interface Registration {
   name: string;
-  footprintKind: "on-disk file" | "in-memory estimate" | "heap delta";
+  footprintKind: FootprintKind;
   make: () => MemoryAdapter;
 }
 
@@ -104,7 +118,35 @@ const REGISTRY: Registration[] = [
   { name: "lmdb", footprintKind: "on-disk file", make: createLmdbAdapter },
   { name: "duckdb (@duckdb/node-api)", footprintKind: "on-disk file", make: createDuckDbAdapter },
   { name: "vector-bruteforce (in-proc)", footprintKind: "in-memory estimate", make: createVectorBruteforceAdapter },
-  { name: "IntelligentDB (engine)", footprintKind: "heap delta", make: createIntelligentDbAdapter },
+  // Cycle-2 FAIR FOOTPRINT FIX: ID now writes through an on-disk SQLite backend, so its
+  // footprint is on-disk-vs-on-disk against the sqlite/lmdb/duckdb stores (was heap delta).
+  { name: "IntelligentDB (engine)", footprintKind: "on-disk file", make: createIntelligentDbAdapter },
+  // Cycle-2 Docker-backed vector DBs (graceful-degrade to SKIPPED if Docker/image/connect fails).
+  { name: "Qdrant (docker)", footprintKind: "db-reported size", make: createQdrantAdapter },
+  { name: "Postgres+pgvector (docker)", footprintKind: "db-reported size", make: createPgVectorAdapter },
+  { name: "Redis-Stack (docker)", footprintKind: "db-reported size", make: createRedisVectorAdapter },
+];
+
+/**
+ * Adapters attempted but BLOCKED by an environmental wall. Mem0 (Python) was probed
+ * out-of-band (it is not a JS MemoryAdapter): `pip install mem0ai` succeeds and the LOCAL
+ * embedder path works (sentence-transformers `all-MiniLM-L6-v2` downloads + embeds, and
+ * `add(..., infer=False)` skips LLM fact-extraction), but `mem0.Memory.from_config`
+ * EAGERLY constructs an LLM client at init regardless: with no `llm` config it defaults to
+ * OpenAI and raises `OpenAIError: Missing credentials` (needs `OPENAI_API_KEY`); pointing
+ * `llm.provider` at `ollama` instead only swaps the wall to "`pip install ollama` + a
+ * running local Ollama server + a downloaded LLM" — still an LLM, which the directive
+ * forbids. No API key was supplied. So Mem0 cannot run with NO LLM and NO key.
+ */
+const BLOCKED: SkipResult[] = [
+  {
+    name: "Mem0 (mem0ai, Python)",
+    reason:
+      "mem0ai 2.0.10 installs and the local sentence-transformers embedder works, but " +
+      "Memory.from_config eagerly builds an LLM at init: default ⇒ OpenAIError 'Missing " +
+      "credentials' (no OPENAI_API_KEY); llm.provider=ollama ⇒ needs the `ollama` package + a " +
+      "running local LLM server. No way to run with NO LLM / NO key, and no key was supplied.",
+  },
 ];
 
 // Curated skips for adapters that could not install/build in this environment.
@@ -171,11 +213,16 @@ async function measure(
     const recall_ms = lat[Math.floor(lat.length / 2)] ?? 0;
 
     // --- FOOTPRINT ---
+    // FAIR on-disk column: only on-disk-file / DB-reported sizes count (NaN otherwise),
+    // so ID (now on-disk SQLite) is compared on-disk-vs-on-disk with the other stores.
+    // Heap delta is kept as a SEPARATE, clearly-labelled approximate column.
     const fp = adapter.footprintBytes();
     const heapDelta = Math.max(0, heapAfter - heapBefore);
+    const diskFair = isDiskFair(reg.footprintKind) && fp > 0;
     const footprint_bytes = fp > 0 ? fp : heapDelta;
     const footprint_source = fp > 0 ? reg.footprintKind : "heap delta";
-    const bytes_per_fact = footprint_bytes / N;
+    const bytes_per_fact_disk = diskFair ? fp / N : Number.NaN;
+    const bytes_per_fact_heap = heapDelta / N;
 
     // --- POISON PHASE (cheap-Sybil attack trials) ---
     let poison_correct = 0;
@@ -199,9 +246,10 @@ async function measure(
       write_hz,
       recall_ms,
       poison_correct_rate,
-      bytes_per_fact,
       footprint_bytes,
       footprint_source,
+      bytes_per_fact_disk,
+      bytes_per_fact_heap,
       poison_trials,
       poison_correct,
     });
@@ -222,8 +270,13 @@ function writeArtifacts(results: AdapterResult[]): void {
     config: { N, RECALLS, H, A_VALUES, TRIALS_PER_A, node: process.version, platform: process.platform },
     adapters: results,
     skipped: SKIPS,
+    blocked: BLOCKED,
   };
-  writeFileSync(`${OUT_DIR}/metrics.json`, JSON.stringify(metrics, null, 2), "utf8");
+  writeFileSync(
+    `${OUT_DIR}/metrics.json`,
+    JSON.stringify(metrics, (_k, v) => (typeof v === "number" && Number.isNaN(v) ? null : v), 2),
+    "utf8",
+  );
 
   const lines: string[] = [];
   lines.push("# Cross-DB Baseline — Intelligent DB vs dumb stores under cheap-Sybil poisoning");
@@ -240,15 +293,26 @@ function writeArtifacts(results: AdapterResult[]): void {
       "the IntelligentDB engine collapses the fleet to one independent witness and scores 1.",
   );
   lines.push("");
-  lines.push("| Engine | write_hz | recall_ms (median) | poison_correct_rate | bytes_per_fact | footprint source |");
-  lines.push("|---|---:|---:|---:|---:|:--|");
+  lines.push(
+    "| Engine | write_hz | recall_ms (median) | poison_correct_rate | " +
+      "bytes_per_fact_disk (FAIR) | bytes_per_fact_heap | footprint source |",
+  );
+  lines.push("|---|---:|---:|---:|---:|---:|:--|");
   for (const r of results) {
     lines.push(
       `| ${r.name} | ${fmt(r.write_hz, 0)} | ${fmt(r.recall_ms, 3)} | ` +
         `${fmt(r.poison_correct_rate, 2)} (${r.poison_correct}/${r.poison_trials}) | ` +
-        `${fmt(r.bytes_per_fact, 1)} | ${r.footprint_source} |`,
+        `${fmt(r.bytes_per_fact_disk, 1)} | ${fmt(r.bytes_per_fact_heap, 1)} | ${r.footprint_source} |`,
     );
   }
+  lines.push("");
+  lines.push(
+    "`bytes_per_fact_disk` is the FAIR, apples-to-apples column: on-disk file size " +
+      "(sqlite/lmdb/duckdb/IntelligentDB) or the DB's own reported size (Qdrant/Postgres/Redis), " +
+      "divided by N. `n/a` = the engine is purely in-memory (vector-bruteforce) so no on-disk " +
+      "figure exists. `bytes_per_fact_heap` is the cycle-1 heap-delta proxy, kept for continuity " +
+      "but NOT comparable across engines (it only reflects what stayed on the JS heap).",
+  );
   lines.push("");
   lines.push("## SKIPPED adapters");
   lines.push("");
@@ -258,18 +322,49 @@ function writeArtifacts(results: AdapterResult[]): void {
     for (const s of SKIPS) lines.push(`- **${s.name}** — ${s.reason}`);
   }
   lines.push("");
+  lines.push("## BLOCKED adapters");
+  lines.push("");
+  if (BLOCKED.length === 0) {
+    lines.push("_None._");
+  } else {
+    for (const b of BLOCKED) lines.push(`- **${b.name}** — ${b.reason}`);
+  }
+  lines.push("");
   lines.push("## Notes");
   lines.push("");
   lines.push(
-    "- **Footprint source**: on-disk file = data + WAL file size after flush; in-memory estimate = " +
-      "dense embedding bytes (N x 64 x 4) + value strings; heap delta = `process.memoryUsage().heapUsed` " +
-      "before/after the write loop (approximate — GC was nudged only if `--expose-gc` was passed).",
+    "- **Footprint method, per engine** (how `bytes_per_fact_disk` was measured): " +
+      "node:sqlite / better-sqlite3 / lmdb / duckdb / **IntelligentDB** = on-disk file size " +
+      "(data + WAL/sidecars) after flush; **Qdrant** = `du -sb /qdrant/storage` inside the " +
+      "container (actual segment + WAL bytes); **Postgres+pgvector** = " +
+      "`pg_database_size(current_database())`; **Redis-Stack** = `INFO memory` `used_memory` " +
+      "(Redis is IN-MEMORY, so this is resident dataset RAM, not on-disk bytes — the directive's " +
+      "sanctioned best-effort; flagged here so it is not read as a disk figure); " +
+      "**vector-bruteforce** = in-memory only ⇒ `n/a` for disk. `bytes_per_fact_heap` is the " +
+      "`process.memoryUsage().heapUsed` delta across the write loop (approximate; GC nudged only " +
+      "under `--expose-gc`).",
+  );
+  lines.push(
+    "- **Cycle-2 fairness fix**: cycle-1 mixed ID's heap delta with the stores' on-disk sizes. " +
+      "ID now writes through the real durable `createSqliteStore(<temp file>)` (WAL) backend, so " +
+      "its footprint is on-disk-vs-on-disk with sqlite/lmdb/duckdb. The heap column is retained " +
+      "for continuity but is explicitly NOT cross-comparable.",
   );
   lines.push(
     "- **Dumb-store recall**: SQL/KV engines return the MAJORITY value for the (entity, attribute) " +
-      "(ties broken by most-recent); the vector engine returns the majority value among the top-128 " +
-      "nearest neighbours of the cue embedding. None has a provenance/independence model, so all are " +
-      "poisoned once the cheap fleet out-copies the truth — the honest, expected result.",
+      "(ties broken by most-recent); the vector engines (vector-bruteforce, Qdrant, Postgres+pgvector, " +
+      "Redis-Stack) return the MAJORITY value among the top-256 nearest neighbours of the cue embedding " +
+      "FILTERED to the cued entity (Qdrant payload filter / pg `WHERE entity=` / RediSearch `@entity` TAG). " +
+      "None has a provenance/independence model, so all are poisoned once the cheap fleet out-copies the " +
+      "truth — the honest, expected result (poison_correct_rate = 0).",
+  );
+  lines.push(
+    "- **Docker vector-DB mapping**: every engine embeds the SAME deterministic 64-d hashed vector " +
+      "(`embeddings.ts`) for an (entity, attribute, value) fact, upserts it with a {entity, attribute, " +
+      "value} payload, and answers a recall by entity-filtered vector KNN + majority value. Containers " +
+      "are started in `setup()` (stale same-name container force-removed first), polled for readiness " +
+      "(port + a real client handshake), and force-removed in `close()` so nothing leaks; an image-pull / " +
+      "start / connect failure marks that adapter SKIPPED and the run continues.",
   );
   lines.push(
     "- **IntelligentDB recall**: groups the asserted facts by value and ranks each value by the REAL " +
