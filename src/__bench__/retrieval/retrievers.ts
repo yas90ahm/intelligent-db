@@ -53,6 +53,7 @@ import {
   cosineRanking,
   graphExpand,
   sharedSeed,
+  vectorTopK,
   type SharedGraph,
 } from "./graph.js";
 import type { LocomoConversation } from "./locomo.js";
@@ -401,3 +402,41 @@ export function rerankLit(
 
 /** Candidate blend weights for the ID+rerank arm (tuned on the LoCoMo dev split). */
 export const RERANK_BLEND_GRID: readonly number[] = [0, 0.1, 0.2, 0.3, 0.4, 0.5, 0.7, 1];
+
+// ===========================================================================
+// CYCLE E — MultiSeedID (vector-kNN seeded activation walk)
+// ===========================================================================
+//
+// Diagnosis under test (cycles C+D): PureID's coverage cap is the SEED + walk REACH, not
+// the halt and not the graph (oracle ceiling ≈ the full-lit recall). The hybrid wins
+// coverage because its vector channel retrieves evidence DIRECTLY. MultiSeedID seeds the
+// SAME engine's activation walk at the top-k VECTOR-NEAREST turns to the cue — the SAME
+// vector-kNN entry the RRF hybrid consumes — so the walk STARTS near the evidence and
+// activation+provenance then expands (multi-hop) and the cosine rerank ranks/filters from
+// a good entry. This isolates ID's value-add: given the SAME vector seeds, the ONLY
+// difference vs the hybrid is activation-walk+provenance expansion vs k-hop graph+RRF.
+
+/** The vector-kNN seed sweep for MultiSeedID (tuned on the LoCoMo dev split). */
+export const MULTISEED_K_GRID: readonly number[] = [1, 3, 5, 10, 20];
+
+/**
+ * MultiSeedID retrieve over ONE LoCoMo conversation's ID substrate: seed the activation
+ * walk at the top-`k` cosine-nearest turns to the cue (vector-kNN), run the engine's walk
+ * (auto-halt; optional adapter-level `config`), then output-rerank the lit set by the
+ * cycle-B cosine blend. Returns BOTH the raw lit set (for reachability / cost diagnostics)
+ * and the reranked ranking. The engine substrate is UNTOUCHED — only the seed differs from
+ * the cycle-B single-seed arm and from the hybrid's graph root.
+ */
+export function multiSeedRetrieve(
+  id: LocomoIdRetriever,
+  graph: SharedGraph,
+  cueVec: Float32Array,
+  k: number,
+  blend: number,
+  config?: WalkConfig,
+): { readonly seed: string[]; readonly lit: LitEnergy[]; readonly ranked: string[] } {
+  const seed = vectorTopK(graph, cueVec, k);
+  const lit = config === undefined ? id.retrieveLit(seed) : id.retrieveLit(seed, config);
+  const ranked = rerankLit(lit, graph, cueVec, blend);
+  return { seed, lit, ranked };
+}
