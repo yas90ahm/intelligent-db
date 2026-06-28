@@ -18,16 +18,14 @@
     "mcp": "node dist/mcp/server.js"
   },
   "devDependencies": {
-    "@types/node": "^22.10.0",
-    "typescript": "^5.7.0",
-    "vitest": "^2.1.0"
-  },
-  "dependencies": {
     "@duckdb/node-api": "^1.5.4-r.1",
     "@qdrant/js-client-rest": "^1.18.0",
+    "@types/node": "^22.10.0",
     "better-sqlite3": "^12.11.1",
     "lmdb": "^3.5.6",
     "pg": "^8.22.0",
-    "redis": "^6.0.1"
+    "redis": "^6.0.1",
+    "typescript": "^5.7.0",
+    "vitest": "^2.1.0"
   }
 }
