@@ -19,6 +19,7 @@
   },
   "devDependencies": {
     "@duckdb/node-api": "^1.5.4-r.1",
+    "@huggingface/transformers": "^4.2.0",
     "@qdrant/js-client-rest": "^1.18.0",
     "@types/node": "^22.10.0",
     "better-sqlite3": "^12.11.1",
