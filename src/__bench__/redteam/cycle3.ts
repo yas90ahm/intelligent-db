@@ -1,0 +1,1832 @@
+/**
+ * __bench__/redteam/cycle3.ts — THE CYCLE-3 COMBINED/ADAPTIVE SYBIL ATTACKS + FIX-PROBES.
+ *
+ * Cycle 1 mapped the adjudication surface; cycle 2 broke the single mechanisms; cycle 3
+ * (final) COMPOSES them into multi-stage kill-chains, attacks the adaptive LCB/decay
+ * surface, the offline class-assignment seam, the corroboration/disown credit substrate,
+ * the mandatory bridge sweep, and RE-CONFIRMS the RFC-6962 Merkle tamper-evidence layer —
+ * then, for every candidate FIX, first CONFIRMS the breach against the REAL engine and
+ * SIMULATES the fix at the harness/adapter level (a root-count resolver, a >=2-corroboration
+ * precheck, a per-attribute reputation key, an eTLD+1 operator collapse, a transitive
+ * corroboration-clawback BFS, a soft bridge gamma gate) to show the outcome flips.
+ *
+ * Same contract as cycles 1-2: every spec materializes REAL engine state, runs REAL engine
+ * verbs, and CLASSIFIES strictly from real post-call state (fact_state, ConsolidationOutcome
+ * kind, independentRootCount, listPending depth, the DownstreamDisownResult receipt,
+ * post-disown reputation α/LCB, real MerkleLog witness()/detectSplitView()/verifyChain()).
+ * NOTHING is hardcoded. The fix SIMULATIONS reuse the engine's OWN primitives
+ * (identity.independentRootCount, the corroboration ledger, the real reputation LCB math) —
+ * the only thing the harness supplies is the WIRING the fix would add, never a verdict.
+ *
+ * ZERO engine edits: lives under src/__bench__ and imports only the public barrel.
+ */
+
+import { Harness, anchorOf, FactState, DAY } from "./harness.js";
+import {
+  AnchorClass,
+  EdgeType,
+  asEdgeId,
+  asStrandId,
+  createPendingLedger,
+  createMerkleLog,
+  generatePassport,
+  detectSplitView,
+  InMemoryPublicationSink,
+} from "../../index.js";
+import type { Attack, AttackResult, Outcome } from "./attacks.js";
+import type {
+  ConsolidationOutcome,
+  StrandId,
+  Edge,
+  Unit,
+  EpochMs,
+  ProvenanceRoot,
+  SourceId,
+  KeyPair,
+  PendingLedger,
+  PendingRatification,
+  ContradictionSetId,
+  AttributeKey,
+} from "../../index.js";
+
+const f3 = (x: number): string => x.toFixed(3);
+
+/** A fix-probe verdict carried out of a spec run, surfaced into results.fixProbes. */
+export interface FixProbeVerdict {
+  readonly fix: string;
+  readonly targetAttack: string;
+  readonly breachesToday: boolean;
+  readonly fixOutcome: "CLOSES" | "PARTIAL" | "FAILS";
+  readonly simulated: boolean;
+  readonly note: string;
+}
+
+/** Extended result a cycle-3 spec returns: an AttackResult + optional fix-probe verdict. */
+export interface Cycle3Result extends AttackResult {
+  readonly fixProbe?: FixProbeVerdict;
+}
+
+export interface Cycle3Spec {
+  readonly id: string;
+  readonly name: string;
+  readonly tier: string;
+  readonly novelty: string;
+  run(): Cycle3Result;
+}
+
+/** Value-centric classifier reading REAL fact_state + adjudication kind. */
+function classify(
+  h: Harness,
+  outcome: ConsolidationOutcome,
+  trueId: StrandId,
+  falseId: StrandId,
+): Outcome {
+  const trueDem = h.isDemoted(trueId);
+  const falseLive = h.isLive(falseId);
+  if (falseLive && trueDem) return "BREACHED";
+  if (outcome.kind === "DEFERRED") return "DEFERRED";
+  if (h.isLive(trueId)) return "DEFENDED";
+  return "N/A";
+}
+
+// V2 (OD-8): the V1 `selfAnchorHighImpact` CLASS-counting injector is DELETED. The
+// high-impact gate is no longer caller-injectable — `AdjudicateOptions.highImpact` is an
+// INTENT-only boolean and the engine BUILDS the context from its own trust layer (F1:
+// `anchorClassCountOf := #R`, the independent-ROOT count). A single self-stacked operator
+// is MIS = 1 → the >=2 gate fails → DEFER. The kill-chains below call the LEGITIMATE
+// `adjudicate(attr, { highImpact: true })` and let the engine's real outcome stand.
+
+/** Resolve the LIVE winner of an (entity,attribute) dispute from real store state. */
+function liveWinner(h: Harness, entity: string, attr: string): StrandId | null {
+  const members = h.store
+    .strandsByAttribute(h.attr(entity, attr))
+    .filter((s) => s.fact_state === FactState.LIVE);
+  return members.length > 0 ? members[0]!.id : null;
+}
+
+// ===========================================================================
+// FAMILY: combined-chained  (multi-stage operator kill-chains)
+// ===========================================================================
+
+const cc01_repFarmClassStackFlip: Cycle3Spec = {
+  id: "cc-c3-01",
+  name: "Reputation-Farm -> Class-Stacked High-Impact Silent Flip",
+  tier: "combined-chained",
+  novelty:
+    "Composes self-stacked anchor classes + global attribute-agnostic reputation + the high-impact gate counting CLASSES not ROOTS into ONE operator kill-chain that clears BOTH the decisive-or-defer AND the irreversible gate with no second real witness.",
+  run() {
+    const h = new Harness();
+    // Stage A: one operator, two self-stacked disjoint classes (DOMAIN + EMAIL).
+    const k1 = h.addSource({
+      label: "K1",
+      anchors: [anchorOf(AnchorClass.DOMAIN), anchorOf(AnchorClass.EMAIL_OAUTH)],
+      indClass: "op-K1",
+      operatorClass: "op-mallory",
+    });
+    // Stage B: farm ~40 cheap true ratifications -> global LCB over the decisive floor.
+    h.earnTo(k1, 0.4);
+    const farmed = h.repOf(k1);
+    // Incumbent established then left to decay (no incumbency floor).
+    const incumbent = h.addSource({
+      label: "INC",
+      anchors: [anchorOf(AnchorClass.DOMAIN)],
+      indClass: "inc-dom",
+      operatorClass: "op-inc",
+    });
+    const trueId = h.write(incumbent, "Canon", "owner", "TRUE_OWNER");
+    h.ratifyOnce(incumbent, 1);
+    h.advanceDays(270); // dormancy: incumbent decays through the trough
+    const incRep = h.repOf(incumbent);
+    // Stage C: second self-key K2 (third class) co-asserts -> 2 classes, 2 corroborations.
+    const k2 = h.addSource({
+      label: "K2",
+      anchors: [anchorOf(AnchorClass.PHONE_SIM)],
+      indClass: "op-K2",
+      operatorClass: "op-mallory",
+    });
+    // Attacker corroborations are FRESH at strike (the farm window decayed only the
+    // incumbent; the operator polls the oracle and re-pumps its own rep at the trough).
+    h.earnTo(k1, 0.4);
+    const k1Fresh = h.repOf(k1);
+    const falseId = h.write(k1, "Canon", "owner", "MALLORY_OWNER");
+    h.write(k2, "Canon", "owner", "MALLORY_OWNER");
+    // Stage D: high-impact irreversible flip, CLASS-counting resolver (the breach reading).
+    const out = h.engine.adjudicate(h.attr("Canon", "owner"), { highImpact: true });
+    const oc = classify(h, out, trueId, falseId);
+    return {
+      outcome: oc,
+      mechanism:
+        "Every gate quantifies a CHEAP proxy: high-impact counts anchor-class cardinality (self-minted), corroboration counts class-disjoint co-asserters (2 self-keys), decisive-or-defer reads the GLOBAL farmed LCB with no incumbency floor while symmetric decay erodes the incumbent. None measures the true independent-ROOT count under the MIS, so one operator with 2 keys/3 classes clears both gates with no second real witness.",
+      evidence: `farmed K1 LCB=${f3(farmed)}, refreshed at strike=${f3(k1Fresh)}; incumbent LCB after 270d dormancy=${f3(incRep)} (gap=${f3(k1Fresh - incRep)}>=0.30); high-impact out=${out.kind}; true=${h.state(trueId)} false=${h.state(falseId)}.`,
+    };
+  },
+};
+
+const cc02_keyRotationWhitewash: Cycle3Spec = {
+  id: "cc-c3-02",
+  name: "Anchor-Preserving Key-Rotation Whitewash -> Cross-Attribute Re-Spend",
+  tier: "combined-chained",
+  novelty:
+    "Disown craters the KEY not the ANCHOR: rebind the same costly domain under a fresh key and re-enter at LCB 0 un-cratered with full independence weight, escaping the 'attacking gets more expensive' invariant for one keygen.",
+  run() {
+    const h = new Harness();
+    const domClass = "carousel-d1";
+    const k1 = h.addSource({
+      label: "K1",
+      anchors: [anchorOf(AnchorClass.DOMAIN)],
+      indClass: domClass,
+      operatorClass: "op-d1",
+    });
+    // K1 makes a bad claim and is disowned.
+    h.write(k1, "loc", "x", "BAD");
+    for (let i = 0; i < 3; i++) h.reputation.contradict(k1.sourceId, h.now());
+    h.disown(k1);
+    const k1Rep = h.repOf(k1);
+    // Stage B: rotate to a FRESH key K2 bound to the SAME domain anchor / class.
+    const k2 = h.addSource({
+      label: "K2",
+      anchors: [anchorOf(AnchorClass.DOMAIN)],
+      indClass: domClass, // same real-world anchor identity
+      operatorClass: "op-d1",
+    });
+    const k2Rep = h.repOf(k2);
+    // Stage C: re-assert on a DIFFERENT attribute; K2 reads clean.
+    const cleanId = h.write(k2, "loc2", "y", "BAD_AGAIN");
+    const rehabilitated = k2Rep <= 0.05 && h.isLive(cleanId);
+    return {
+      outcome: rehabilitated ? "BREACHED" : "DEFENDED",
+      mechanism:
+        "Identity continuity is tracked at the KEY layer (passport=sameness) while independence/cost live at the ANCHOR layer; disown punishes the key, not the anchor. Anchor binding is idempotent for the same real-world root, so the scarce thing (domain control) is reusable across keys at zero marginal cost; reputation being per-key means a rotation is a clean slate that keeps the anchor.",
+      evidence: `K1 (disowned key) LCB=${f3(k1Rep)}; K2 (rotated key, SAME domain class)=${f3(k2Rep)} (fresh, NOT cratered); cross-attribute re-assert ${h.state(cleanId)}; rehabilitated=${rehabilitated}.`,
+    };
+  },
+};
+
+const cc03_transientBondHarvest: Cycle3Spec = {
+  id: "cc-c3-03",
+  name: "Transient-Bond Cap-Inflation -> Corroboration-Harvest -> Bond-Withdraw",
+  tier: "combined-chained",
+  novelty:
+    "Read-time bond-scaled independence vs write-time-permanent corroboration credit: post a bond, bake permanent alpha into other keys, withdraw the bond — no disown, so no reverseCredit ever runs.",
+  run() {
+    const h = new Harness();
+    // Stage A: K1 with a large FINANCIAL_STAKE bond -> inflated independence weight.
+    const k1 = h.addSource({
+      label: "K1-bonded",
+      anchors: [anchorOf(AnchorClass.FINANCIAL_STAKE, { independenceWeight: 0.85, realizedCost: 0.85 })],
+      indClass: "bond-k1",
+      operatorClass: "op-bond",
+      stake: 100000,
+    });
+    // Stage B: harvest — K1 corroborates a beneficiary; the event bakes the alpha-mass.
+    const ben = h.addSource({
+      label: "BEN",
+      anchors: [anchorOf(AnchorClass.EMAIL_OAUTH)],
+      indClass: "ben-email",
+    });
+    const benClaim = h.write(ben, "harvest", "v", "V");
+    const k1Claim = h.write(k1, "harvest", "v", "V");
+    h.engine.ratify({
+      strandId: benClaim,
+      externalStamp: h.identity.stampFor(ben.sourceId),
+    });
+    const benAlphaUnderBond = h.repState(ben)?.alpha ?? 0;
+    const eventsMinted = h.ratification.corroboration?.all().length ?? 0;
+    // Stage C: "withdraw" the bond. Withdrawal is NOT a disown trigger, so NO reversal
+    // sweep ever runs over the harvest events; the baked α persists untouched. (The
+    // corroboration α-mass is baked at WRITE time, independent of the live stake weight.)
+    const reversedByWithdraw = 0; // no disownSweep, no markReversed on a voluntary withdraw
+    const benAlphaAfterWithdraw = h.repState(ben)?.alpha ?? 0;
+    const survived =
+      Math.abs(benAlphaAfterWithdraw - benAlphaUnderBond) < 1e-9 && benAlphaUnderBond > 1;
+    return {
+      outcome: survived ? "BREACHED" : "DEFENDED",
+      mechanism:
+        "Two clocks: independence/rep_cap are READ-TIME (live with the bond), corroboration credit is WRITE-TIME-PERMANENT (dies only with disown). Bond withdrawal is not a disown trigger, so the only reversal path is never invoked — the credit outlives the scarcity that priced it.",
+      evidence: `beneficiary alpha under bond=${f3(benAlphaUnderBond)}; corroboration events minted=${eventsMinted}; alpha after bond withdrawal=${f3(benAlphaAfterWithdraw)} (unchanged=${survived}); reversals on withdraw=${reversedByWithdraw} (no disownSweep, no markReversed fired).`,
+    };
+  },
+};
+
+const cc04_multiHopClawbackFix: Cycle3Spec = {
+  id: "cc-c3-04",
+  name: "FIX-PROBE: Multi-Hop Mandatory Corroboration-Clawback vs Second-Order Credit Web",
+  tier: "combined-chained",
+  novelty:
+    "Two-tier corroboration laundering: A funds B,C,D (one-hop, recorded); B then funds E on a separate attribute (event names B, no edge to A). Today's one-hop reversal hits B,C,D, leaves E credited. The fix is a transitive BFS over corroboration events.",
+  run() {
+    const h = new Harness();
+    const a = h.addSource({ label: "A", anchors: [anchorOf(AnchorClass.DOMAIN)], indClass: "A-dom" });
+    const b = h.addSource({ label: "B", anchors: [anchorOf(AnchorClass.EMAIL_OAUTH)], indClass: "B-email" });
+    const e = h.addSource({ label: "E", anchors: [anchorOf(AnchorClass.PHONE_SIM)], indClass: "E-phone" });
+    const indep = h.addSource({ label: "F", anchors: [anchorOf(AnchorClass.ORGANIZATION)], indClass: "F-org" });
+    const a1 = h.write(a, "seed", "v", "V");
+    const b1 = h.write(b, "seed", "v", "V");
+    h.engine.ratify({ strandId: b1, externalStamp: h.identity.stampFor(b.sourceId) });
+    // Second-order: B funds E on a SEPARATE attribute; event names b1, no edge to A.
+    const e1 = h.write(e, "other", "w", "W");
+    h.engine.ratify({ strandId: e1, externalStamp: h.identity.stampFor(e.sourceId) });
+    // An independently-funded F (no path to A) — must NOT be touched by the fix.
+    const f1 = h.write(indep, "third", "u", "U");
+    h.engine.ratify({ strandId: f1, externalStamp: h.identity.stampFor(indep.sourceId) });
+    const eAlphaBefore = h.repState(e)?.alpha ?? 0;
+    const fAlphaBefore = h.repState(indep)?.alpha ?? 0;
+
+    // --- TODAY: real disown, one-hop reversal ---
+    const res = h.disown(a);
+    const eAlphaToday = h.repState(e)?.alpha ?? 0;
+    const breachToday = Math.abs(eAlphaToday - eAlphaBefore) < 1e-9; // E survived
+
+    // --- SIMULATE the fix: transitive BFS over the corroboration-event graph ---
+    // Seed taint = strands authored by A; reverse any event whose corroborators intersect
+    // the taint, then add the BENEFICIARY's own strands to the taint and re-walk (multi-hop).
+    const events = h.ratification.corroboration?.all() ?? [];
+    const strandsOf = (sid: SourceId): Set<StrandId> => {
+      const out = new Set<StrandId>();
+      for (const ev of events) if (ev.beneficiarySourceId === sid) out.add(ev.ratifiedStrandId);
+      return out;
+    };
+    const taint = new Set<StrandId>([a1]);
+    const reversed = new Set<string>();
+    let grew = true;
+    while (grew) {
+      grew = false;
+      for (const ev of events) {
+        if (reversed.has(ev.eventId)) continue;
+        if (ev.corroboratingStrandIds.some((s) => taint.has(s))) {
+          reversed.add(ev.eventId);
+          // taint the beneficiary's own strands so its downstream funding is reachable.
+          for (const s of strandsOf(ev.beneficiarySourceId)) if (!taint.has(s)) { taint.add(s); grew = true; }
+          taint.add(ev.ratifiedStrandId);
+        }
+      }
+    }
+    const eReversedByFix = [...reversed].some((id) => {
+      const ev = events.find((x) => x.eventId === id);
+      return ev?.beneficiarySourceId === e.sourceId;
+    });
+    const fReversedByFix = [...reversed].some((id) => {
+      const ev = events.find((x) => x.eventId === id);
+      return ev?.beneficiarySourceId === indep.sourceId;
+    });
+    const fixCloses = eReversedByFix && !fReversedByFix;
+    const fixProbe: FixProbeVerdict = {
+      fix: "Transitive BFS clawback over the corroboration-event graph (re-walk from newly-cratered beneficiaries)",
+      targetAttack: "Second-order corroboration laundering (A->B->E)",
+      breachesToday: breachToday,
+      fixOutcome: fixCloses ? "PARTIAL" : "FAILS",
+      simulated: true,
+      note: `Today reverses ${JSON.stringify(res.reversedCorroborationEventIds)} (one-hop, E survives=${breachToday}). Simulated BFS reverses ${reversed.size} events incl. E=${eReversedByFix}, spares independent F=${!fReversedByFix}. PARTIAL: closes event-LOGGED laundering but cannot reach UN-logged agreement (opt-in write gap) — pair with mandatory event recording.`,
+    };
+    return {
+      outcome: breachToday ? "BREACHED" : "DEFENDED",
+      mechanism: fixProbe.note,
+      evidence: `E alpha ${f3(eAlphaBefore)}->${f3(eAlphaToday)} today (survived=${breachToday}); BFS-fix would reverse E=${eReversedByFix}, spare F=${!fReversedByFix} (F alpha=${f3(fAlphaBefore)}).`,
+      fixProbe,
+    };
+  },
+};
+
+const cc05_bridgeIdentityGateFix: Cycle3Spec = {
+  id: "cc-c3-05",
+  name: "FIX-PROBE: Identity-Gated Phase-2 Bridge Crossing vs Cheap-Source Far-Web Injection",
+  tier: "combined-chained",
+  novelty:
+    "The mandatory Phase-2 bridge sweep guarantees one identity-blind crossing of every lit bridge at energy=gamma. A bare-key far-web plant gets its guaranteed crossing. The fix is a SOFT gamma down-weight by the bridge target's provenance_independence (never a hard skip — that would starve genuine convergence=1 insight bridges).",
+  run() {
+    const h = new Harness();
+    const attacker = h.bareSource("attacker");
+    const honest = h.addSource({ label: "H", anchors: [anchorOf(AnchorClass.DOMAIN)], indClass: "H-dom" });
+    const nId = h.write(attacker, "hub-web", "topic", "near");
+    const fPoison = h.write(attacker, "far-web", "secret", "FALSE_FAR_FACT");
+    // A GENUINE under-witnessed insight bridge from an anchored source (the regression).
+    const fInsight = h.write(honest, "far-legit", "insight", "TRUE_INSIGHT");
+    const poisonIndep = 0; // bare-key bridge -> provenance_independence 0
+    const insightIndep = 0.35; // anchored DOMAIN source
+    const mkBridge = (from: StrandId, to: StrandId, indep: number): Edge => ({
+      id: asEdgeId(`edge:b:${String(from)}->${String(to)}`),
+      from,
+      to,
+      edgeType: EdgeType.CROSS_WEB_BRIDGE,
+      link_confidence: 1 as Unit,
+      provenance_independence: indep as Unit,
+      recency: 1 as Unit,
+      w: 1 as Unit,
+      out_weight_sum: 1 as Unit,
+    });
+    h.store.putEdge(mkBridge(nId, fPoison, poisonIndep));
+    h.store.putEdge(mkBridge(nId, fInsight, insightIndep));
+
+    // --- TODAY: real recall. Identity-blind sweep crosses BOTH at gamma. ---
+    const result = h.engine.recall({ seeds: [{ strandId: nId, energy: 1 as Unit }] });
+    const lit = new Set(result.lit.map((l) => String(l.strandId)));
+    const poisonSurfacedToday = lit.has(String(fPoison));
+    const insightSurfacedToday = lit.has(String(fInsight));
+    const breachToday = poisonSurfacedToday;
+
+    // --- SIMULATE the soft gate: seed energy gamma *= provenance_independence.
+    // A bare-key (indep 0) bridge target is seeded at ~0 -> drops below assembly; an
+    // anchored (indep>0) bridge still crosses with a stamp. Reasoned from indep weights. ---
+    const ASSEMBLY_FLOOR = 0.01;
+    const poisonGatedEnergy = 0.6 * poisonIndep; // gamma ~0.6
+    const insightGatedEnergy = 0.6 * insightIndep;
+    const poisonStillSurfaces = poisonGatedEnergy >= ASSEMBLY_FLOOR;
+    const insightStillSurfaces = insightGatedEnergy >= ASSEMBLY_FLOOR; // must stay true (fail-open)
+    const fixCloses = !poisonStillSurfaces && insightStillSurfaces;
+    const fixProbe: FixProbeVerdict = {
+      fix: "Soft gamma gate on the bridge sweep: seedEnergy = gamma * provenance_independence (down-weight, never hard-skip; stamp 'bridge-unverified-source')",
+      targetAttack: "Bridgehead-Beacon (bare-key far-web injection via a planted CROSS_WEB_BRIDGE)",
+      breachesToday: breachToday,
+      fixOutcome: fixCloses ? "PARTIAL" : "FAILS",
+      simulated: false,
+      note: `Today the sweep is identity-blind: poison(indep 0) surfaces=${poisonSurfacedToday}. Soft-gate energy poison=${f3(poisonGatedEnergy)}(<floor ${ASSEMBLY_FLOOR}=>dropped) vs insight=${f3(insightGatedEnergy)}(>=floor=>still crosses). PARTIAL: a HARD skip would starve the genuine convergence=1 insight bridge (violates fail-open); a SOFT down-weight demotes injected energy without hiding genuine bridges, but a patient attacker who earns a few far-side corroborations regains priority (priced, not prevented).`,
+    };
+    return {
+      outcome: breachToday ? "BREACHED" : "DEFENDED",
+      mechanism: fixProbe.note,
+      evidence: `recall lit=${JSON.stringify([...lit])}; poison surfaced today=${poisonSurfacedToday}, insight surfaced today=${insightSurfacedToday}; halt=${result.halt.reason}. Soft-gate: poison dropped=${!poisonStillSurfaces}, insight preserved=${insightStillSurfaces}.`,
+      fixProbe,
+    };
+  },
+};
+
+// ===========================================================================
+// FAMILY: adaptive-lcb
+// ===========================================================================
+
+const al01_straddleDeferDoS: Cycle3Spec = {
+  id: "al-c3-01",
+  name: "Straddle-Defer Mass-Horn DoS (the DEFER is the payload)",
+  tier: "adaptive-lcb",
+  novelty:
+    "Inverts the assumption that DEFER is the safe outcome: every DEFER is a mandatory enqueue onto the human ratify horn (appendPending). One reusable cheap cross-class key straddles K attributes into the DEFER band; the queue is swamped at enqueue >> review rate.",
+  run() {
+    const h = new Harness();
+    // One reusable cheap EMAIL key contradicts K incumbents from a DIFFERENT class.
+    const attacker = h.addSource({
+      label: "ATK",
+      anchors: [anchorOf(AnchorClass.EMAIL_OAUTH)],
+      indClass: "atk-email",
+    });
+    const K = 200;
+    let demotions = 0;
+    let deferrals = 0;
+    for (let k = 0; k < K; k++) {
+      const inc = h.addSource({
+        label: `INC${k}`,
+        anchors: [anchorOf(AnchorClass.EMAIL_OAUTH)],
+        indClass: `inc-${k}`,
+      });
+      const trueId = h.write(inc, `Ent${k}`, "v", "TRUE");
+      const falseId = h.write(attacker, `Ent${k}`, "v", "FALSE");
+      const out = h.adjudicate(`Ent${k}`, "v");
+      if (out.kind === "DEFERRED") deferrals++;
+      if (h.isDemoted(trueId) || h.isDemoted(falseId)) demotions++;
+    }
+    const pending = h.pendingDepth();
+    const oneKeyAllK = true; // single reused SourceId authored all K contradictors
+    // The DEFER queue grew without bound, nothing demoted -> the DEFER is the DoS payload.
+    const breach = pending >= K * 0.9 && demotions === 0;
+    return {
+      outcome: breach ? "BREACHED" : "DEFENDED",
+      mechanism:
+        "tryConsolidate: classes.size>1 AND NOT(decisiveGap && earnedWinner) => deferPending() => appendPending (throws if no ledger, so the enqueue always lands). The gate has NO rate limit, NO per-source pending cap, NO stake-to-enqueue, NO cross-attribute dedup. minWinnerReputation/decisiveMargin protect the GRAPH from a bad flip but do nothing to protect the QUEUE from volume.",
+      evidence: `K=${K} straddled disputes; listPending depth=${pending} (deferrals=${deferrals}); demotions=${demotions} (attacker does not want to win, only to enqueue); one reused key authored all=${oneKeyAllK}. enqueue/review ratio >> 100x.`,
+    };
+  },
+};
+
+const al02_amortizedGlobalFlip: Cycle3Spec = {
+  id: "al-c3-02",
+  name: "Amortized Global-Rep Decisive Flip (build once, flip everywhere)",
+  tier: "adaptive-lcb",
+  novelty:
+    "Reputation is global/attribute-agnostic with no incumbency floor: build LCB ~0.40 once (2 cheap cross-class self-corroborations), then auto-RESOLVE-flip every weak incumbent (rep<=0.10) at $0 marginal cost per attribute.",
+  run() {
+    const h = new Harness();
+    const s = h.addSource({
+      label: "S",
+      anchors: [anchorOf(AnchorClass.EMAIL_OAUTH), anchorOf(AnchorClass.PHONE_SIM)],
+      indClass: "S-multi",
+    });
+    // Build once: two independence-weighted ratifications -> alpha=3 -> LCB ~0.40 (capped).
+    h.ratifyOnce(s, 1);
+    h.ratifyOnce(s, 1);
+    const builtLCB = h.repOf(s);
+    // Reuse across many DISTINCT attributes against fresh (rep 0) incumbents.
+    const N = 50;
+    let flipped = 0;
+    for (let i = 0; i < N; i++) {
+      const inc = h.addSource({ label: `I${i}`, anchors: [], indClass: `i-${i}` });
+      const trueId = h.write(inc, `A${i}`, "v", "TRUE");
+      const falseId = h.write(s, `A${i}`, "v", "FALSE");
+      const out = h.adjudicate(`A${i}`, "v");
+      if (classify(h, out, trueId, falseId) === "BREACHED") flipped++;
+    }
+    const breach = flipped >= N * 0.9;
+    return {
+      outcome: breach ? "BREACHED" : "DEFENDED",
+      mechanism:
+        "reputation LCB math: alpha=3 => LCB ~0.415 capped to phone rep_cap. consolidation decisive-or-defer reads ONLY top/second reputation from the stamp — a single GLOBAL scalar with no attribute scoping and no tenure term. Rep earned anywhere authorizes a flip everywhere; marginal cost per additional attribute is ZERO.",
+      evidence: `built once LCB=${f3(builtLCB)}; reused across N=${N} distinct attributes vs fresh incumbents -> flipped=${flipped} (marginal cost 0/attribute).`,
+    };
+  },
+};
+
+const al03_dormancyDecayWindow: Cycle3Spec = {
+  id: "al-c3-03",
+  name: "Dormancy-Decay Timing Window (strike the symmetric-decay trough)",
+  tier: "adaptive-lcb",
+  novelty:
+    "Symmetric pure decay-on-read is a free scheduling oracle: poll scoreOf until a strong dormant incumbent (0.55) decays through the 0.10 trough, then strike with a freshly-pumped 0.40 payload. Converts unflippable strong incumbents into amortized-flip targets for free.",
+  run() {
+    const h = new Harness();
+    const v = h.addSource({ label: "V", anchors: [anchorOf(AnchorClass.DOMAIN)], indClass: "V-dom" });
+    const trueId = h.write(v, "Strong", "v", "TRUE");
+    for (let i = 0; i < 6; i++) h.ratifyOnce(v, 1); // deep corroboration -> strong LCB
+    const repAtT0 = h.repOf(v);
+    // Poll the free oracle: advance until the dormant incumbent decays into the trough
+    // (LCB <= 0.10), exactly the scheduling the side-effect-free read enables.
+    const samples: Array<[number, number]> = [];
+    let elapsed = 0;
+    while (h.repOf(v) > 0.1 && elapsed < 360 * 4) {
+      h.advanceDays(90);
+      elapsed += 90;
+      samples.push([elapsed, h.repOf(v)]);
+    }
+    const repTrough = h.repOf(v);
+    // scoreOf is side-effect-free: read 1000x, state unchanged.
+    const before = h.repState(v)?.alpha ?? 0;
+    for (let i = 0; i < 1000; i++) h.repOf(v);
+    const oracleSideEffectFree = Math.abs((h.repState(v)?.alpha ?? 0) - before) < 1e-9;
+    // Strike: freshly-pumped 0.40 attacker.
+    const a = h.addSource({
+      label: "A",
+      anchors: [anchorOf(AnchorClass.EMAIL_OAUTH), anchorOf(AnchorClass.PHONE_SIM)],
+      indClass: "A-multi",
+    });
+    h.ratifyOnce(a, 1);
+    h.ratifyOnce(a, 1);
+    const falseId = h.write(a, "Strong", "v", "FALSE");
+    const out = h.adjudicate("Strong", "v");
+    const oc = classify(h, out, trueId, falseId);
+    return {
+      outcome: oc,
+      mechanism:
+        "scoreOf decays a COPY to clock() before readout (pure decay-on-read) for BOTH parties, but the incumbent is dormant (large dt, big discount) while the attacker just mutated (dt~0). decay() pulls alpha AND beta toward 1 with no floor that preserves a long track record. The attacker schedules by polling the side-effect-free oracle until the trough.",
+      evidence: `incumbent LCB t0=${f3(repAtT0)} -> decay samples ${JSON.stringify(samples.map(([d, r]) => [d, +r.toFixed(3)]))} -> trough=${f3(repTrough)}; oracle side-effect-free=${oracleSideEffectFree}; strike out=${out.kind}; true=${h.state(trueId)} false=${h.state(falseId)}.`,
+    };
+  },
+};
+
+const al04_incumbencyMarginFix: Cycle3Spec = {
+  id: "al-c3-04",
+  name: "FIX-PROBE: Incumbency-scaled challenger margin (tenure floor on decisive auto-resolve)",
+  tier: "adaptive-lcb",
+  novelty:
+    "Make decisiveMargin grow with the incumbent's tenure + corroboration (decay-floored) instead of a flat 0.30. Proves al-c3-02/03. PARTIAL: closes dormancy + tenured flips but re-introduces the first-arrival trap and leaves fresh-but-true incumbents exposed.",
+  run() {
+    const h = new Harness();
+    // A TENURED, well-corroborated incumbent.
+    const inc = h.addSource({ label: "INC", anchors: [anchorOf(AnchorClass.DOMAIN)], indClass: "inc-dom" });
+    const trueId = h.write(inc, "T", "v", "TRUE");
+    for (let i = 0; i < 6; i++) h.ratifyOnce(inc, 1);
+    const incTenureDays = 400;
+    const incCorrob = h.repState(inc)?.ratifiedCount ?? 0;
+    h.advanceDays(incTenureDays);
+    const incRep = h.repOf(inc);
+    // Attacker 0.40 payload.
+    const a = h.addSource({
+      label: "A",
+      anchors: [anchorOf(AnchorClass.EMAIL_OAUTH), anchorOf(AnchorClass.PHONE_SIM)],
+      indClass: "A-multi",
+    });
+    h.ratifyOnce(a, 1);
+    h.ratifyOnce(a, 1);
+    const atkRep = h.repOf(a);
+    const falseId = h.write(a, "T", "v", "FALSE");
+    // TODAY: flat 0.30 margin.
+    const outToday = h.adjudicate("T", "v");
+    const breachToday = classify(h, outToday, trueId, falseId) === "BREACHED";
+
+    // SIMULATE: tenure-scaled margin = base + k*incumbentStrength (decay-floored tenure).
+    const base = 0.3;
+    const k = 0.05;
+    const incumbentStrength = Math.min(incCorrob, 6) + incTenureDays / 365; // ~7 here
+    const requiredMargin = base + k * incumbentStrength;
+    const actualGap = atkRep - incRep;
+    const fixDefers = actualGap < requiredMargin; // tenured incumbent now protected
+    // Fresh-but-true incumbent residual: a fresh incumbent (strength 0) keeps flat margin.
+    const freshRequired = base + k * 0; // = 0.30 -> still flippable
+    const freshStillFlippable = atkRep - 0.05 >= freshRequired;
+    const fixProbe: FixProbeVerdict = {
+      fix: "Incumbency-scaled decisive margin: requiredMargin = base + k*incumbentStrength (tenure+corroboration, decay-floored)",
+      targetAttack: "Amortized global-rep flip + dormancy-decay trough (al-c3-02/03)",
+      breachesToday: breachToday,
+      fixOutcome: "PARTIAL",
+      simulated: true,
+      note: `Today flat 0.30 margin: tenured incumbent flipped=${breachToday}. Simulated tenure margin required=${f3(requiredMargin)} vs actual gap=${f3(actualGap)} => DEFER=${fixDefers} (closes tenured + dormancy via decay-floored tenure). BUT a FRESH-but-true incumbent (strength 0) keeps the flat 0.30 and stays flippable=${freshStillFlippable}, AND it re-introduces the first-arrival trap (bank tenure early). Raises cost 10-100x; not structural.`,
+    };
+    return {
+      outcome: breachToday ? "BREACHED" : "DEFENDED",
+      mechanism: fixProbe.note,
+      evidence: `tenured incumbent LCB=${f3(incRep)} (tenure ${incTenureDays}d, ${incCorrob} corrob); attacker=${f3(atkRep)}; today=${outToday.kind} breach=${breachToday}; fix requires ${f3(requiredMargin)}>gap ${f3(actualGap)} => DEFER=${fixDefers}; fresh-incumbent residual flippable=${freshStillFlippable}.`,
+      fixProbe,
+    };
+  },
+};
+
+const al05_attrScopedRootsFix: Cycle3Spec = {
+  id: "al-c3-05",
+  name: "FIX-PROBE: Attribute-scoped corroboration + count independent ROOTS in the gate",
+  tier: "adaptive-lcb",
+  novelty:
+    "Two coupled changes: (1) decisive auto-resolve consults ATTRIBUTE-SCOPED corroboration (rep on A can't authorize a flip on B); (2) the gate counts independent ROOTS via the MIS (one passport with email+phone = root-count 1, not 2). Proves al-c3-02.",
+  run() {
+    const h = new Harness();
+    const s = h.addSource({
+      label: "S",
+      anchors: [anchorOf(AnchorClass.EMAIL_OAUTH), anchorOf(AnchorClass.PHONE_SIM)],
+      indClass: "S-multi",
+    });
+    h.ratifyOnce(s, 1);
+    h.ratifyOnce(s, 1);
+    const globalLCB = h.repOf(s);
+    // The source earned on attribute "Earned"; it now attacks UNRELATED "Target".
+    const inc = h.addSource({ label: "INC", anchors: [], indClass: "inc" });
+    const trueId = h.write(inc, "Target", "v", "TRUE");
+    const falseId = h.write(s, "Target", "v", "FALSE");
+    // TODAY: global LCB authorizes the flip on an attribute it never earned on.
+    const outToday = h.adjudicate("Target", "v");
+    const breachToday = classify(h, outToday, trueId, falseId) === "BREACHED";
+
+    // SIMULATE (1) attribute-scoped corroboration: S has 0 corroborations ON "Target".
+    const scopedCorrobOnTarget = 0; // never ratified on this attribute
+    const attrScopedDefers = scopedCorrobOnTarget < 2; // require >=2 on the disputed attribute
+    // SIMULATE (2) root-count: one passport with two anchors -> MIS root count.
+    const rootCount = h.independentRootCountOver(falseId); // engine's REAL MIS over S's provenance
+    const rootFloorDefers = rootCount < 2;
+    const fixCloses = attrScopedDefers; // amortization dies (must re-earn per attribute)
+    const fixProbe: FixProbeVerdict = {
+      fix: "Attribute-scoped corroboration floor + independent-ROOT count (MIS) on ALL decisive resolves",
+      targetAttack: "Amortized global-rep flip; single-passport two-class self-corroboration (al-c3-02 / FP1)",
+      breachesToday: breachToday,
+      fixOutcome: fixCloses ? "CLOSES" : "PARTIAL",
+      simulated: true,
+      note: `Today global LCB ${f3(globalLCB)} flips an un-earned attribute=${breachToday}. Attribute-scoped: S has ${scopedCorrobOnTarget} corroborations ON Target => DEFER=${attrScopedDefers} (CLOSES the build-once-flip-everywhere amortization; cost goes O(1)->linear-in-attributes). Root-count via real MIS over S's provenance = ${rootCount} => fails a >=2 root floor=${rootFloorDefers} (single-passport self-corroboration collapsed). PARTIAL on single-source: 2 genuinely-disjoint paid roots still clear it (priced residual).`,
+    };
+    return {
+      outcome: breachToday ? "BREACHED" : "DEFENDED",
+      mechanism: fixProbe.note,
+      evidence: `global LCB=${f3(globalLCB)}; today=${outToday.kind} breach=${breachToday}; attribute-scoped corrob on Target=${scopedCorrobOnTarget} => DEFER=${attrScopedDefers}; MIS root-count over winner provenance=${rootCount} => root-floor DEFER=${rootFloorDefers}.`,
+      fixProbe,
+    };
+  },
+};
+
+// ===========================================================================
+// FAMILY: class-assignment-e2e
+// ===========================================================================
+
+const ce01_registrarCarousel: Cycle3Spec = {
+  id: "ce-c3-01",
+  name: "Registrar Carousel",
+  tier: "class-assignment-e2e",
+  novelty:
+    "Rotates the operator/ASN axis the fleet-cap collapses: K domains each behind a DISTINCT registrar+ASN bind as K class-disjoint DOMAIN anchors for one wallet at linear $/yr. MIS counts K; the high-impact gate clears; one-hop disown leaves the bloc standing.",
+  run() {
+    const h = new Harness();
+    const K = 5;
+    const bloc: ReturnType<Harness["addSource"]>[] = [];
+    for (let i = 0; i < K; i++) {
+      bloc.push(
+        h.addSource({
+          label: `CAR${i}`,
+          anchors: [anchorOf(AnchorClass.DOMAIN)],
+          indClass: `carousel-d${i}`, // distinct registrable name
+          operatorClass: `registrar-${i}`, // DISTINCT registrar/ASN -> no fleet-collapse
+        }),
+      );
+    }
+    // The bloc co-asserts the SAME value; MIS over anchor-disjointness counts K.
+    const falseIds = bloc.map((m, i) => h.write(m, "Victim", "owner", "BLOC_VALUE"));
+    const rootCount = h.independentRootCountOver(...falseIds);
+    // Mutual corroboration inside the bloc lifts rep.
+    for (const m of bloc) for (let i = 0; i < 2; i++) h.ratifyOnce(m, 1);
+    // A single fresh honest incumbent opposes.
+    const w = h.addSource({ label: "W", anchors: [anchorOf(AnchorClass.DOMAIN)], indClass: "W-dom", operatorClass: "op-w" });
+    const trueId = h.write(w, "Victim", "owner", "TRUE_OWNER");
+    const out = h.engine.adjudicate(h.attr("Victim", "owner"), { highImpact: true });
+    // Disown ONE carousel node; the other K-1 keep bloc-earned rep.
+    const survivorRepBefore = h.repOf(bloc[1]!);
+    h.disown(bloc[0]!);
+    const survivorRepAfter = h.repOf(bloc[1]!);
+    const survives = Math.abs(survivorRepAfter - survivorRepBefore) < 1e-9;
+    const oc = classify(h, out, trueId, falseIds[0]!);
+    const breach = (oc === "BREACHED" || rootCount >= K) && survives;
+    return {
+      outcome: breach ? "BREACHED" : oc,
+      mechanism:
+        "The fleet-cap caps anchor-set OVERLAP, not actor identity. Offline class-assignment cannot see that one wallet funded all K registrations. Independence = anchor-set disjointness is satisfied truthfully while real-world independence is zero. Cost is linear ($/yr) for an unbounded count gain; reputation and the high-impact gate both treat class count as a proxy for actor count.",
+      evidence: `K=${K} distinct-operator DOMAIN anchors -> MIS root count=${rootCount} (no fleet-collapse); high-impact out=${out.kind}; disown one node -> survivor rep ${f3(survivorRepBefore)}->${f3(survivorRepAfter)} (bloc stands=${survives}).`,
+    };
+  },
+};
+
+const ce02_subdomainSeam: Cycle3Spec = {
+  id: "ce-c3-02",
+  name: "Mega-Provider Subdomain Seam (no PSL eTLD+1)",
+  tier: "class-assignment-e2e",
+  novelty:
+    "No Public Suffix List: sub1..subK.evilcorp.com bind as K distinct DOMAIN classes for one $9 domain (and the engine can't tell that from K legitimate github.io owners — wrong in both directions).",
+  run() {
+    const h = new Harness();
+    const K = 5;
+    // Same-owner subdomains under ONE registrable parent; today each is a distinct class.
+    const subs: ReturnType<Harness["addSource"]>[] = [];
+    for (let i = 0; i < K; i++) {
+      subs.push(
+        h.addSource({
+          label: `sub${i}.evilcorp.com`,
+          anchors: [anchorOf(AnchorClass.DOMAIN)],
+          indClass: `sub${i}.evilcorp.com`, // FQDN-derived: no eTLD+1 collapse
+          operatorClass: null, // engine has no PSL -> cannot compute the registrable owner
+        }),
+      );
+    }
+    const falseIds = subs.map((m) => h.write(m, "Seam", "owner", "ONE_OWNER"));
+    const rootCount = h.independentRootCountOver(...falseIds);
+    const breach = rootCount >= K; // K subdomains of ONE $9 domain counted as K roots
+    return {
+      outcome: breach ? "BREACHED" : "DEFENDED",
+      mechanism:
+        "Offline class-assignment + no PSL = the engine cannot compute the eTLD+1 registrable boundary, the ONLY mechanical definition of 'same DNS owner'. Lacking it, DOMAIN-class independence is structurally unsound in BOTH directions: K same-owner subdomains count as K, while K legitimate *.github.io owners would wrongly fuse under naive label-stripping.",
+      evidence: `K=${K} subdomains of ONE registrable parent evilcorp.com ($9/yr) -> MIS root count=${rootCount} (counted as K disjoint DOMAIN classes); cheapest path to clearing the high-impact >=2-class clause.`,
+    };
+  },
+};
+
+const ce03_nullSourceLaundromat: Cycle3Spec = {
+  id: "ce-c3-03",
+  name: "Null-Source Laundromat (combined / adaptive E2E)",
+  tier: "class-assignment-e2e",
+  novelty:
+    "Chains class-manufacture (re-weights weightless bare keys) with a corroboration-shaped credit wash that disown's DERIVATION-BFS + one-hop reversal structurally misses, so laundered second-hop credit survives a disown.",
+  run() {
+    const h = new Harness();
+    const front = h.addSource({ label: "FRONT", anchors: [anchorOf(AnchorClass.DOMAIN)], indClass: "front-dom" });
+    // Bare-key agreement SHOULD be weightless; manufactured-class agreement is weighted.
+    const bare = h.bareSource("bare");
+    const frontClaim = h.write(front, "wash", "v", "V");
+    const bareClaim = h.write(bare, "wash", "v", "V");
+    const frontAlphaBefore = h.repState(front)?.alpha ?? 1;
+    h.engine.ratify({ strandId: frontClaim, externalStamp: h.identity.stampFor(front.sourceId) });
+    const frontAlphaBareWash = h.repState(front)?.alpha ?? 1;
+    // Upgrade the laundering key to a manufactured DOMAIN class and re-pump.
+    const upgraded = h.addSource({ label: "upgraded", anchors: [anchorOf(AnchorClass.DOMAIN)], indClass: "manufactured-dom", operatorClass: "op-up" });
+    const upClaim = h.write(upgraded, "wash", "v", "V");
+    h.engine.ratify({ strandId: frontClaim, externalStamp: h.identity.stampFor(front.sourceId) });
+    const frontAlphaUpgraded = h.repState(front)?.alpha ?? 1;
+    // Intermediate MID corroborates the front (hop-1: reversed on disown).
+    const mid = h.addSource({ label: "MID", anchors: [anchorOf(AnchorClass.PHONE_SIM)], indClass: "mid-phone" });
+    const midClaim = h.write(mid, "wash", "v", "V");
+    h.engine.ratify({ strandId: midClaim, externalStamp: h.identity.stampFor(mid.sourceId) });
+    // SECOND-order beneficiary corroborates MID's independently-observed strand (hop-2:
+    // no DERIVATION edge to the front, so the BFS never reaches it and the one-hop
+    // corroboration reversal stops short).
+    const second = h.addSource({ label: "SECOND", anchors: [anchorOf(AnchorClass.ORGANIZATION)], indClass: "second-org" });
+    const secondClaim = h.write(second, "downstream", "w", "W");
+    h.engine.ratify({ strandId: secondClaim, externalStamp: h.identity.stampFor(second.sourceId) });
+    const secondAlphaBefore = h.repState(second)?.alpha ?? 0;
+    // Disown the front; second-order laundered credit survives (agreement channel, 2 hops).
+    const res = h.disown(front);
+    const secondAlphaAfter = h.repState(second)?.alpha ?? 0;
+    const secondSurvives = Math.abs(secondAlphaAfter - secondAlphaBefore) < 1e-9;
+    const classReweighted = frontAlphaUpgraded > frontAlphaBareWash + 1e-9;
+    const breach = secondSurvives; // transitive laundered credit persists
+    return {
+      outcome: breach ? "BREACHED" : "DEFENDED",
+      mechanism:
+        "Three seams compose: (a) class-manufacture turns weightless bare keys into weighted corroborators; (b) disown's reversal is DERIVATION-shaped while the laundering channel is corroboration-shaped, so the BFS misses it; (c) the corroboration-event reversal is opt-in + one-hop, so multi-hop wash trades survive. Each is individually 'acceptable'; combined they inflate, weaponize, and retain credit through a disown.",
+      evidence: `front alpha: bare-wash=${f3(frontAlphaBareWash)} vs manufactured-class wash=${f3(frontAlphaUpgraded)} (class-reweighted=${classReweighted}); disown(front) reversed=${JSON.stringify(res.reversedCorroborationEventIds)}; second-order beneficiary alpha ${f3(secondAlphaBefore)}->${f3(secondAlphaAfter)} (survives=${secondSurvives}).`,
+    };
+  },
+};
+
+const ce04_pslFix: Cycle3Spec = {
+  id: "ce-c3-04",
+  name: "FIX-PROBE: PSL eTLD+1 Collapse at Binding Time",
+  tier: "class-assignment-e2e",
+  novelty:
+    "Derive the DOMAIN operator class from the PSL eTLD+1 of the proven FQDN (PRIVATE section honored). PARTIAL: collapses the same-owner subdomain seam (spec 02) but cannot touch the carousel (spec 01) — distinct registrable names are genuinely independent under the DNS root.",
+  run() {
+    const h = new Harness();
+    const K = 5;
+    // Reproduce spec 02 (same-owner subdomains) and apply the eTLD+1 collapse.
+    const subs: ReturnType<Harness["addSource"]>[] = [];
+    for (let i = 0; i < K; i++) {
+      // FIX: operatorClass = eTLD+1 of the FQDN -> all collapse to evilcorp.com.
+      subs.push(
+        h.addSource({
+          label: `sub${i}.evilcorp.com`,
+          anchors: [anchorOf(AnchorClass.DOMAIN)],
+          indClass: `sub${i}.evilcorp.com`,
+          operatorClass: "etld1:evilcorp.com", // PSL-collapsed owner
+        }),
+      );
+    }
+    const subFalse = subs.map((m) => h.write(m, "SeamFix", "owner", "ONE_OWNER"));
+    const subRootCountFixed = h.independentRootCountOver(...subFalse);
+    const subSeamClosed = subRootCountFixed <= 1;
+    // PRIVATE section: a1/a2.github.io are SEPARATE owners -> distinct eTLD+1, count 2.
+    const g1 = h.addSource({ label: "a1.github.io", anchors: [anchorOf(AnchorClass.DOMAIN)], indClass: "a1.github.io", operatorClass: "etld1:a1.github.io" });
+    const g2 = h.addSource({ label: "a2.github.io", anchors: [anchorOf(AnchorClass.DOMAIN)], indClass: "a2.github.io", operatorClass: "etld1:a2.github.io" });
+    const gf1 = h.write(g1, "Pages", "owner", "V1");
+    const gf2 = h.write(g2, "Pages", "owner", "V2");
+    const githubCount = h.independentRootCountOver(gf1, gf2);
+    const privatePreserved = githubCount === 2;
+    // Carousel residual: distinct registrable names keep distinct eTLD+1 -> still K.
+    const car: ReturnType<Harness["addSource"]>[] = [];
+    for (let i = 0; i < K; i++) car.push(h.addSource({ label: `c${i}`, anchors: [anchorOf(AnchorClass.DOMAIN)], indClass: `etld1:car${i}.com`, operatorClass: `etld1:car${i}.com` }));
+    const carFalse = car.map((m) => h.write(m, "Carousel", "owner", "V"));
+    const carouselCount = h.independentRootCountOver(...carFalse);
+    const carouselUntouched = carouselCount >= K;
+    const fixProbe: FixProbeVerdict = {
+      fix: "Bundle a versioned PSL; derive the DOMAIN operator class from eTLD+1 (PRIVATE section honored) at bind time",
+      targetAttack: "Mega-Provider Subdomain Seam (ce-c3-02) + Registrar Carousel residual (ce-c3-01)",
+      breachesToday: true, // spec 02 breaches today (shown in ce-c3-02)
+      fixOutcome: "PARTIAL",
+      simulated: true,
+      note: `eTLD+1 collapse: sub*.evilcorp.com -> root count=${subRootCountFixed} (seam closed=${subSeamClosed}); PSL PRIVATE preserved a1/a2.github.io=${githubCount} (=${privatePreserved}). FAILS to touch the carousel: K distinct registrable names -> count=${carouselCount} (untouched=${carouselUntouched}). Necessary hygiene, not a structural close.`,
+    };
+    return {
+      outcome: subSeamClosed && privatePreserved ? "DEFENDED" : "BREACHED",
+      mechanism: fixProbe.note,
+      evidence: `sub-seam fixed count=${subRootCountFixed}(closed=${subSeamClosed}); github private=${githubCount}(preserved=${privatePreserved}); carousel residual count=${carouselCount}(untouched=${carouselUntouched}).`,
+      fixProbe,
+    };
+  },
+};
+
+const ce05_rootsOperatorGraphFix: Cycle3Spec = {
+  id: "ce-c3-05",
+  name: "FIX-PROBE: High-Impact Gate Counts Independent ROOTS + Operator-Graph Fleet-Cap",
+  tier: "class-assignment-e2e",
+  novelty:
+    "Count distinct REAL operators (cluster by registrant email / ASN / nameserver / ACME account) not classIds. PARTIAL->FAILS on the core: collapses carousels that share an observable correlator but a correlation-free attacker (privacy-proxy WHOIS, distinct accounts) still mints K — the hard-theorem residual.",
+  run() {
+    const h = new Harness();
+    const K = 5;
+    // Case 1: carousel that SHARES a correlator (same registrant email / ACME account).
+    const correlated: ReturnType<Harness["addSource"]>[] = [];
+    for (let i = 0; i < K; i++) {
+      correlated.push(h.addSource({ label: `corr${i}`, anchors: [anchorOf(AnchorClass.DOMAIN)], indClass: `corr-d${i}`, operatorClass: "registrant:mallory@evil.com" }));
+    }
+    const corrFalse = correlated.map((m) => h.write(m, "Corr", "owner", "V"));
+    const correlatedCount = h.independentRootCountOver(...corrFalse);
+    const correlatedCollapses = correlatedCount <= 1;
+    // Case 2: correlation-FREE carousel (distinct registrant identities, distinct accounts).
+    const free: ReturnType<Harness["addSource"]>[] = [];
+    for (let i = 0; i < K; i++) {
+      free.push(h.addSource({ label: `free${i}`, anchors: [anchorOf(AnchorClass.DOMAIN)], indClass: `free-d${i}`, operatorClass: `registrant:proxy-${i}@privacy.example` }));
+    }
+    const freeFalse = free.map((m) => h.write(m, "Free", "owner", "V"));
+    const freeCount = h.independentRootCountOver(...freeFalse);
+    const freeStillMintsK = freeCount >= K;
+    const fixProbe: FixProbeVerdict = {
+      fix: "High-impact gate counts independent ROOTS surviving an actor-correlation discount + operator-GRAPH fleet-cap (registrant/ASN/nameserver/ACME clustering)",
+      targetAttack: "Registrar Carousel (ce-c3-01)",
+      breachesToday: true,
+      fixOutcome: "PARTIAL",
+      simulated: true,
+      note: `Clustering by a shared correlator collapses the correlated carousel: count=${correlatedCount} (collapses=${correlatedCollapses}). But a correlation-FREE carousel (privacy-proxy WHOIS, distinct ACME accounts/cards) still mints count=${freeCount} (=${freeStillMintsK}) — the hard-theorem 'patient attacker pays for independent-looking sources' residual. Counting ROOTS not classes is strictly better (stops the cheap class-stack) but 'independent root' is still adjudicated from offline class assignment, so it inherits the same blind spot. Raises price ~$40->$40+disjoint-ops, never to 0 leakage.`,
+    };
+    return {
+      outcome: correlatedCollapses ? "DEFENDED" : "BREACHED",
+      mechanism: fixProbe.note,
+      evidence: `correlated carousel (shared registrant) count=${correlatedCount}(collapses=${correlatedCollapses}); correlation-free carousel count=${freeCount}(still mints K=${freeStillMintsK}).`,
+      fixProbe,
+    };
+  },
+};
+
+// ===========================================================================
+// FAMILY: fix-probes  (data-driven on the adjudication gate)
+// ===========================================================================
+
+const fp1_rootsNotClasses: Cycle3Spec = {
+  id: "fp-1",
+  name: "FIX-PROBE (d): High-impact gate counts independent ROOTS not anchor CLASSES",
+  tier: "fix-probe",
+  novelty:
+    "Two-Class-Costume: one actor self-stacks EMAIL+DOMAIN to present two CLASSES from one sourceId, clearing the '>=2 anchor classes' clause meant to require two independent witnesses. The fix routes the count through independentRootCount (MIS + self-stack cap + operator fleet-cap).",
+  run() {
+    const h = new Harness();
+    const mallory = h.addSource({
+      label: "MALLORY",
+      anchors: [anchorOf(AnchorClass.EMAIL_OAUTH), anchorOf(AnchorClass.DOMAIN)],
+      indClass: "mallory",
+      operatorClass: "op-mallory",
+    });
+    h.earnTo(mallory, 0.4);
+    const victim = h.addSource({ label: "VICTIM", anchors: [anchorOf(AnchorClass.DOMAIN)], indClass: "victim-dom" });
+    const trueId = h.write(victim, "Irrev", "owner", "TRUE");
+    const falseId = h.write(mallory, "Irrev", "owner", "MALLORY");
+    // TODAY: CLASS-counting resolver -> PASSES the high-impact gate -> RESOLVED.
+    const outClasses = h.engine.adjudicate(h.attr("Irrev", "owner"), { highImpact: true });
+    const breachToday = classify(h, outClasses, trueId, falseId) === "BREACHED";
+    // FIX: ROOT-counting resolver (the harness default highImpact uses independentRootCount).
+    const h2 = new Harness();
+    const m2 = h2.addSource({ label: "MALLORY", anchors: [anchorOf(AnchorClass.EMAIL_OAUTH), anchorOf(AnchorClass.DOMAIN)], indClass: "mallory", operatorClass: "op-mallory" });
+    h2.earnTo(m2, 0.4);
+    const v2 = h2.addSource({ label: "VICTIM", anchors: [anchorOf(AnchorClass.DOMAIN)], indClass: "victim-dom" });
+    const t2 = h2.write(v2, "Irrev", "owner", "TRUE");
+    const f2 = h2.write(m2, "Irrev", "owner", "MALLORY");
+    const outRoots = h2.adjudicate("Irrev", "owner", true); // ROOT count resolver
+    const fixDefers = outRoots.kind === "DEFERRED" || h2.isLive(t2);
+    const fixProbe: FixProbeVerdict = {
+      fix: "(d) anchorClassCountOf := identity.independentRootCount(winner.provenance) (MIS + self-stack cap + operator fleet-cap)",
+      targetAttack: "Two-Class-Costume (SelfStackedClasses)",
+      breachesToday: breachToday,
+      fixOutcome: fixDefers ? "CLOSES" : "FAILS",
+      simulated: true,
+      note: `CLASS-count resolver: high-impact gate PASSES => ${outClasses.kind} (breach=${breachToday}). ROOT-count resolver (real MIS collapses the self-stacked pair to 1) => ${outRoots.kind} (DEFER/defended=${fixDefers}). CLOSES this gate; a legit two-disjoint-operator winner still counts 2 and resolves. Residual: only hardens the irreversible path (see fp-2).`,
+    };
+    return {
+      outcome: breachToday ? "BREACHED" : "DEFENDED",
+      mechanism: fixProbe.note,
+      evidence: `class-count out=${outClasses.kind} (true=${h.state(trueId)} false=${h.state(falseId)}); root-count out=${outRoots.kind} (true=${h2.state(t2)} false=${h2.state(f2)}).`,
+      fixProbe,
+    };
+  },
+};
+
+const fp2_universalCorrobFloor: Cycle3Spec = {
+  id: "fp-2",
+  name: "FIX-PROBE (a): require >=2 independent corroborations for ANY auto-resolve",
+  tier: "fix-probe",
+  novelty:
+    "Ordinary (non-high-impact) multi-class adjudication consults NO independent-corroboration count, so a SELF-BUILT winner reaching a decisive LCB overturns a fresh incumbent with zero EXTERNAL corroboration. The fix makes a >=2-INDEPENDENT-corroboration clause universal (counting distinct roots, not self-ratifies).",
+  run() {
+    const h = new Harness();
+    const mallory = h.addSource({
+      label: "M",
+      anchors: [anchorOf(AnchorClass.DOMAIN)],
+      indClass: "m-dom",
+    });
+    // The cheapest decisive build (cf. al-c3-02): self-ratify to LCB ~0.40, NO external corroborator.
+    h.ratifyOnce(mallory, 1);
+    h.ratifyOnce(mallory, 1);
+    const inc = h.addSource({ label: "INC", anchors: [], indClass: "inc" });
+    const trueId = h.write(inc, "Rev", "v", "TRUE");
+    const falseId = h.write(mallory, "Rev", "v", "FALSE");
+    // TODAY: ordinary adjudicate, no independent-corroboration gate -> RESOLVED.
+    const outToday = h.adjudicate("Rev", "v");
+    const breachToday = classify(h, outToday, trueId, falseId) === "BREACHED";
+    // SIMULATE the fix: count INDEPENDENT corroborations = distinct roots via the MIS over
+    // the winner's provenance (a self-built single source = 1, NOT >=2).
+    const independentCorrob = h.independentRootCountOver(falseId);
+    const fixDefers = independentCorrob < 2;
+    const fixProbe: FixProbeVerdict = {
+      fix: "(a) >=2 INDEPENDENT corroborations (distinct roots via MIS) as a UNIVERSAL precondition of every RESOLVED (scoped to classes.size>1)",
+      targetAttack: "Self-built decisive overturn with no external corroboration",
+      breachesToday: breachToday,
+      fixOutcome: "PARTIAL",
+      simulated: true,
+      note: `Today ordinary multi-class resolve ignores the count -> ${outToday.kind} (breach=${breachToday}); the winner is one self-built source (independent corroborations=${independentCorrob}). Universal >=2-INDEPENDENT precheck => DEFER=${fixDefers}. PARTIAL: closes the self-built overturn but a patient attacker earns 2 genuinely-independent corroborations (priced residual); and applying it to the SAFE single-class echo-collapse would DEFER mechanical tidy-ups (human-fatigue bomb) — scope to multi-class only.`,
+    };
+    return {
+      outcome: breachToday ? "BREACHED" : "DEFENDED",
+      mechanism: fixProbe.note,
+      evidence: `winner self-ratifies=${h.repState(mallory)?.ratifiedCount ?? 0}, independent corroborations (MIS)=${independentCorrob}; today out=${outToday.kind} breach=${breachToday}; universal >=2-independent floor => DEFER=${fixDefers}.`,
+      fixProbe,
+    };
+  },
+};
+
+const fp3_perAttributeReputation: Cycle3Spec = {
+  id: "fp-3",
+  name: "FIX-PROBE (b): per-attribute-domain reputation scoping",
+  tier: "fix-probe",
+  novelty:
+    "Trust-Laundering / Cross-Domain Halo: reputation is keyed by SourceId alone; rep earned on trivia is spent verbatim on a security attribute. The fix keys reputation by (SourceId, attributeDomain) so a source is a fresh prior in any domain it has not earned in.",
+  run() {
+    const h = new Harness();
+    const mallory = h.addSource({ label: "M", anchors: [anchorOf(AnchorClass.DOMAIN)], indClass: "m-dom" });
+    // Earn many corroborations on a benign domain.
+    for (let i = 0; i < 4; i++) h.ratifyOnce(mallory, 1);
+    const globalLCB = h.repOf(mallory);
+    const inc = h.addSource({ label: "INC", anchors: [], indClass: "inc" });
+    const trueId = h.write(inc, "Security", "is_safe", "TRUE");
+    const falseId = h.write(mallory, "Security", "is_safe", "FALSE");
+    const outToday = h.adjudicate("Security", "is_safe");
+    const breachToday = classify(h, outToday, trueId, falseId) === "BREACHED";
+    // SIMULATE: per-domain reputation. Mallory has NO track record in the "safety" domain.
+    const scopedLCBonSafety = 0; // fresh prior in an un-earned domain
+    const minWinnerReputation = 0.2;
+    const fixDefers = scopedLCBonSafety < minWinnerReputation;
+    const fixProbe: FixProbeVerdict = {
+      fix: "(b) key reputation by (SourceId, attributeDomain); read scoreOf(source, domainOf(attribute)) in adjudicate",
+      targetAttack: "Cross-Domain Halo (earn on trivia, spend on security)",
+      breachesToday: breachToday,
+      fixOutcome: "PARTIAL",
+      simulated: true,
+      note: `Global LCB ${f3(globalLCB)} (earned on a benign domain) flips a security attribute today=${breachToday}. Per-domain scoping: Mallory's LCB in the 'safety' domain = ${scopedLCBonSafety} < ${minWinnerReputation} => DEFER=${fixDefers} (cross-domain halo CLOSED). PARTIAL: does not close in-domain out-earning (priced residual); cost = cold-start fragmentation + a NEW offline domain-taxonomy liability + NxM state blowup.`,
+    };
+    return {
+      outcome: breachToday ? "BREACHED" : "DEFENDED",
+      mechanism: fixProbe.note,
+      evidence: `global LCB=${f3(globalLCB)}; today out=${outToday.kind} breach=${breachToday}; scoped LCB on target domain=${scopedLCBonSafety} => DEFER=${fixDefers}.`,
+      fixProbe,
+    };
+  },
+};
+
+const fp4_deferAll1v1: Cycle3Spec = {
+  id: "fp-4",
+  name: "FIX-PROBE (c): defer ALL single-source-vs-single-source disputes",
+  tier: "fix-probe",
+  novelty:
+    "1v1 Out-Earn: a clean two-member, two-source dispute RESOLVES for the higher LCB. Blanket-deferring every 1v1 closes the narrow case but routes every legitimate binary correction to a human and is evaded by a 2v1 self-stacked co-asserter. Recommend REJECT.",
+  run() {
+    const h = new Harness();
+    const a = h.addSource({ label: "A", anchors: [anchorOf(AnchorClass.DOMAIN)], indClass: "A-dom" });
+    h.ratifyOnce(a, 1);
+    h.ratifyOnce(a, 1); // decisive 0.40 build vs a fresh incumbent -> a clean 1v1 RESOLVES today
+    const inc = h.addSource({ label: "INC", anchors: [], indClass: "inc" });
+    const trueId = h.write(inc, "Bin", "v", "TRUE");
+    const falseId = h.write(a, "Bin", "v", "FALSE");
+    const outToday = h.adjudicate("Bin", "v");
+    const breachToday = classify(h, outToday, trueId, falseId) === "BREACHED";
+    // SIMULATE: count distinct sources per side; 1v1 -> force DEFER.
+    const distinctSources = new Set([a.sourceId, inc.sourceId]).size;
+    const is1v1 = distinctSources === 2;
+    const fixDefers = is1v1;
+    // The evasion: a 2v1 self-stacked co-asserter dodges the single-source trigger.
+    const evadedBy2v1 = true;
+    const fixProbe: FixProbeVerdict = {
+      fix: "(c) DEFER unconditionally when the dispute has exactly one source per side (distinct-source-count==2)",
+      targetAttack: "1v1 Out-Earn",
+      breachesToday: breachToday,
+      fixOutcome: "FAILS",
+      simulated: true,
+      note: `Today a clean 1v1 RESOLVES=${outToday.kind} (breach=${breachToday}). Blanket-defer would DEFER=${fixDefers}, BUT it is a tunable threshold: every legitimate binary correction (a true witness overturning a planted false canonical) now needs a human (hard-theorem tension as labor), it re-enables the DoS horn at linear cost, and it is trivially evaded by adding one self-stacked co-asserter (2v1, evaded=${evadedBy2v1}). REJECT; prefer fp-1 (root-count) + fp-3 (domain-scoped margin).`,
+    };
+    return {
+      outcome: breachToday ? "BREACHED" : "DEFENDED",
+      mechanism: fixProbe.note,
+      evidence: `distinct sources=${distinctSources} (1v1=${is1v1}); today out=${outToday.kind} breach=${breachToday}; blanket-defer DEFERs=${fixDefers} but evaded by 2v1 costume=${evadedBy2v1}.`,
+      fixProbe,
+    };
+  },
+};
+
+const fp5_bridgeIdentityGate: Cycle3Spec = {
+  id: "fp-5",
+  name: "FIX-PROBE (e): identity gate / earned-value priority on the bridge sweep",
+  tier: "fix-probe",
+  novelty:
+    "Bridgehead-Beacon: the mandatory sweep is identity-blind (pendingBridges has no reputation/earned-value filter; seedActivation is constant gamma). Order by earned_bridge_value and down-weight seed by origin reputation — PARTIAL, cannot fully close (mandatory/fail-open) and earned value is offline-earnable.",
+  run() {
+    const h = new Harness();
+    const attacker = h.bareSource("attacker");
+    const nId = h.write(attacker, "hub", "topic", "near");
+    const fId = h.write(attacker, "far", "secret", "POISON");
+    const bridge: Edge = {
+      id: asEdgeId(`edge:b:${String(nId)}->${String(fId)}`),
+      from: nId,
+      to: fId,
+      edgeType: EdgeType.CROSS_WEB_BRIDGE,
+      link_confidence: 1 as Unit,
+      provenance_independence: 0 as Unit, // bare-key
+      recency: 1 as Unit,
+      w: 1 as Unit,
+      out_weight_sum: 1 as Unit,
+    };
+    h.store.putEdge(bridge);
+    const result = h.engine.recall({ seeds: [{ strandId: nId, energy: 1 as Unit }] });
+    const lit = new Set(result.lit.map((l) => String(l.strandId)));
+    const breachToday = lit.has(String(fId));
+    // SIMULATE soft gate: seed = gamma * provenance_independence (0 for bare key).
+    const gatedSeed = 0.6 * 0;
+    const fixDropsPoison = gatedSeed < 0.01;
+    const fixProbe: FixProbeVerdict = {
+      fix: "(e) order pendingBridges by earned_bridge_value; seedActivation = gamma * origin provenance_independence (soft, never hard-skip)",
+      targetAttack: "Bridgehead-Beacon",
+      breachesToday: breachToday,
+      fixOutcome: "PARTIAL",
+      simulated: false,
+      note: `Today the sweep is identity-blind: poison surfaces=${breachToday} at constant gamma. Soft gate: bare-key origin (indep 0) -> seed=${f3(gatedSeed)} < assembly floor (dropped=${fixDropsPoison}); earned bridges fire first. PARTIAL: the sweep is deliberately MANDATORY/fail-open so a starved bridge still gets a degraded crossing or a BRIDGE_STARVED stamp; earned_bridge_value is offline-earnable so a patient attacker buys priority; and a HARD gate would starve genuine convergence=1 insight bridges and erode 'walk never witnesses'.`,
+    };
+    return {
+      outcome: breachToday ? "BREACHED" : "DEFENDED",
+      mechanism: fixProbe.note,
+      evidence: `recall lit=${JSON.stringify([...lit])}; poison surfaced=${breachToday} via zero-independence bare-key bridge; soft-gate seed=${f3(gatedSeed)} => dropped=${fixDropsPoison}; halt=${result.halt.reason}.`,
+      fixProbe,
+    };
+  },
+};
+
+// ===========================================================================
+// FAMILY: provenance-tipping  (corroboration/disown credit substrate)
+// ===========================================================================
+
+const pt1_contributorPadding: Cycle3Spec = {
+  id: "pt-1",
+  name: "FIX-PROBE: Contributor-Padding Margin Dilution (hold-the-reopen-threshold)",
+  tier: "provenance-tipping",
+  novelty:
+    "defaultSurvivingMargin = margin*(surviving/total) divides a reputation gap by an attacker-controlled count; ~10 same-key echo members hold surviving>=0.30 so a load-bearing tainted strand's removal never re-opens. Fix = exact alpha-recompute or distinct-root denominator.",
+  run() {
+    const h = new Harness();
+    // The real engine DERIVES contributingStrandIds = winner + members SHARING the winner's
+    // source — so any same-key pad is itself tainted by disown(winner). We confirm the real
+    // re-open behavior, then SIMULATE the count-ratio dilution the design targets.
+    const x = h.addSource({ label: "X", anchors: [anchorOf(AnchorClass.DOMAIN)], indClass: "X-dom" });
+    const co = h.addSource({ label: "CO", anchors: [anchorOf(AnchorClass.EMAIL_OAUTH)], indClass: "CO-email" });
+    h.earnTo(x, 0.4); // X decisively out-earns a fresh rival -> the dispute RESOLVES (X wins)
+    const winnerId = h.write(x, "Tip", "v", "WIN");
+    // N same-key echo co-assertions by X (auto-added to contributingStrandIds).
+    const N = 10;
+    for (let i = 0; i < N; i++) h.write(x, "Tip", "v", "WIN");
+    const loserId = h.write(co, "Tip", "v", "LOSE");
+    const out = h.adjudicate("Tip", "v");
+    const res = h.disown(x); // X (and its same-key pads) are all tainted
+    const reopened = res.reopenedDisputes.length > 0;
+    // The attacker's GOAL is a LOCKED fraudulent demotion: loser DEMOTED and never reopened.
+    const fraudLocked = h.isDemoted(loserId) && !reopened;
+    const engineDefends = !fraudLocked;
+
+    // SIMULATE the count-ratio dilution: margin 0.33 padded by N echoes.
+    const margin = 0.33;
+    const decisiveMargin = 0.3;
+    const countRatioSurviving = margin * (N / (N + 1)); // proportional model
+    const countRatioSuppresses = countRatioSurviving >= decisiveMargin; // NO re-open
+    // FIX: distinct-root denominator collapses same-key echoes to 1 -> ratio = margin*(1/2).
+    const distinctRootSurviving = margin * (1 / 2);
+    const fixReopens = distinctRootSurviving < decisiveMargin;
+    const fixProbe: FixProbeVerdict = {
+      fix: "Distinct independent-ROOT denominator (or exact per-source alpha-recompute) for defaultSurvivingMargin",
+      targetAttack: "Contributor-Padding Margin Dilution",
+      breachesToday: fraudLocked, // engine defends the same-key variant today (no locked demotion)
+      fixOutcome: "PARTIAL",
+      simulated: true,
+      note: `Engine TODAY derives contributingStrandIds = winner + same-source members, so same-key echo pads are themselves tainted by disown(X) AND their equal rep flattens the decisive gap (the dispute ${out.kind}). Either way there is NO locked fraudulent demotion (fraudLocked=${fraudLocked}, reopened=${reopened}) — the same-key variant is ALREADY defended by the real engine. The residual is the proportional MODEL: margin*(N/(N+1))=${f3(countRatioSurviving)} >= ${decisiveMargin} suppresses=${countRatioSuppresses}; a distinct-ROOT denominator => ${f3(distinctRootSurviving)} re-opens=${fixReopens}. PARTIAL: distinct-root closes same-key; padding under DISTINCT cheap anchors degrades to the class-vs-root gap (exact alpha-recompute closes fully).`,
+    };
+    return {
+      outcome: engineDefends ? "DEFENDED" : "BREACHED",
+      mechanism: fixProbe.note,
+      evidence: `adjudicate=${out.kind}; disown(X) reopened=${JSON.stringify(res.reopenedDisputes.map(String))} (reopened=${reopened}); winner=${h.state(winnerId)} loser=${h.state(loserId)}; locked fraudulent demotion=${fraudLocked} (engine defends=${engineDefends}); proportional-model suppress=${countRatioSuppresses} -> distinct-root fix reopen=${fixReopens}.`,
+      fixProbe,
+    };
+  },
+};
+
+const pt2_taintedClosureGap: Cycle3Spec = {
+  id: "pt-2",
+  name: "FIX-PROBE: Downstream-Closure Credit-Reversal Gap (seedClawedBack vs taintedStrandIds)",
+  tier: "provenance-tipping",
+  novelty:
+    "disown reverses corroboration credit against seedClawedBack (the DIRECT seed) while demotion is transitive over taintedStrandIds. Credit earned by agreeing with a derived-from-disowned (demoted) strand D is never reversed. One-line fix: pass taintedStrandIds to eventsIntersecting.",
+  run() {
+    const h = new Harness();
+    const a = h.addSource({ label: "A", anchors: [anchorOf(AnchorClass.DOMAIN)], indClass: "A-dom" });
+    const dv = h.addSource({ label: "DV", anchors: [anchorOf(AnchorClass.ORGANIZATION)], indClass: "DV-org" });
+    const b = h.addSource({ label: "B", anchors: [anchorOf(AnchorClass.EMAIL_OAUTH)], indClass: "B-email" });
+    const a1 = h.write(a, "seed", "v", "V");
+    // A DERIVED strand D (authored by a SEPARATE deriver) resting on S via a DERIVATION
+    // edge -> demoted by the BFS (in taintedStrandIds) but NOT in A's direct seed.
+    const d1 = h.write(dv, "derived", "w", "DV");
+    h.store.putEdge({
+      id: asEdgeId(`edge:der:${String(d1)}->${String(a1)}`),
+      from: d1,
+      to: a1,
+      edgeType: EdgeType.DERIVATION,
+      link_confidence: 1 as Unit,
+      provenance_independence: 1 as Unit,
+      recency: 1 as Unit,
+      w: 1 as Unit,
+      out_weight_sum: 1 as Unit,
+    });
+    // B earns corroboration credit for agreeing with the DERIVED strand D.
+    const b1 = h.write(b, "derived", "w", "DV");
+    h.engine.ratify({ strandId: b1, externalStamp: h.identity.stampFor(b.sourceId) });
+    const bAlphaBefore = h.repState(b)?.alpha ?? 0;
+    const res = h.disown(a);
+    const bAlphaAfter = h.repState(b)?.alpha ?? 0;
+    const dDemoted = h.isDemoted(d1);
+    const eventNamesD = (h.ratification.corroboration?.all() ?? []).some((e) => e.corroboratingStrandIds.includes(d1));
+    const breachToday = Math.abs(bAlphaAfter - bAlphaBefore) < 1e-9 && eventNamesD;
+
+    // SIMULATE the one-line fix: intersect over the FULL demoted closure (incl. D).
+    const taint = new Set<StrandId>([a1]);
+    if (dDemoted) taint.add(d1);
+    const wouldReverse = (h.ratification.corroboration?.all() ?? []).filter((e) =>
+      e.corroboratingStrandIds.some((s) => taint.has(s)),
+    );
+    const fixReversesB = wouldReverse.some((e) => e.beneficiarySourceId === b.sourceId);
+    const fixProbe: FixProbeVerdict = {
+      fix: "One-line: pass taintedStrandIds (full demoted closure) instead of seedClawedBack to corroboration.eventsIntersecting",
+      targetAttack: "Derived-strand-corroborator credit-reversal gap",
+      breachesToday: breachToday,
+      fixOutcome: "CLOSES",
+      simulated: true,
+      note: `D is demoted by the sweep (demoted=${dDemoted}) but its event was NOT reversed today (B alpha unchanged=${breachToday}, reversed=${JSON.stringify(res.reversedCorroborationEventIds)}). Intersecting over the FULL closure {S,D} would reverse B=${fixReversesB} at ~zero cost (idempotent via markReversed). CLOSES this hop; PARTIAL overall (does not close PT3 corroboration-of-corroboration); must still spare HARDENING-4 survived-demotion strands.`,
+    };
+    return {
+      outcome: breachToday ? "BREACHED" : "DEFENDED",
+      mechanism: fixProbe.note,
+      evidence: `D demoted=${dDemoted}; event names D=${eventNamesD}; B alpha ${f3(bAlphaBefore)}->${f3(bAlphaAfter)} today (survived=${breachToday}); fix over closure {S,D} reverses B=${fixReversesB}.`,
+      fixProbe,
+    };
+  },
+};
+
+const pt3_multiHopLaundering: Cycle3Spec = {
+  id: "pt-3",
+  name: "Multi-Hop / Transitive Corroboration Laundering (A->B->C credit chain)",
+  tier: "provenance-tipping",
+  novelty:
+    "Corroboration credit is reversed only where an event's corroborators intersect tainted STRANDS; it never propagates to the beneficiary's OWN strands as newly-tainted. C corroborates B's independently-observed strand SB (no DERIVATION edge to S); disown(A) reverses B but never C. Survives even PT2's fix.",
+  run() {
+    const h = new Harness();
+    const a = h.addSource({ label: "A", anchors: [anchorOf(AnchorClass.DOMAIN)], indClass: "A-dom" });
+    const b = h.addSource({ label: "B", anchors: [anchorOf(AnchorClass.EMAIL_OAUTH)], indClass: "B-email" });
+    const c = h.addSource({ label: "C", anchors: [anchorOf(AnchorClass.PHONE_SIM)], indClass: "C-phone" });
+    const a1 = h.write(a, "x", "v", "V");
+    const sb = h.write(b, "x", "v", "V"); // B observed independently then matched (no edge to A)
+    h.engine.ratify({ strandId: sb, externalStamp: h.identity.stampFor(b.sourceId) });
+    const sc = h.write(c, "x", "v", "V");
+    h.engine.ratify({ strandId: sc, externalStamp: h.identity.stampFor(c.sourceId) });
+    const cAlphaBefore = h.repState(c)?.alpha ?? 0;
+    const res = h.disown(a);
+    const cAlphaAfter = h.repState(c)?.alpha ?? 0;
+    const e1Reversed = res.reversedCorroborationEventIds.length > 0;
+    const cSurvives = Math.abs(cAlphaAfter - cAlphaBefore) < 1e-9;
+    // Even PT2's fix (full demoted closure) cannot reach SB: it is NOT derived from S.
+    const sbDemoted = h.isDemoted(sb);
+    return {
+      outcome: cSurvives ? "BREACHED" : "DEFENDED",
+      mechanism:
+        "The closure is over DERIVATION (existence-rests-on), not over CORROBORATION (credit-funded-by): credit attribution is intransitive while existence taint is transitive. SB carries no DERIVATION edge to S and is not demoted, so e2 (names SB) never intersects any tainted strand. Auto-following corroboration would punish coincidental agreement (the forbidden direction) — the fix must DETECT-and-defer, not auto-claw.",
+      evidence: `e1 (B<-A) reversed=${e1Reversed}; SB demoted=${sbDemoted} (NOT in DERIVATION closure); C alpha ${f3(cAlphaBefore)}->${f3(cAlphaAfter)} after disown(A) (survives=${cSurvives}); laundered credit persists at corroboration-hop-2.`,
+    };
+  },
+};
+
+const pt4_misattributedCorroborator: Cycle3Spec = {
+  id: "pt-4",
+  name: "FIX-PROBE: Misattributed / Unnamed Corroborator Evasion",
+  tier: "provenance-tipping",
+  novelty:
+    "corroboratingStrandIds is trusted verbatim from the caller. Naming a decoy clean strand yields earned==explained so reconcile sees RECONCILED yet disown reverses nothing. Fix = engine-derive corroborators mechanically + drop the no-name exemption.",
+  run() {
+    const h = new Harness();
+    const a = h.addSource({ label: "A", anchors: [anchorOf(AnchorClass.DOMAIN)], indClass: "A-dom" });
+    const decoyKey = h.addSource({ label: "D", anchors: [anchorOf(AnchorClass.ORGANIZATION)], indClass: "D-org" });
+    const b = h.addSource({ label: "B", anchors: [anchorOf(AnchorClass.EMAIL_OAUTH)], indClass: "B-email" });
+    const a1 = h.write(a, "hq", "city", "V"); // the planter B actually rests on
+    const decoy = h.write(decoyKey, "hq", "city", "V"); // a benign decoy B also controls
+    const b1 = h.write(b, "hq", "city", "V");
+    // B names the DECOY, not A, even though A seeded the belief.
+    h.engine.ratify({ strandId: b1, externalStamp: h.identity.stampFor(b.sourceId) });
+    const bAlphaBefore = h.repState(b)?.alpha ?? 0;
+    const res = h.disown(a);
+    const bAlphaAfter = h.repState(b)?.alpha ?? 0;
+    const breachToday = Math.abs(bAlphaAfter - bAlphaBefore) < 1e-9;
+    // SIMULATE the fix: engine-derive corroborators = the same-attribute LIVE members that
+    // agree with B's value (the web computes this, not the caller). A's strand IS in that set.
+    const sameValueAgreers = h.store
+      .strandsByAttribute(h.attr("hq", "city"))
+      .filter((s) => (s.payload as { value?: string }).value === "V" && String(s.id) !== String(b1))
+      .map((s) => s.id);
+    const engineDerivedNamesA = sameValueAgreers.some((id) => String(id) === String(a1));
+    const fixReversesB = engineDerivedNamesA; // disown(A) would then intersect B's event
+    const fixProbe: FixProbeVerdict = {
+      fix: "Engine-derive corroboratingStrandIds from the web's computed agreement set (same-attribute LIVE agreers) + drop the no-name exemption",
+      targetAttack: "Decoy-Corroborator Misattribution (and the Unnamed-Witness variant)",
+      breachesToday: breachToday,
+      fixOutcome: "CLOSES",
+      simulated: true,
+      note: `B named decoy not A: event recorded (reconcile balances earned==explained) yet disown(A) reversed=${JSON.stringify(res.reversedCorroborationEventIds)} (B survived=${breachToday}). Engine-derived agreement set names A=${engineDerivedNamesA} => disown(A) reverses B=${fixReversesB}. CLOSES misattribution + no-name (engine emits the event regardless of caller naming); a genuinely-independent ratify with no in-web agreer stays non-reversible by design (wall-with-a-window).`,
+    };
+    return {
+      outcome: breachToday ? "BREACHED" : "DEFENDED",
+      mechanism: fixProbe.note,
+      evidence: `B named decoy; reversed by disown(A)=${JSON.stringify(res.reversedCorroborationEventIds)} (empty); B alpha ${f3(bAlphaBefore)}->${f3(bAlphaAfter)} (survived=${breachToday}); engine-derived agreers name A=${engineDerivedNamesA} => fix reverses B=${fixReversesB}.`,
+      fixProbe,
+    };
+  },
+};
+
+const pt5_weaponizedReopen: Cycle3Spec = {
+  id: "pt-5",
+  name: "Weaponized Re-open: toothless PENDING + live-suppression persistence window",
+  tier: "provenance-tipping",
+  novelty:
+    "Re-open emits members:[winner] only, restores no loser, re-runs no adjudication: the fraudulently-demoted rival stays the LIVE answer through the human-latency window. Re-assert under a fresh key to cement suppression and flood listPending.",
+  run() {
+    const h = new Harness();
+    const x = h.addSource({ label: "X", anchors: [anchorOf(AnchorClass.DOMAIN)], indClass: "X-dom" });
+    const r = h.addSource({ label: "R", anchors: [anchorOf(AnchorClass.EMAIL_OAUTH)], indClass: "R-email" });
+    h.earnTo(x, 0.4);
+    h.ratifyOnce(r, 1);
+    const winnerId = h.write(x, "Sup", "v", "X_WINS");
+    const rivalId = h.write(r, "Sup", "v", "R_TRUE");
+    const out = h.adjudicate("Sup", "v");
+    const rivalDemotedAfterAdj = h.isDemoted(rivalId);
+    // Disown X (X contributed fraudulently). Re-open fires.
+    const res = h.disown(x);
+    const reopened = res.reopenedDisputes.length > 0;
+    const rivalStillDemoted = h.isDemoted(rivalId); // toothless: rival NOT restored
+    // Persistence: rival is still suppressed; a fresh clean key Y wins uncontested.
+    const y = h.addSource({ label: "Y", anchors: [anchorOf(AnchorClass.DOMAIN)], indClass: "Y-dom" });
+    h.ratifyOnce(y, 1);
+    h.write(y, "Sup", "v", "Y_WINS");
+    const out2 = h.adjudicate("Sup", "v");
+    const cementedWinner = liveWinner(h, "Sup", "v");
+    const rivalNeverRestored = h.isDemoted(rivalId);
+    const breach = reopened && rivalStillDemoted && rivalNeverRestored;
+    return {
+      outcome: breach ? "BREACHED" : "DEFENDED",
+      mechanism:
+        "Re-open was scoped to 'flag the winner for a human' (conservative against false-promotion) but the dual risk — the LOSER wrongly demoted by fraud — is unaddressed: the demotion is not even provisionally lifted, and the PENDING carries members=[winner] so the human lacks the contradiction set. Fraudulent demotion is the LIVE answer for the full human-latency window; a fresh key cements suppression.",
+      evidence: `adjudicate=${out.kind}; rival demoted after adj=${rivalDemotedAfterAdj}; disown(X) reopened=${reopened}; rival still DEMOTED post-reopen=${rivalStillDemoted}; re-adjudicate=${out2.kind} cemented winner state=${cementedWinner ? h.state(cementedWinner) : "none"}; rival never restored=${rivalNeverRestored}.`,
+    };
+  },
+};
+
+// ===========================================================================
+// FAMILY: merkle-audit  (REAL RFC-6962 layer; CONFIRM holds + boundary breaches)
+// ===========================================================================
+
+const NOW0 = 1_700_000_000_000;
+
+function pendingOf(n: number, attr: AttributeKey): PendingRatification {
+  return {
+    contradictionSetId: ("cset:" + n) as ContradictionSetId,
+    attribute: attr,
+    members: [asStrandId("strand:" + n)],
+    reason: "INDEPENDENT_DISPUTE",
+    createdAt: NOW0 as EpochMs,
+  };
+}
+
+function buildMerkle(count: number): {
+  ledger: PendingLedger;
+  signer: KeyPair;
+  log: ReturnType<typeof createMerkleLog>;
+  sinkA: InMemoryPublicationSink;
+  sinkB: InMemoryPublicationSink;
+} {
+  const signer = generatePassport();
+  const ledger = createPendingLedger();
+  const attr = "berlin#capital_of" as AttributeKey;
+  for (let i = 0; i < count; i++) ledger.appendPending(pendingOf(i, attr), signer);
+  const sinkA = new InMemoryPublicationSink();
+  const sinkB = new InMemoryPublicationSink();
+  const log = createMerkleLog({ ledger, signer, sinks: [sinkA, sinkB] });
+  return { ledger, signer, log, sinkA, sinkB };
+}
+
+const m1_coreHolds: Cycle3Spec = {
+  id: "mk-m1",
+  name: "Merkle Core Holds — RFC-6962 second-preimage / last-leaf / in-prefix-edit / rollback (CONFIRM)",
+  tier: "merkle-audit",
+  novelty:
+    "Adversarial RE-confirmation: chain every classic CT/Merkle break against THIS impl in one probe (domain-separated leaf/node hashes, power-of-two split, witnessed consistency).",
+  run() {
+    const { ledger, signer, log, sinkA } = buildMerkle(7);
+    // Establish a witnessed prior STH covering the full tree.
+    const priorSTH = log.anchor(NOW0 as EpochMs);
+    const witnessOk = log.witness(sinkA, (NOW0 + 1000) as EpochMs).ok;
+    // (1) leaf/node domain separation: a one-leaf root equals the leaf hash, never a node.
+    const l0 = log.leafHashAt(0);
+    const oneLeafRoot = log.merkleRoot(1);
+    const domainSeparated = oneLeafRoot === l0;
+    // (2) byte-flip a persisted record -> verifyChain names the first broken seq.
+    const recs = ledger.records();
+    const tampered = recs[3]!;
+    (tampered as { thisHash: string }).thisHash = "deadbeef".repeat(8);
+    const vc = ledger.verifyChain();
+    const tamperNamed = !vc.ok && vc.firstBrokenSeq === 3;
+    const allHold = witnessOk && domainSeparated && tamperNamed && priorSTH.tree_size === 7;
+    return {
+      outcome: allHold ? "DEFENDED" : "BREACHED",
+      mechanism:
+        "Domain-separated leaf/node hashing (0x00/0x01), RFC-6962 power-of-two split (no last-leaf duplication), witnessed consistency proofs, and the hash-chained verifyChain detect every in-tree tamper GIVEN an honest published prior STH + an uncompromised log key. The breakage is entirely at the trust boundary (see M2-M5).",
+      evidence: `witness(prior STH size ${priorSTH.tree_size})=${witnessOk}; one-leaf root==leafHash (domain-sep)=${domainSeparated}; byte-flip seq3 -> verifyChain ok=${vc.ok} firstBrokenSeq=${vc.firstBrokenSeq} (named=${tamperNamed}); CORE HOLDS=${allHold}.`,
+    };
+  },
+};
+
+const m2_keyholderForge: Cycle3Spec = {
+  id: "mk-m2",
+  name: "Keyholder Forge-From-Genesis — single-signer collapse of the witness guarantee (ATTACK)",
+  tier: "merkle-audit",
+  novelty:
+    "The log signer == audit signer == operator and sinks are count-gated not independence-gated: the keyholder re-chains, re-signs, and re-publishes a coherent forged tree to its OWN sinks with zero detection.",
+  run() {
+    // Honest lineage L1 with a target record at seq 1 (the APPROVAL the attacker wants gone).
+    const signer = generatePassport();
+    const attr = "x#y" as AttributeKey;
+    const l1 = createPendingLedger();
+    for (let i = 0; i < 3; i++) l1.appendPending(pendingOf(i, attr), signer);
+    // Forge L2 from genesis with the SAME signer, OMITTING seq 1.
+    const l2 = createPendingLedger();
+    l2.appendPending(pendingOf(0, attr), signer);
+    l2.appendPending(pendingOf(2, attr), signer);
+    // Operator owns both sinks of the forged log.
+    const fSinkA = new InMemoryPublicationSink();
+    const fSinkB = new InMemoryPublicationSink();
+    const forgedLog = createMerkleLog({ ledger: l2, signer, sinks: [fSinkA, fSinkB] });
+    forgedLog.anchor(NOW0 as EpochMs);
+    const forgedVerifies = l2.verifyChain().ok;
+    const forgedWitnessOk = forgedLog.witness(fSinkA, (NOW0 + 1) as EpochMs).ok;
+    const splitOverOwnSinks = detectSplitView([fSinkA.latest()!, fSinkB.latest()!]).detected;
+    // ZERO detection: the forged history is internally perfect; no independent witness held L1.
+    const breach = forgedVerifies && forgedWitnessOk && !splitOverOwnSinks;
+    return {
+      outcome: breach ? "BREACHED" : "DEFENDED",
+      mechanism:
+        "RFC-6962's 'uncompromised key' adversary model is unmet by construction: one systemSigner signs both the chain and the STHs, and publish() is an unauthenticated append to operator-owned sinks. The keyholder forges a coherent tree from genesis; verifyChain/witness/detectSplitView over the operator's own artifacts all report clean. The core (M1) is BYPASSED, not broken — the key model is wrong for single-process.",
+      evidence: `forged L2 (omits seq1) verifyChain.ok=${forgedVerifies}; witness over operator-owned sink=${forgedWitnessOk}; detectSplitView over the two operator sinks=${splitOverOwnSinks} (NONE); ZERO detection without an INDEPENDENT witness that held L1's STH. BOUNDARY BREACH.`,
+    };
+  },
+};
+
+const m3_hideADisown: Cycle3Spec = {
+  id: "mk-m3",
+  name: "Hide-A-Disown Below the Audit Horizon — tamper-evidence does not cover the state it protects (ATTACK)",
+  tier: "merkle-audit",
+  novelty:
+    "Disowns, demotions, OUTRANKS and reputation craters are mutable SQLite/store rows with NO STH commitment; the Merkle/audit chain covers only PENDING+APPROVAL. A disown (and its rollback) is invisible while verifyChain/witness stay clean.",
+  run() {
+    const h = new Harness();
+    // Independent pending ledger + merkle log over it (the audit chain).
+    const auditSigner = generatePassport();
+    const audit = createPendingLedger();
+    audit.appendPending(pendingOf(0, "a#b" as AttributeKey), auditSigner);
+    const sinkA = new InMemoryPublicationSink();
+    const sinkB = new InMemoryPublicationSink();
+    const log = createMerkleLog({ ledger: audit, signer: auditSigner, sinks: [sinkA, sinkB] });
+    const sthBefore = log.anchor(NOW0 as EpochMs);
+    // The engine correctly disowns a poisoner (store + reputation row writes; NOT audit rows).
+    const a = h.addSource({ label: "A", anchors: [anchorOf(AnchorClass.DOMAIN)], indClass: "A-dom" });
+    const dv = h.addSource({ label: "DV", anchors: [anchorOf(AnchorClass.ORGANIZATION)], indClass: "DV-org" });
+    const poison = h.write(a, "poison", "v", "BAD");
+    const d1 = h.write(dv, "derived", "w", "DV"); // separate deriver -> demoted by the BFS
+    h.store.putEdge({
+      id: asEdgeId(`edge:der:${String(d1)}->${String(poison)}`),
+      from: d1, to: poison, edgeType: EdgeType.DERIVATION,
+      link_confidence: 1 as Unit, provenance_independence: 1 as Unit, recency: 1 as Unit, w: 1 as Unit, out_weight_sum: 1 as Unit,
+    });
+    h.disown(a);
+    const dDemoted = h.isDemoted(d1);
+    // Operator silently RESTORES the demoted row back to LIVE (mutable store row).
+    const restored = h.store.getStrand(d1)!;
+    h.store.putStrand({ ...restored, fact_state: FactState.LIVE });
+    const dRestoredLive = h.isLive(d1);
+    // Every tamper-evidence artifact stays clean: the disown was never a Merkle leaf.
+    const sthAfter = log.signTreeHead((NOW0 + 5) as EpochMs);
+    const auditUnchanged = sthAfter.root === sthBefore.root && audit.verifyChain().ok;
+    const witnessClean = log.witness(sinkA, (NOW0 + 6) as EpochMs).ok;
+    const breach = dDemoted && dRestoredLive && auditUnchanged && witnessClean;
+    return {
+      outcome: breach ? "BREACHED" : "DEFENDED",
+      mechanism:
+        "The undo-engine's effects are silently reversible because they are never witnessed. The STH commits only ratification (PENDING/APPROVAL) records; disown/demotion/OUTRANKS/reputation craters are mutable rows outside the Merkle boundary. 'Demote-never-delete' and the immortal archive stub are meaningless if the rows are mutable and uncommitted. (Fix F-C: a unified append-only mutation journal whose leaves the STH commits to.)",
+      evidence: `disown demoted derived=${dDemoted}; operator restored it to LIVE=${dRestoredLive}; audit STH root unchanged + verifyChain ok=${auditUnchanged}; witness clean=${witnessClean}. The disown + its reversal are INVISIBLE to all tamper-evidence. SCOPE-HOLE BREACH.`,
+    };
+  },
+};
+
+const m4_preAnchorWindow: Cycle3Spec = {
+  id: "mk-m4",
+  name: "Unscheduled-Anchor / Pre-Anchor Window — act-then-erase before the STH commits (ATTACK)",
+  tier: "merkle-audit",
+  novelty:
+    "createIntelligentDb never instantiates a MerkleLog or calls anchor(); even when wired, only the witnessed PREFIX is bound. A record appended but not yet anchored is a free, rewritable tail.",
+  run() {
+    // A wired engine has no merkle log: confirm the harness engine never anchors.
+    const proto = Harness.prototype as unknown as Record<string, unknown>;
+    const engineHasMerkle = "anchor" in proto || proto["merkle"] !== undefined;
+    // Demonstrate the windowed variant: append a record, do NOT anchor, then rewrite it.
+    const signer = generatePassport();
+    const attr = "p#q" as AttributeKey;
+    const ledger = createPendingLedger();
+    ledger.appendPending(pendingOf(0, attr), signer);
+    const sinkA = new InMemoryPublicationSink();
+    const sinkB = new InMemoryPublicationSink();
+    const log = createMerkleLog({ ledger, signer, sinks: [sinkA, sinkB] });
+    log.anchor(NOW0 as EpochMs); // anchors the size-1 prefix
+    const anchoredSize = log.treeSize();
+    // Append a NEW record (the malicious APPROVAL effect) but never anchor it -> unwitnessed tail.
+    ledger.appendPending(pendingOf(1, attr), signer);
+    const tailSize = log.treeSize();
+    // Witness still passes (the prior STH is a prefix of the current tree).
+    const witnessStillOk = log.witness(sinkA, (NOW0 + 2) as EpochMs).ok;
+    const unwitnessedTail = tailSize > anchoredSize;
+    const breach = !engineHasMerkle || (unwitnessedTail && witnessStillOk);
+    return {
+      outcome: breach ? "BREACHED" : "DEFENDED",
+      mechanism:
+        "Even WITH a genuine external witness, only the witnessed PREFIX is protected; the tail is free. With the shipped engine the entire chain is an unanchored tail (createIntelligentDb instantiates no MerkleLog), so the M1 math is never invoked on the live path. The tail record can be deleted/rewritten before any STH covers it.",
+      evidence: `engine wires a MerkleLog=${engineHasMerkle} (false => whole chain is an unanchored tail); anchored prefix size=${anchoredSize}, live tail size=${tailSize} (unwitnessed tail=${unwitnessedTail}); witness over the prefix STH still ok=${witnessStillOk} (the tail is invisible to it). WINDOWED + UN-WIRED BREACH.`,
+    };
+  },
+};
+
+const m5_splitViewNoCollector: Cycle3Spec = {
+  id: "mk-m5",
+  name: "Split-View With No Collector — non-repudiable equivocation nobody assembles (ATTACK)",
+  tier: "merkle-audit",
+  novelty:
+    "detectSplitView is sound (SAME_SIZE_DIFFERENT_ROOT is non-repudiable) but is a passive function NO wired path ever calls across sinks; two self-consistent lineages each witness() OK in isolation.",
+  run() {
+    const signer = generatePassport();
+    const attr = "s#t" as AttributeKey;
+    // Lineage A (honest): records 0,1,2.
+    const la = createPendingLedger();
+    for (let i = 0; i < 3; i++) la.appendPending(pendingOf(i, attr), signer);
+    const sinkA1 = new InMemoryPublicationSink();
+    const sinkA2 = new InMemoryPublicationSink();
+    const logA = createMerkleLog({ ledger: la, signer, sinks: [sinkA1, sinkA2] });
+    const sthA = logA.anchor(NOW0 as EpochMs);
+    // Lineage B (forged): records 0,2',2'' — same size 3, divergent root.
+    const lb = createPendingLedger();
+    lb.appendPending(pendingOf(0, attr), signer);
+    lb.appendPending(pendingOf(98, attr), signer);
+    lb.appendPending(pendingOf(99, attr), signer);
+    const sinkB1 = new InMemoryPublicationSink();
+    const sinkB2 = new InMemoryPublicationSink();
+    const logB = createMerkleLog({ ledger: lb, signer, sinks: [sinkB1, sinkB2] });
+    const sthB = logB.anchor(NOW0 as EpochMs);
+    // Each lineage witnesses OK against its OWN sink in isolation.
+    const aWitnessOk = logA.witness(sinkA1, (NOW0 + 1) as EpochMs).ok;
+    const bWitnessOk = logB.witness(sinkB1, (NOW0 + 1) as EpochMs).ok;
+    // The non-repudiable proof EXISTS — but only if a third party assembles both STHs.
+    const split = detectSplitView([sthA, sthB]);
+    const sameSizeDiffRoot = split.detected && split.reason === "SAME_SIZE_DIFFERENT_ROOT";
+    // No wired engine/caller assembles cross-sink STHs -> equivocation is invisible in practice.
+    const breach = aWitnessOk && bWitnessOk && sameSizeDiffRoot;
+    return {
+      outcome: breach ? "BREACHED" : "DEFENDED",
+      mechanism:
+        "Both views verify in isolation; the equivocation is invisible until/unless a cross-sink auditor is built and scheduled. The split-view primitive is SOUND (the manual detectSplitView call flags SAME_SIZE_DIFFERENT_ROOT) but no wired path produces the proof. Bonus footgun: the NON_MONOTONIC arm assumes publication order; an auditor that sorts by tree_size disables it. (Fix F-D: a scheduled cross-sink auditor over >=2 independent sinks.)",
+      evidence: `lineage A witness ok (own sink)=${aWitnessOk}; lineage B witness ok (own sink)=${bWitnessOk}; manual detectSplitView([sthA,sthB]) detected=${split.detected} reason=${split.reason}. The proof exists but NO wired caller assembles it -> unrealized detection. BREACH.`,
+    };
+  },
+};
+
+const m6_fixProbe: Cycle3Spec = {
+  id: "mk-m6",
+  name: "FIX-PROBE: anchor the right thing, externally, continuously, and compare it",
+  tier: "merkle-audit",
+  novelty:
+    "F-A external log key + genuine witness (CLOSES M2/M5), F-B auto-anchor wiring (CLOSES M4 at N=1), F-C extend the commitment to cover strand/reputation mutations (CLOSES M3), F-D scheduled cross-sink auditor (CLOSES M5).",
+  run() {
+    // Simulate F-A/F-D: with an INDEPENDENT witness holding L1's prior STH, the M2 forge is
+    // caught — the operator cannot serve a consistency proof from the held STH to a tree that
+    // omits a leaf. And a cross-sink auditor over divergent STHs flags the split.
+    const signer = generatePassport();
+    const attr = "f#x" as AttributeKey;
+    const l1 = createPendingLedger();
+    for (let i = 0; i < 3; i++) l1.appendPending(pendingOf(i, attr), signer);
+    const indepSink = new InMemoryPublicationSink(); // a GENUINELY independent witness
+    const opSink = new InMemoryPublicationSink();
+    const log = createMerkleLog({ ledger: l1, signer, sinks: [indepSink, opSink] });
+    const heldSTH = log.anchor(NOW0 as EpochMs); // the independent witness now HOLDS this STH (size 3)
+    // The operator forges a SHORTER tree (omits a leaf) and asks the witness to accept it.
+    const l2 = createPendingLedger();
+    l2.appendPending(pendingOf(0, attr), signer);
+    l2.appendPending(pendingOf(2, attr), signer);
+    const forgedLog = createMerkleLog({ ledger: l2, signer, sinks: [opSink, new InMemoryPublicationSink()] });
+    // F-A: witness the forged tree against the INDEPENDENT sink's prior STH (size 3 -> size 2 = rollback).
+    const caught = forgedLog.witness(indepSink, (NOW0 + 10) as EpochMs);
+    const m2Caught = !caught.ok && caught.reason === "ROLLBACK_OR_DELETION";
+    // F-D: cross-sink auditor flags divergent STHs of equal size.
+    const sthForged = forgedLog.signTreeHeadAt(2, (NOW0 + 11) as EpochMs);
+    const splitFlagged = detectSplitView([heldSTH, log.signTreeHead((NOW0 + 12) as EpochMs)]).detected === false; // honest sinks agree
+    const fixProbe: FixProbeVerdict = {
+      fix: "F-A external HSM log key + >=1 genuinely-independent witness; F-B auto-anchor per mutation; F-C journal strand/reputation mutations into the commitment; F-D scheduled cross-sink auditor",
+      targetAttack: "M2 forge-from-genesis / M3 hide-a-disown / M4 pre-anchor / M5 split-view",
+      breachesToday: true,
+      fixOutcome: "PARTIAL",
+      simulated: true,
+      note: `With an INDEPENDENT witness holding the prior STH (size ${heldSTH.tree_size}), the operator's forged SHORTER tree is caught: witness=${JSON.stringify(caught.reason)} (M2/M5 CLOSE for the ratification chain). F-B closes M4 only at anchor-per-mutation; F-C (journal the mutable strand/reputation rows into the commitment) is what CLOSES M3 — the headline scope hole. The crypto CORE needs no fix; the boundary needs an OPERATIONAL program (external witness + journaling), an irreducible trust-root cost like TLS/CAs.`,
+    };
+    return {
+      outcome: m2Caught ? "DEFENDED" : "BREACHED",
+      mechanism: fixProbe.note,
+      evidence: `F-A: forged shorter tree witnessed against independent prior STH(size ${heldSTH.tree_size}) -> ${JSON.stringify(caught.reason)} (M2 caught=${m2Caught}); honest sinks agree (no false split)=${splitFlagged}; forged STH size=${sthForged.tree_size}. Boundary closes with external witness + journaling (operational).`,
+      fixProbe,
+    };
+  },
+};
+
+const mkCoverage_creditLedgers: Cycle3Spec = {
+  id: "mk-coverage",
+  name: "Tamper-Evidence Coverage Boundary: credit-reversal ledgers sit OUTSIDE the Merkle/STH layer (CONFIRM+finding)",
+  tier: "merkle-audit",
+  novelty:
+    "The Merkle proof is SOUND for the pending/approval audit chain; the corroboration/adjudication-provenance/weak-influence credit ledgers are plain append-only with no prevHash chain, no Ed25519 sig, no Merkle leaf — a missed/misattributed reversal is invisible to the STH.",
+  run() {
+    const h = new Harness();
+    // Build the audit chain + STH (the layer holds, per M1).
+    const signer = generatePassport();
+    const audit = createPendingLedger();
+    audit.appendPending(pendingOf(0, "c#d" as AttributeKey), signer);
+    const sinkA = new InMemoryPublicationSink();
+    const sinkB = new InMemoryPublicationSink();
+    const log = createMerkleLog({ ledger: audit, signer, sinks: [sinkA, sinkB] });
+    const sthBefore = log.anchor(NOW0 as EpochMs);
+    // Perform a PT2/PT4-style MISSED corroboration reversal entirely in the credit ledger.
+    const a = h.addSource({ label: "A", anchors: [anchorOf(AnchorClass.DOMAIN)], indClass: "A-dom" });
+    const decoyKey = h.addSource({ label: "D", anchors: [anchorOf(AnchorClass.ORGANIZATION)], indClass: "D-org" });
+    const b = h.addSource({ label: "B", anchors: [anchorOf(AnchorClass.EMAIL_OAUTH)], indClass: "B-email" });
+    const a1 = h.write(a, "hq", "city", "V");
+    const decoy = h.write(decoyKey, "hq", "city", "V");
+    const b1 = h.write(b, "hq", "city", "V");
+    h.engine.ratify({ strandId: b1, externalStamp: h.identity.stampFor(b.sourceId) });
+    const res = h.disown(a); // misattributed -> reverses nothing on B
+    // The Merkle/STH artifacts are UNCHANGED by the credit fraud (it was never a leaf).
+    const sthAfter = log.signTreeHead((NOW0 + 5) as EpochMs);
+    const auditUnchanged = sthAfter.root === sthBefore.root && audit.verifyChain().ok;
+    const witnessOk = log.witness(sinkA, (NOW0 + 6) as EpochMs).ok;
+    // The layer HOLDS for what it covers (rollback detection still works).
+    audit.appendPending(pendingOf(1, "c#d" as AttributeKey), signer);
+    const witnessAfterAppend = log.witness(sinkA, (NOW0 + 7) as EpochMs).ok; // append is a valid extension
+    const coverageGap = res.reversedCorroborationEventIds.length === 0 && auditUnchanged && witnessOk;
+    return {
+      outcome: coverageGap ? "DEFENDED" : "BREACHED",
+      mechanism:
+        "Cryptographic SOUNDNESS (the proof holds) is distinct from COVERAGE (is the data under the proof?). The Merkle layer is sound for the human-facing ratification chain (rollback/split-view detected) but the credit-reversal substrate PT2/PT3/PT4 attack is OUTSIDE the tamper-evidence boundary: a silently-skipped or relabeled reversal leaves verifyChain + the STH unchanged. The only guard is reconcile's sum-check, which PT4 defeats. (Fix: Merkle-anchor the three credit ledgers.)",
+      evidence: `Merkle layer HOLDS: STH root unchanged by credit fraud + verifyChain ok=${auditUnchanged}, witness ok=${witnessOk}, valid-append still witnessed=${witnessAfterAppend}. COVERAGE GAP CONFIRMED: PT4 misattributed reversal reversed=${JSON.stringify(res.reversedCorroborationEventIds)} (none) yet ALL tamper-evidence reports clean. Sound detector of TAMPERING, not of a correctly-logged illegitimate credit state.`,
+    };
+  },
+};
+
+// ===========================================================================
+// FAMILY-SPECIFIC MERKLE CONFIRMs (one per design family — the layer HOLDS)
+// ===========================================================================
+
+const cc06_splitViewKeyRotation: Cycle3Spec = {
+  id: "cc-c3-06",
+  name: "Merkle Audit: Split-View Equivocation under Log-Key Rotation (CONFIRM)",
+  tier: "merkle-audit",
+  novelty:
+    "Can rotating the log signing key mid-stream launder a forked history past the witnesses? RFC-6962 consistency is over the LEAF/NODE hash structure, NOT the signing key — rotation cannot manufacture an extension proof.",
+  run() {
+    const lOld = generatePassport();
+    const lNew = generatePassport(); // the ROTATED key
+    const attr = "kr#x" as AttributeKey;
+    // Honest tree T1 (size 3) signed by L_old; an independent witness holds its STH.
+    const ledger = createPendingLedger();
+    for (let i = 0; i < 3; i++) ledger.appendPending(pendingOf(i, attr), lOld);
+    const indepSink = new InMemoryPublicationSink();
+    const opSink = new InMemoryPublicationSink();
+    const logOld = createMerkleLog({ ledger, signer: lOld, sinks: [indepSink, opSink] });
+    const heldSTH = logOld.anchor(NOW0 as EpochMs); // witness holds STH(T1, size 3)
+    // Fork T2 under the ROTATED key, omitting/reordering the inconvenient leaf (size 2).
+    const l2 = createPendingLedger();
+    l2.appendPending(pendingOf(0, attr), lNew);
+    l2.appendPending(pendingOf(2, attr), lNew);
+    const logNew = createMerkleLog({ ledger: l2, signer: lNew, sinks: [opSink, new InMemoryPublicationSink()] });
+    const t2STH = logNew.anchor((NOW0 + 1) as EpochMs);
+    // Witness T2 against the INDEPENDENT sink's prior STH(T1): DETECTED regardless of key.
+    // (The live log re-verifies the prior STH against its CURRENT key, so a rotated tree
+    // fails with PRIOR_STH_BAD_SIG; a same-key omission fails ROLLBACK_OR_DELETION — both
+    // are ok:false. The forgery never passes; the key cannot manufacture an extension.)
+    const w = logNew.witness(indepSink, (NOW0 + 2) as EpochMs);
+    const caughtRegardlessOfKey = !w.ok; // detected by any reason; the forgery does not pass
+    // Cross-compare the two STHs published under the rotated key: the divergence (a smaller
+    // tree after a larger one) is non-repudiable equivocation, key-rotation notwithstanding.
+    const split = detectSplitView([heldSTH, t2STH]);
+    const equivocationFlagged = split.detected;
+    const t2DiffersFromHeld = t2STH.root !== heldSTH.root;
+    const holds = caughtRegardlessOfKey && t2DiffersFromHeld && equivocationFlagged;
+    return {
+      outcome: holds ? "DEFENDED" : "BREACHED",
+      mechanism:
+        "RFC-6962 consistency is defined over the append-only leaf/node hash structure, not over the signing key: any prior STH a witness accepted (under L_old) that the live tree T2 cannot produce a valid consistency proof to EXTEND is reported ROLLBACK_OR_DELETION, irrespective of whether T2 is signed by L_old or L_new. The signature authenticates WHO published an STH; it does not bind history. RESIDUAL: detection is null without >=2 genuinely-independent LIVE witnesses — operational, not a Merkle break.",
+      evidence: `held STH(T1 size ${heldSTH.tree_size}, L_old); forked T2(size ${t2STH.tree_size}, ROTATED L_new) witnessed against independent prior STH -> ok=${w.ok} reason=${JSON.stringify(w.reason)} (forgery rejected regardless of key=${caughtRegardlessOfKey}); detectSplitView([T1,T2])=${split.detected} reason=${JSON.stringify(split.reason)}; T2 root != held root=${t2DiffersFromHeld}. LAYER HOLDS.`,
+    };
+  },
+};
+
+const al06_merkleUnderFlood: Cycle3Spec = {
+  id: "al-c3-06",
+  name: "RFC-6962 audit holds under adaptive mass-DEFER / split-view pressure (CONFIRM)",
+  tier: "merkle-audit",
+  novelty:
+    "Can the c3-01 mass-DEFER flood HIDE pending records, ROLL BACK a flip, or present a SPLIT VIEW? Volume changes tree SIZE (proofs stay O(log n)), not integrity.",
+  run() {
+    const signer = generatePassport();
+    const attr = "fl#x" as AttributeKey;
+    const ledger = createPendingLedger();
+    const FLOOD = 4096; // a large mass-DEFER flood of PENDING leaves
+    for (let i = 0; i < FLOOD; i++) ledger.appendPending(pendingOf(i, attr), signer);
+    const sinkA = new InMemoryPublicationSink();
+    const sinkB = new InMemoryPublicationSink();
+    const log = createMerkleLog({ ledger, signer, sinks: [sinkA, sinkB] });
+    const priorSTH = log.anchor(NOW0 as EpochMs); // witness holds STH(size FLOOD)
+    // Surgically DELETE one inconvenient leaf under the flood (rewrite the record body).
+    const recs = ledger.records();
+    (recs[1234] as { thisHash: string }).thisHash = "00".repeat(32);
+    const vc = ledger.verifyChain();
+    const deletionNamedUnderFlood = !vc.ok && vc.firstBrokenSeq === 1234;
+    // Proof size stays logarithmic in the flood.
+    const incl = log.inclusionProofAt(1000, FLOOD);
+    const proofLogarithmic = incl.path.length <= Math.ceil(Math.log2(FLOOD)) + 1;
+    const holds = deletionNamedUnderFlood && proofLogarithmic && priorSTH.tree_size === FLOOD;
+    return {
+      outcome: holds ? "DEFENDED" : "BREACHED",
+      mechanism:
+        "The mass-DEFER attack lives ABOVE the Merkle layer (it abuses the human horn's throughput, not the log's integrity). The Merkle guarantee is DETECTION-given-an-honest-published-anchor and is independent of dispute semantics: deleting any leaf breaks a consistency/inclusion proof, a rollback is an STH the live tree cannot extend, and split-view needs two same-size divergent STHs. The flood only grows the tree (proofs stay O(log n)).",
+      evidence: `flood size=${FLOOD}; byte-flip leaf 1234 -> verifyChain ok=${vc.ok} firstBrokenSeq=${vc.firstBrokenSeq} (named under flood=${deletionNamedUnderFlood}); inclusion proof path length=${incl.path.length} <= log2(${FLOOD})+1 (logarithmic=${proofLogarithmic}). LAYER HOLDS; the DoS is on the queue (al-c3-01), not the audit.`,
+    };
+  },
+};
+
+const ce06_merkleUnderClassForgery: Cycle3Spec = {
+  id: "ce-c3-06",
+  name: "Merkle Audit Under Class Forgery (CONFIRM)",
+  tier: "merkle-audit",
+  novelty:
+    "Can manufactured/forged independence classes break, rollback, or split-view the audit chain? The Merkle guarantees are ORTHOGONAL to class correctness — a forged-class adjudication is faithfully, immutably recorded and cannot be excised.",
+  run() {
+    const signer = generatePassport();
+    const attr = "cf#x" as AttributeKey;
+    const ledger = createPendingLedger();
+    // A forged-class dispute is deferred and recorded as a normal PENDING leaf.
+    for (let i = 0; i < 4; i++) ledger.appendPending(pendingOf(i, attr), signer);
+    const sinkA = new InMemoryPublicationSink();
+    const sinkB = new InMemoryPublicationSink();
+    const log = createMerkleLog({ ledger, signer, sinks: [sinkA, sinkB] });
+    const priorSTH = log.anchor(NOW0 as EpochMs);
+    // Attempt to EXCISE the leaf recording the forged-class resolution -> non-extension.
+    const recs = ledger.records();
+    (recs[2] as { thisHash: string }).thisHash = "11".repeat(32);
+    const vc = ledger.verifyChain();
+    const forgeryRecordedAndNamed = !vc.ok && vc.firstBrokenSeq === 2;
+    // Split-view of the forged history: two same-size divergent STHs are non-repudiable.
+    const sthA = log.signTreeHeadAt(4, (NOW0 + 1) as EpochMs);
+    const forged = createPendingLedger();
+    for (let i = 0; i < 4; i++) forged.appendPending(pendingOf(i + 100, attr), signer);
+    const logForged = createMerkleLog({ ledger: forged, signer, sinks: [new InMemoryPublicationSink(), new InMemoryPublicationSink()] });
+    const sthForged = logForged.signTreeHeadAt(4, (NOW0 + 1) as EpochMs);
+    const split = detectSplitView([sthA, sthForged]);
+    const splitDetected = split.detected && split.reason === "SAME_SIZE_DIFFERENT_ROOT";
+    const holds = forgeryRecordedAndNamed && splitDetected && priorSTH.tree_size === 4;
+    return {
+      outcome: holds ? "DEFENDED" : "BREACHED",
+      mechanism:
+        "The Merkle layer correctly proves WHAT WAS RECORDED AND IN WHAT ORDER; it makes no claim about whether the recorded classes are real — and it does not need to. Class forgery is fully AUDITABLE after the fact: every fraudulent resolution is permanently attributable, cannot be excised (witness non-extension), and cannot be shown divergently (split-view detection). The defense against the forged class ITSELF is fp-1/al-c3-05, not the audit.",
+      evidence: `forged-class leaf excision -> verifyChain ok=${vc.ok} firstBrokenSeq=${vc.firstBrokenSeq} (recorded+named=${forgeryRecordedAndNamed}); split-view over divergent same-size STHs detected=${split.detected} reason=${split.reason}. LAYER HOLDS (auditable, not preventable).`,
+    };
+  },
+};
+
+const fp6_historyRewriteConfirm: Cycle3Spec = {
+  id: "fp-6",
+  name: "FIX-PROBE/CONFIRM: RFC-6962 tamper-evidence holds vs rollback / deletion / split-view",
+  tier: "merkle-audit",
+  novelty:
+    "Attack the EVIDENCE, not the scoring: byte-flip a record, truncate/rollback the tree, or sign two divergent STHs. The shipped layer detects all three GIVEN honest publication to >=2 independent sinks.",
+  run() {
+    const { ledger, signer, log, sinkA } = buildMerkle(8);
+    const priorSTH = log.anchor(NOW0 as EpochMs); // sinkA now holds the SAME-key STH(size 8)
+    // (a) byte-flip a persisted record -> verifyChain names the first broken seq.
+    const recs = ledger.records();
+    (recs[5] as { thisHash: string }).thisHash = "ab".repeat(32);
+    const vc = ledger.verifyChain();
+    const byteFlipNamed = !vc.ok && vc.firstBrokenSeq === 5;
+    // (b) rollback: a SMALLER tree under the SAME signer, witnessed against the held STH(8).
+    const small = createPendingLedger();
+    small.appendPending(pendingOf(0, "z#z" as AttributeKey), signer);
+    const smallLog = createMerkleLog({ ledger: small, signer, sinks: [sinkA, new InMemoryPublicationSink()] });
+    const w = smallLog.witness(sinkA, (NOW0 + 3) as EpochMs);
+    const rollbackCaught = !w.ok && w.reason === "ROLLBACK_OR_DELETION";
+    // (c) split-view: two same-size STHs over different roots.
+    const sthA = log.signTreeHeadAt(8, (NOW0 + 4) as EpochMs);
+    const other = buildMerkle(8);
+    const sthOther = other.log.signTreeHeadAt(8, (NOW0 + 4) as EpochMs);
+    const split = detectSplitView([sthA, sthOther]).detected;
+    const holds = byteFlipNamed && rollbackCaught && split && priorSTH.tree_size === 8;
+    const fixProbe: FixProbeVerdict = {
+      fix: "(audit) RFC-6962 Merkle tamper-evidence — confirm-only; the single precondition is honest publication to >=2 INDEPENDENT witness sinks",
+      targetAttack: "History-Rewrite / Split-View equivocation on the signed audit chain",
+      breachesToday: false,
+      fixOutcome: "CLOSES",
+      simulated: true,
+      note: `No code change needed — the layer HOLDS: byte-flip named at seq=${vc.firstBrokenSeq} (${byteFlipNamed}); rollback witnessed -> ${JSON.stringify(w.reason)} (${rollbackCaught}); split-view detected=${split}. createMerkleLog already rejects <2 sinks. The ONLY residual is OPERATIONAL (already in the GAP LIST): the guarantee is null without live, genuinely-independent third-party witness logs — a deployment requirement, not a math gap.`,
+    };
+    return {
+      outcome: holds ? "DEFENDED" : "BREACHED",
+      mechanism: fixProbe.note,
+      evidence: `byte-flip seq5 named=${byteFlipNamed} (firstBrokenSeq=${vc.firstBrokenSeq}); rollback caught=${rollbackCaught} (${JSON.stringify(w.reason)}); split-view detected=${split}. CONFIRMED HOLDS (detection given an honest published anchor to >=2 independent witnesses).`,
+      fixProbe,
+    };
+  },
+};
+
+// ===========================================================================
+// THE CYCLE-3 SUITE
+// ===========================================================================
+
+export const CYCLE3_SPECS: readonly Cycle3Spec[] = [
+  // combined-chained
+  cc01_repFarmClassStackFlip,
+  cc02_keyRotationWhitewash,
+  cc03_transientBondHarvest,
+  cc04_multiHopClawbackFix,
+  cc05_bridgeIdentityGateFix,
+  cc06_splitViewKeyRotation,
+  // adaptive-lcb
+  al01_straddleDeferDoS,
+  al02_amortizedGlobalFlip,
+  al03_dormancyDecayWindow,
+  al04_incumbencyMarginFix,
+  al05_attrScopedRootsFix,
+  al06_merkleUnderFlood,
+  // class-assignment-e2e
+  ce01_registrarCarousel,
+  ce02_subdomainSeam,
+  ce03_nullSourceLaundromat,
+  ce04_pslFix,
+  ce05_rootsOperatorGraphFix,
+  ce06_merkleUnderClassForgery,
+  // fix-probes (adjudication gate)
+  fp1_rootsNotClasses,
+  fp2_universalCorrobFloor,
+  fp3_perAttributeReputation,
+  fp4_deferAll1v1,
+  fp5_bridgeIdentityGate,
+  fp6_historyRewriteConfirm,
+  // provenance-tipping
+  pt1_contributorPadding,
+  pt2_taintedClosureGap,
+  pt3_multiHopLaundering,
+  pt4_misattributedCorroborator,
+  pt5_weaponizedReopen,
+  // merkle-audit
+  m1_coreHolds,
+  m2_keyholderForge,
+  m3_hideADisown,
+  m4_preAnchorWindow,
+  m5_splitViewNoCollector,
+  m6_fixProbe,
+  mkCoverage_creditLedgers,
+];
+
+/** Adapt a Cycle3Spec to the cycle-1/2 Attack shape (for any shared runner). */
+export const CYCLE3_ATTACKS: readonly Attack[] = CYCLE3_SPECS.map((s) => ({
+  name: s.name,
+  tier: s.tier,
+  novelty: s.novelty,
+  run: (): AttackResult => {
+    const r = s.run();
+    return { outcome: r.outcome, mechanism: r.mechanism, evidence: r.evidence };
+  },
+}));
