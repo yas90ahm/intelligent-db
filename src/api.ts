@@ -591,6 +591,20 @@ class IntelligentDbImpl implements IntelligentDb {
    */
   readonly #ratification: RatificationDeps | null;
 
+  /**
+   * M3 anti-grief (BATCH 4, OD-2 seam family) — the per-source-pair contradiction
+   * RATE-LIMITER. Keyed `${contradictor}->${target}:${class}` → the witness time it
+   * last SCARRED. A given contradictor→target pair may add a NON-DECAYING scar at most
+   * ONCE per independence class per {@link #SCAR_WINDOW_MS}; a repeat inside the window
+   * falls back to an ordinary (decaying) contradiction. This blocks a single attacker
+   * STACKING many w-weighted contradictions to grief an honest incumbent, while leaving
+   * a genuine SECOND independent class free to scar (different pair / different class).
+   * First-arrival-safe: the scar penalizes the CONTRADICTED party, never the late-arriver.
+   */
+  readonly #scarLimiter = new Map<string, EpochMs>();
+  /** The per-pair scar rate-limit window (one decay half-life, 90 days). */
+  readonly #SCAR_WINDOW_MS = 90 * 86_400_000;
+
   constructor(
     store: StrandStore,
     identity: SourceIdentityLayer,
@@ -656,6 +670,38 @@ class IntelligentDbImpl implements IntelligentDb {
       if (s !== null) absorb(s.provenance);
     }
     return this.#identity.independentRootCount([...byRootId.values()]);
+  }
+
+  /**
+   * The PRIMARY (representative) source backing a strand — its first non-null provenance
+   * `sourceId` — used as the contradictor identity in the per-pair scar rate-limit. Null
+   * if the strand is unknown or carries no resolvable source.
+   */
+  #primarySourceOf(strandId: StrandId | null, members: readonly Strand[]): SourceId | null {
+    if (strandId === null) return null;
+    const s = members.find((m) => m.id === strandId) ?? this.#store.getStrand(strandId);
+    if (s === null) return null;
+    for (const root of s.provenance) if (root.sourceId !== null) return root.sourceId;
+    return null;
+  }
+
+  /**
+   * M3 anti-grief — decide whether an ADJUDICATED contradiction may SCAR (route into the
+   * NON-DECAYING `scarBeta`) under the per-source-pair rate-limit. Returns true (and
+   * records the witness time) the FIRST time a given `contradictor→target` pair scars a
+   * given independence `class` within {@link #SCAR_WINDOW_MS}; returns false for a repeat
+   * inside the window (so the caller falls back to an ordinary decaying contradiction).
+   * A null contradictor (unknown winner source) still scars once per (target, class) —
+   * fail-safe toward recording the betrayal, not toward griefing (the window still caps it).
+   */
+  #admitScar(contradictor: SourceId | null, target: SourceId, klass: string, at: EpochMs): boolean {
+    const key = `${String(contradictor ?? "?")}->${String(target)}:${klass}`;
+    const last = this.#scarLimiter.get(key);
+    if (last !== undefined && (at as number) - (last as number) < this.#SCAR_WINDOW_MS) {
+      return false; // already scarred this pair/class in-window ⇒ ordinary contradiction
+    }
+    this.#scarLimiter.set(key, at);
+    return true;
   }
 
   /**
@@ -905,7 +951,14 @@ class IntelligentDbImpl implements IntelligentDb {
     // corroboration ledger is wired AND α actually moved (never guessed/coincidental).
     if (this.#reputation !== null) {
       const beforeAlpha = this.#reputation.stateOf(canonicalStamp.source_id)?.alpha ?? 1;
-      const after = this.#reputation.ratify(canonicalStamp.source_id, at);
+      // M2 (BATCH 4) — supply the engine-owned MIS corroboration DEPTH so the ledger can
+      // raise its NON-DECAYING depth-floor MONOTONE-MAX. `#R` is the SAME shared agreement
+      // basis (OD-6): the count of mutually anchor-INDEPENDENT roots backing this value
+      // (strand's roots ∪ agreeing LIVE strands' roots, via `independentRootCount`). The
+      // model never witnesses — the ledger only stores the max it is handed. A same-class
+      // (depth-1) flood passes depth 1 ⇒ `floorMass(1)=0` ⇒ buys no floor.
+      const depth = this.#R(strand);
+      const after = this.#reputation.ratify(canonicalStamp.source_id, at, undefined, depth);
       const deltaAlpha = after.alpha - beforeAlpha;
       // ENGINE-OWNED EVIDENCE (OD-8): the corroborating set is DERIVED from the engine's
       // own agreement index (same entity + content_hash + LIVE), never supplied by the
@@ -1039,10 +1092,21 @@ class IntelligentDbImpl implements IntelligentDb {
               this.#store.putEdge(edge);
             }
             this.#store.putStrand(loserObj);
-            // Reputation: a contradicted claim craters its authors' earned trust.
+            // Reputation: a contradicted claim craters its authors' earned trust. M3
+            // (BATCH 4): this is an ADJUDICATED contradiction, so it SCARS (routes `c·w`
+            // into the NON-DECAYING `scarBeta`, suppressing the betrayer's depth-floor)
+            // — UNLESS the per-source-pair rate-limit (OD-2 seam family) has already
+            // scarred this contradictor→target pair for this class in the window, in
+            // which case it falls back to an ordinary (decaying) contradiction so a
+            // single attacker cannot STACK many scars to grief an honest incumbent. The
+            // scar penalizes the CONTRADICTED (loser) party, never the late-arriver
+            // (first-arrival-safe).
             if (this.#reputation !== null) {
+              const contradictor = this.#primarySourceOf(winnerId, members);
               for (const root of loserObj.provenance) {
-                if (root.sourceId !== null) this.#reputation.contradict(root.sourceId, at);
+                if (root.sourceId === null) continue;
+                const scarring = this.#admitScar(contradictor, root.sourceId, root.independenceClass, at);
+                this.#reputation.contradict(root.sourceId, at, undefined, scarring);
               }
             }
           }

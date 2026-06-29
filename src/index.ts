@@ -268,6 +268,8 @@ export {
   newReputationState,
   decay,
   lcbReadout,
+  floorMass,
+  scarCapReduction,
   applyRatification,
   applyContradiction,
   applyCreditReversal,
