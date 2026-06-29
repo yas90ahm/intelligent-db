@@ -419,10 +419,13 @@ describe("Intelligent DB scaffold smoke", () => {
     //  (1) it makes the near strand's out_weight_sum STRICTLY GREATER than the
     //      bridge edge's own weight, so a (forbidden) LOCAL crossing of the bridge
     //      would deposit  1 * (w_bridge / out_weight_sum) * gamma  which is
-    //      STRICTLY LESS than gamma. The sweep, by contrast, seeds EXACTLY gamma.
-    //      Asserting farEnergy === gamma therefore PROVES the far side was lit by
-    //      the SWEEP, not by local expansion (this assertion FAILS if the local
-    //      phase ever stops skipping CROSS_WEB_BRIDGE edges).
+    //      STRICTLY LESS than gamma. The sweep, by contrast, seeds gamma scaled by
+    //      the bridge's own provenance_independence (B1): here indep=0.5 ⇒ the
+    //      sweep seed is EXACTLY gamma*0.5. That constant (0.5*gamma) differs from
+    //      the share-normalized local cross (w_bridge/out_weight_sum*gamma ≈
+    //      0.111*gamma), so asserting farEnergy === gamma*0.5 still PROVES the far
+    //      side was lit by the SWEEP, not by local expansion (this assertion FAILS
+    //      if the local phase ever stops skipping CROSS_WEB_BRIDGE edges).
     //  (2) it gives the local phase a real neighbor to expand, so the walk is a
     //      genuine two-strand local web bridged to a third strand.
     let sibling = strandIn("strand:sib", "entity:near-web", "class:sib", at);
@@ -492,13 +495,17 @@ describe("Intelligent DB scaffold smoke", () => {
     expect(result.halt.reason).toBe(ReasonCode.BRIDGE_SWEEP_CLEAR);
     expect(result.halt.degraded).toBe(false);
 
-    // THE discriminating assertion: the far side carries EXACTLY config.gamma (the
-    // sweep's seedActivation), NOT the strictly-smaller share-normalized energy a
-    // local bridge crossing would have deposited. This is what proves the local
-    // phase SKIPPED the bridge and the SWEEP alone lit the far web.
+    // THE discriminating assertion: the far side carries EXACTLY the sweep's
+    // seedActivation = gamma * the bridge's provenance_independence (B1 down-weight;
+    // here indep=0.5 ⇒ gamma*0.5), NOT the strictly-smaller share-normalized energy
+    // a local bridge crossing would have deposited. This proves the local phase
+    // SKIPPED the bridge and the SWEEP alone lit the far web, AND that B1's seed
+    // scaling is live (a weak-stamped bridge is seeded below gamma).
     const farEnergy = result.lit.find((l) => l.strandId === far.id)?.activation;
-    expect(farEnergy).toBe(DEFAULT_WALK_CONFIG.gamma);
+    expect(farEnergy).toBe(DEFAULT_WALK_CONFIG.gamma * 0.5);
     expect(farEnergy).not.toBe(localCrossEnergy);
+    // B1 stamp: exactly one crossing was down-weighted (the weak-stamped bridge).
+    expect(result.halt.bridgeSeedsDownweighted).toBe(1);
 
     // The local sibling DID receive the smaller share-normalized local energy —
     // confirming local expansion really ran (and really differs from the sweep).

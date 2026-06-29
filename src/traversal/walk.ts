@@ -696,5 +696,22 @@ function makeHaltStoreView(store: StrandStore): HaltStoreView {
       }
       return e.to;
     },
+    bridgeIndependence(edgeId: EdgeId): number {
+      // B1 — read the already-loaded per-edge provenance_independence stamp.
+      // Fail-open: an unknown edge / absent / non-positive stamp ⇒ 0 (caller
+      // stays at γ). O(1) field read — NO MIS/identity round-trip on recall.
+      const e = store.getEdge(edgeId);
+      if (e === null) return 0;
+      const v = e.provenance_independence as number;
+      return Number.isFinite(v) && v > 0 ? v : 0;
+    },
+    bridgeEarnedValue(edgeId: EdgeId): number {
+      // B2 — the owning (from) strand's offline earned_bridge_value. 0 if the
+      // edge or its origin strand is unknown (fail-open ⇒ sorts last).
+      const e = store.getEdge(edgeId);
+      if (e === null) return 0;
+      const s = store.getStrand(e.from);
+      return s === null ? 0 : s.bridge.earned_bridge_value;
+    },
   };
 }

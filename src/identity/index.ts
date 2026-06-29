@@ -215,6 +215,20 @@ export interface SourceIdentityLayer {
    * disjoint independence classes, never the raw root headcount.
    */
   independentRootCount(rootSet: readonly ProvenanceRoot[]): number;
+
+  /**
+   * RC-5 — true MIS anchor-independence between two SOURCES (not a mere distinct
+   * key). Reproduces the EXACT pair logic {@link independentRootCount}'s internal
+   * `independent` predicate uses (identity/index.ts:356–382), at the source level:
+   *   - if EITHER source is unresolvable (not registered) ⇒ fall open to `true`
+   *     (the count layer's class-disjoint fallback; mirrors the null-source branch);
+   *   - else PREFER the registry's source-aware `anchors.independentSources`
+   *     (it sees per-anchor `classId` + the `operatorClassId` fleet axis), else
+   *     fall back to `anchors.independenceBetween(...) > 0`.
+   * Surfacing it here keeps ONE independence notion (anti-drift): the approve-gate
+   * (RC-5) and the forgetting count read the SAME predicate.
+   */
+  independentSources(a: SourceId, b: SourceId): boolean;
 }
 
 // ---------------------------------------------------------------------------
@@ -494,6 +508,29 @@ export function createSourceIdentityLayer(
 
       // Clamp: the count never exceeds the Stage-1 distinct-class bound.
       return Math.min(distinctClassCount, maxSetSize);
+    },
+
+    independentSources(a: SourceId, b: SourceId): boolean {
+      // RC-5 — the SOURCE-level twin of the `independent`-pair predicate above
+      // (identity/index.ts:356–382), so RC-5's approve-gate and the forgetting
+      // count share ONE independence notion (anti-drift).
+      // A source is trivially not independent of itself (an echo).
+      if (a === b) return false;
+      // Mirror the null-source branch: consult anchors only when BOTH sources are
+      // resolvable (registered); otherwise fall OPEN to `true` (class-disjoint
+      // verdict), never DOWNGRADE without positive correlation evidence.
+      if (keys.has(a) && keys.has(b)) {
+        // PREFER the registry's source-aware predicate (it sees per-anchor
+        // `classId` + the `operatorClassId` fleet axis); else the anchor-set
+        // disjointness math with the same `> 0` threshold the count layer uses.
+        if (anchors.independentSources !== undefined) {
+          return anchors.independentSources(a, b);
+        }
+        return (
+          anchors.independenceBetween(anchors.anchorsOf(a), anchors.anchorsOf(b)) > 0
+        );
+      }
+      return true;
     },
   };
 }

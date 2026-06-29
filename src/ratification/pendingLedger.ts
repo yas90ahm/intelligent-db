@@ -348,6 +348,22 @@ export interface ApproveContext {
    * id policy.
    */
   mintEdgeId(winner: StrandId, loser: StrandId): EdgeId;
+  /**
+   * RC-5 — true MIS anchor-independence between two sources, delegating to the
+   * SAME `anchors.independentSources` predicate the Bron–Kerbosch adjacency is
+   * built from (identity/index.ts:371), WITH the `independenceBetween > 0`
+   * fallback. NOT mere key distinctness. The approver must be
+   * `independentSources(approver, author) === true` against EVERY disputed-member
+   * author. Supplied by the engine so the ledger imports no identity layer.
+   */
+  independentSources(a: SourceId, b: SourceId): boolean;
+  /**
+   * RC-5 precondition — does this source hold ANY priced anchor?
+   * (`identity.stampFor(sourceId).anchor_cost > 0`). A bare-key approver (false)
+   * can never be the external second lock and is rejected even if class-disjoint
+   * ("no anchor → no independent voice").
+   */
+  approverHasAnchors(sourceId: SourceId): boolean;
 }
 
 // ---------------------------------------------------------------------------
@@ -708,6 +724,27 @@ class InMemoryPendingLedger implements PendingLedger {
         if (author === approverSourceId) {
           throw new Error(
             `approve: self-approval rejected — approver ${String(approverSourceId)} authored member ${String(memberId)}.`,
+          );
+        }
+      }
+    }
+
+    // 4b) RC-5 — MIS ANCHOR-DISJOINTNESS GATE ("no anchor → no independent voice").
+    //     The approver must hold ≥1 priced anchor AND be MIS-independent of EVERY
+    //     author of EVERY disputed member — a distinct KEY is not enough (an
+    //     attacker can mint distinct keys for free; only a priced, anchor-disjoint
+    //     actor is the external second lock). Fail-closed; additive (only ADDS a
+    //     rejection path, never admits an approver the distinct-key gate rejected).
+    if (!ctx.approverHasAnchors(approverSourceId)) {
+      throw new Error(
+        `approve: approver ${String(approverSourceId)} holds no priced anchor — no anchor, no independent voice.`,
+      );
+    }
+    for (const memberId of members) {
+      for (const author of ctx.authorsOf(memberId)) {
+        if (!ctx.independentSources(approverSourceId, author)) {
+          throw new Error(
+            `approve: approver ${String(approverSourceId)} is not anchor-independent of member author ${String(author)}.`,
           );
         }
       }
@@ -1094,6 +1131,24 @@ class SqlitePendingLedgerImpl implements SqlitePendingLedger {
         if (author === approverSourceId) {
           throw new Error(
             `approve: self-approval rejected — approver ${String(approverSourceId)} authored member ${String(memberId)}.`,
+          );
+        }
+      }
+    }
+
+    // 4b) RC-5 — MIS ANCHOR-DISJOINTNESS GATE (identical to the in-memory impl):
+    //     the approver must hold ≥1 priced anchor AND be MIS-independent of EVERY
+    //     author of EVERY disputed member. Fail-closed; additive.
+    if (!ctx.approverHasAnchors(approverSourceId)) {
+      throw new Error(
+        `approve: approver ${String(approverSourceId)} holds no priced anchor — no anchor, no independent voice.`,
+      );
+    }
+    for (const memberId of members) {
+      for (const author of ctx.authorsOf(memberId)) {
+        if (!ctx.independentSources(approverSourceId, author)) {
+          throw new Error(
+            `approve: approver ${String(approverSourceId)} is not anchor-independent of member author ${String(author)}.`,
           );
         }
       }

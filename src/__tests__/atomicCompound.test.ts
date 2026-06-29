@@ -498,6 +498,9 @@ describe("crash recovery — a committed compound op is fully present after an u
       // OUTRANKS + reputation, all in ONE txn over the shared handle).
       approverPassport = generatePassport();
       w.keys.register(approverPassport);
+      // RC-5: the approver needs a priced anchor (no anchor → no voice) that is
+      // disjoint from the members' KYC anchors (DOMAIN ⊥ VERIFIED_HUMAN ⇒ independent).
+      w.anchors.bind(approverPassport.sourceId, [domainAnchor()]);
       const resolved = w.engine.approve(csid, winnerId, approverPassport, NOW);
       expect(resolved.demotions.length).toBe(1);
       expect(resolved.outranksEdges.length).toBe(1);
@@ -635,6 +638,8 @@ describe("corruption detection — never silently served as correct", () => {
       );
       const approver = generatePassport();
       w.keys.register(approver);
+      // RC-5: priced, member-disjoint anchor (DOMAIN ⊥ the members' KYC anchors).
+      w.anchors.bind(approver.sourceId, [domainAnchor()]);
       w.engine.approve(csid, winnerId, approver, NOW);
       // Clean close so the WAL is checkpointed into the main file we then tamper.
       w.db.close();

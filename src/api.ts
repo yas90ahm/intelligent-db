@@ -1420,6 +1420,14 @@ class IntelligentDbImpl implements IntelligentDb {
       },
       mintEdgeId: (winner: StrandId, loser: StrandId): EdgeId =>
         asEdgeId(`edge:outranks:${randomUUID()}:${String(winner)}->${String(loser)}`),
+      // RC-5 — the two anchor-independence predicates the approve-gate consults.
+      // Both delegate to the SAME identity layer the rest of the web reads, so
+      // there is exactly ONE independence notion (no drift) and the ledger stays
+      // pure (no identity import — the engine supplies these).
+      independentSources: (a: SourceId, b: SourceId): boolean =>
+        this.#identity.independentSources(a, b),
+      approverHasAnchors: (sourceId: SourceId): boolean =>
+        this.#identity.stampFor(sourceId).anchor_cost > 0,
     };
 
     // ATOMIC: the ledger's APPROVAL append (the signed audit record) + the reputation

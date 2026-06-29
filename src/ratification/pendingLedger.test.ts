@@ -115,6 +115,14 @@ function ctxOver(byId: Map<StrandId, Strand>): ApproveContext {
     mintEdgeId(winner: StrandId, loser: StrandId): EdgeId {
       return ("edge:outranks:" + String(winner) + "->" + String(loser)) as EdgeId;
     },
+    // RC-5 — default to an anchored, fully anchor-independent approver so the
+    // existing resolve-path tests are unaffected (the gate only ADDS rejections).
+    independentSources(_a: SourceId, _b: SourceId): boolean {
+      return true;
+    },
+    approverHasAnchors(_sourceId: SourceId): boolean {
+      return true;
+    },
   };
 }
 

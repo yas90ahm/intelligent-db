@@ -32,6 +32,7 @@ import {
   FactOrigin,
   Tier,
   EdgeType,
+  AnchorClass,
   asEpochMs,
   asStrandId,
 } from "../index.js";
@@ -204,8 +205,13 @@ describe("engine.adjudicate — routing the consolidation outcome", () => {
     const b = fileStrand(store, "strand:b", "src:b" as SourceId, "class:B", { v: "Atlantis" });
     expect(db.adjudicate(ATTR).kind).toBe("DEFERRED");
 
-    // An EXTERNAL, distinct approver designates a as the winner.
+    // An EXTERNAL, distinct approver designates a as the winner. RC-5: the approver
+    // must hold a priced anchor (no anchor → no independent voice) and be MIS-
+    // independent of the member authors (src:a/src:b are unregistered ⇒ fail-open).
     const approver = generatePassport(); // not src:a, not src:b
+    identity.register(approver, [
+      { anchorClass: AnchorClass.DOMAIN, realizedCost: 0.35 as Unit, independenceWeight: 0.35 as Unit },
+    ]);
     const csid = ledger.listPending()[0]!.contradictionSetId as ContradictionSetId;
     const resolved = db.approve(csid, a.id, approver, NOW);
 
