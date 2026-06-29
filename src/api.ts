@@ -501,7 +501,7 @@ function now(): EpochMs {
 function hashPayload(entity: EntityId, payload: unknown): ContentHash {
   const h = createHash("sha256");
   h.update(String(entity));
-  h.update(" ");
+  h.update("\u0000");
   h.update(JSON.stringify(payload ?? null));
   return h.digest("hex") as ContentHash;
 }
