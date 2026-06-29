@@ -350,9 +350,9 @@ export interface ApproveContext {
   mintEdgeId(winner: StrandId, loser: StrandId): EdgeId;
   /**
    * RC-5 — true MIS anchor-independence between two sources, delegating to the
-   * SAME `anchors.independentSources` predicate the Bron–Kerbosch adjacency is
-   * built from (identity/index.ts:371), WITH the `independenceBetween > 0`
-   * fallback. NOT mere key distinctness. The approver must be
+   * SAME `anchors.independentSources` predicate the Bron–Kerbosch adjacency in
+   * `identity.independentRootCount` is built from, WITH the `independenceBetween
+   * > 0` fallback. NOT mere key distinctness. The approver must be
    * `independentSources(approver, author) === true` against EVERY disputed-member
    * author. Supplied by the engine so the ledger imports no identity layer.
    */

@@ -34,9 +34,9 @@
  *    Authority set). Changing which classes you accept and their weights IS the
  *    security policy. That is the intended knob.
  *
- * This module is mostly a SIMPLE part: the table and the disjointness math are
- * implemented fully. The only genuinely non-trivial self-stacking cap is left as
- * a marked stub where its precise sublinear shape is a tuning decision.
+ * This module is fully implemented: the table, the disjointness math, AND the
+ * ladder-aware self-stacking cap ({@link applySelfStackCap}) — whose exact
+ * independence weights remain a tuning decision (the security policy knob).
  *
  * Depends only on the shared contract in core/types.ts; no runtime deps.
  */
@@ -325,10 +325,11 @@ export function independenceBetween(
  *    ~0.65, still below a lone 0.70 KYC), so self-stacking can't forge a costly
  *    root. This is the anti-self-stacking guarantee in CLAUDE.md's rules.
  *
- * NOTE: noisy-OR is the SIMPLE, defensible default. A stricter "no stack of
- * cheap anchors may ever reach the weight of the next class up" cap — which
- * would require knowing the per-class ladder spacing — is the genuinely
- * non-trivial tuning piece and is deferred below.
+ * NOTE: noisy-OR is the SIMPLE, defensible default. The stricter "no stack of
+ * cheap anchors may ever reach the weight of the next class up" cap is layered
+ * on top by {@link applySelfStackCap} (called right after this in
+ * {@link independenceBetween}), which clamps the combined value to the source's
+ * own strongest single realized anchor weight.
  *
  * @param weights Per-anchor independence weights, each in [0,1].
  * @returns Combined sublinear strength in [0,1].
