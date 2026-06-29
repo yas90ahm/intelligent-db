@@ -88,7 +88,10 @@ function makeStrand(opts: {
 }
 
 function ledgerWithCap(cap = 0.9): ReputationLedger {
-  return createReputationLedger(() => cap as Unit);
+  // Freeze the decay clock to NOW so `scoreOf`'s pure decay-on-read is deterministic:
+  // the default Date.now() clock makes two reads of an UNCHANGED source differ in the
+  // ~15th decimal, flaking the `toBe(...)` score-invariance assertions below.
+  return createReputationLedger(() => cap as Unit, undefined, () => NOW);
 }
 
 /** Earn a source up off the floor so a later reversal is observable. */

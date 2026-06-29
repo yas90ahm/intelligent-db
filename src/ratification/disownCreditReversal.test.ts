@@ -111,7 +111,10 @@ function derivationEdge(derived: StrandId, witness: StrandId): Edge {
 }
 
 function ledgerWithCap(cap = 0.9): ReputationLedger {
-  return createReputationLedger(() => cap as Unit);
+  // Freeze the decay clock to NOW so `scoreOf`'s pure decay-on-read is deterministic:
+  // the default Date.now() clock makes two reads of an UNCHANGED source differ in the
+  // ~15th decimal, flaking the `toBe(earnedScore)` invariance check below.
+  return createReputationLedger(() => cap as Unit, undefined, () => NOW);
 }
 
 // ===========================================================================
