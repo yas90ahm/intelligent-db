@@ -29,10 +29,10 @@
  *   - Every move stamps a {@link ReasonCode} (CLAUDE.md: "reason_code stamped on
  *     every stop/tier-move"). The caller writes `Strand.last_tier_reason`.
  *
- * The multi-gate eviction body is the HARD CORE of this module and is left as a
- * marked crack ({@link evaluateEviction}). The gate RESULT TYPES, the enumerated
- * conditions, the simple decay-pressure score, and tier-stepping are fully
- * implemented.
+ * The multi-gate eviction body is the HARD CORE of this module and is fully
+ * implemented ({@link evaluateEviction} → {@link evaluateGates}, the fail-closed
+ * anti-poisoning floor). The gate RESULT TYPES, the enumerated conditions, the
+ * simple decay-pressure score, and tier-stepping are all implemented and tested.
  *
  * Depends on:
  *   - core/types.ts  (Strand, Tier, EpochMs, IdentityStamp, ReasonCode, ...)

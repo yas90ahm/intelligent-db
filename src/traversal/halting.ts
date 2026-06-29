@@ -71,14 +71,14 @@ import {
 
 /**
  * The narrow READ surface of {@link "../store/StrandStore"} that the halting
- * controller needs. Declared structurally here so this module type-checks
- * standalone; the concrete `StrandStore` in store/StrandStore.ts is intended to
- * be assignable to this view. The controller NEVER mutates the store — it only
- * reads frontier/bridge state to decide stopping.
+ * controller needs. Declared structurally here (Interface Segregation) so this
+ * module type-checks standalone and the controller NEVER mutates the store — it
+ * only reads frontier/bridge state to decide stopping.
  *
- * TODO(crack-B): replace this local view with a direct import of the
- * `StrandStore` interface once store/StrandStore.ts exists, keeping the same
- * read-only method set.
+ * NOTE: kept as a deliberate narrow projection rather than importing the full
+ * `StrandStore`. The walk-specific reads here (independent-class count, lit
+ * bridges, bridge targets) are NOT part of the core StrandStore surface; a caller
+ * supplies an adapter assignable to this view.
  */
 export interface HaltStoreView {
   /** Independent-provenance class count newly contributed by a popped strand. */

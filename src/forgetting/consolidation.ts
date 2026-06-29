@@ -13,7 +13,7 @@
  *     payload, independence-class) group and discard the duplicate echoes. No
  *     judgement about *truth* is made — only about *sameness of source*.
  *
- *  2. CONTRADICTION ADJUDICATION (HARD CORE — stubbed here).
+ *  2. CONTRADICTION ADJUDICATION (HARD CORE — implemented here, in {@link tryConsolidate}).
  *     When several co-equal claims DISAGREE about one (entity, attribute) and they
  *     come from INDEPENDENT roots, picking a winner is the hard theorem boundary
  *     (CLAUDE.md "The hard theorem"). Under "identity is priced, not prevented"
@@ -22,7 +22,9 @@
  *     incumbent. Therefore this module MUST NOT decide a winner from inside the
  *     graph. It may only collapse agreeing same-root echoes; any cross-root
  *     adjudication defers to the Source-Identity Layer (the {@link IdentityStamp}s
- *     passed in), and the load-bearing comparison is left as a marked crack.
+ *     passed in): {@link tryConsolidate} either AUTO-RESOLVES on a decisive, earned
+ *     EXTERNAL reputation margin (never an in-graph majority) or DEFERS to the human
+ *     ratify horn — it never picks a winner from inside the graph.
  *
  * THE SAFETY RULE (encoded in types + asserted at the seam below):
  *   collapse/consolidation may ONLY fold together AGREEING, SAME-ROOT echoes
