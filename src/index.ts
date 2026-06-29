@@ -305,6 +305,7 @@ export {
   createPendingLedger,
   createSqlitePendingLedger,
   recordPreimage,
+  EMPTY_STATE_HASH,
 } from "./ratification/pendingLedger.js";
 
 export type {
@@ -314,11 +315,20 @@ export type {
   LedgerRecordKind,
   PendingPayload,
   ApprovalPayload,
+  MutationPayload,
+  MutationOp,
   ChainVerification,
   ResolvedDispute,
   ApproveContext,
   AppendPendingOptions,
 } from "./ratification/pendingLedger.js";
+
+export {
+  hashStrandState,
+  hashReputationState,
+  hashSubjectId,
+  mutationReceipt,
+} from "./ratification/mutationReceipt.js";
 
 export {
   downstreamDisownSweep,

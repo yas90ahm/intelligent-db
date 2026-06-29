@@ -364,6 +364,12 @@ describe("atomic compound writes — a forced mid-op error rolls back fully (no 
     // The structural integrity of the db is intact after the rollback.
     expect(w.store.integrityCheck()).toBe(true);
 
+    // A1 — the rollback covered the MUTATION RECEIPTS too: the DEMOTE/contradict receipt
+    // for the FIRST loser (emitted before the 2nd-loser throw) left NO orphan leaf.
+    expect(
+      w.ratification.ledger.records().filter((r) => r.kind === "MUTATION").length,
+    ).toBe(0);
+
     // PROVE this was genuinely the RESOLVED path (not a vacuous DEFERRED that demotes
     // nothing anyway): with putStrand restored, re-running adjudicate now SUCCEEDS and
     // resolves the SAME dispute, demoting BOTH losers — confirming the rolled-back op
@@ -375,6 +381,11 @@ describe("atomic compound writes — a forced mid-op error rolls back fully (no 
     }
     expect(w.store.getStrand(loserAId)!.fact_state).toBe(FactState.DEMOTED);
     expect(w.store.getStrand(loserBId)!.fact_state).toBe(FactState.DEMOTED);
+    // The redo cleanly produced the MUTATION effect leaves AND the chain verifies.
+    expect(
+      w.ratification.ledger.records().filter((r) => r.kind === "MUTATION").length,
+    ).toBeGreaterThan(0);
+    expect(w.ratification.ledger.verifyChain()).toEqual({ ok: true, firstBrokenSeq: null });
   });
 
   it("downstreamDisownSweep: a ledger.contradict throwing mid-sweep leaves NO demotion or clawback", () => {
@@ -522,7 +533,12 @@ describe("crash recovery — a committed compound op is fully present after an u
 
     // The signed APPROVAL record survived AND the chain re-verifies (signer key was
     // persisted in the SAME committed txn — no desync between audit + state).
-    expect(ledger2.records().map((r) => r.kind)).toEqual(["PENDING", "APPROVAL"]);
+    // The doorbell sequence (PENDING/APPROVAL) survived; the A1 latent MUTATION effect
+    // leaves are additive (filter them out to recover the doorbell sequence).
+    expect(ledger2.records().map((r) => r.kind).filter((k) => k !== "MUTATION")).toEqual([
+      "PENDING",
+      "APPROVAL",
+    ]);
     expect(ledger2.verifyChain()).toEqual({ ok: true, firstBrokenSeq: null });
     // The dispute is resolved (no longer open).
     expect(ledger2.listPending().length).toBe(0);

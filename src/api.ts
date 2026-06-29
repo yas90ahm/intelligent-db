@@ -80,7 +80,7 @@ import { activationWalk } from "./traversal/walk.js";
 import type { HaltingController } from "./traversal/halting.js";
 import { createHaltingController } from "./traversal/halting.js";
 import type { SourceIdentityLayer } from "./identity/index.js";
-import type { ReputationLedger } from "./identity/reputation.js";
+import type { ReputationLedger, ReputationState } from "./identity/reputation.js";
 import type { KeyPair } from "./identity/keys.js";
 
 import {
@@ -97,7 +97,21 @@ import type {
   PendingPayload,
   ResolvedDispute,
   ApproveContext,
+  MutationPayload,
 } from "./ratification/pendingLedger.js";
+import { EMPTY_STATE_HASH } from "./ratification/pendingLedger.js";
+import {
+  hashReputationState,
+  hashStrandState,
+  hashSubjectId,
+  mutationReceipt,
+} from "./ratification/mutationReceipt.js";
+import type {
+  MerkleLog,
+  PublicationSink,
+  STH,
+} from "./ratification/merkleLog.js";
+import { createMerkleLog } from "./ratification/merkleLog.js";
 import type { CorroborationLedger } from "./ratification/corroboration.js";
 import type { AdjudicationProvenanceLedger } from "./ratification/adjudicationProvenance.js";
 import type { WeakInfluenceLedger } from "./ratification/weakInfluence.js";
@@ -335,6 +349,26 @@ export interface IntelligentDb {
     approver: KeyPair,
     now?: EpochMs,
   ): ResolvedDispute;
+
+  /**
+   * A2 EPOCH TICK: publish the current Signed Tree Head to every wired sink
+   * (operator/cron-driven, NEVER per-op — this is the per-op anchoring VETO honored at
+   * the engine seam). Returns the published {@link STH}, or `null` when no merkle layer
+   * is wired. Off the write/recall path.
+   */
+  anchorEpoch(now?: EpochMs): STH | null;
+
+  /**
+   * A2: publish the GENESIS STH (the empty tree) once at init so pre-first-anchor history
+   * is not attacker-choosable. Returns the published STH, or `null` when unwired.
+   */
+  publishGenesis(now?: EpochMs): STH | null;
+
+  /**
+   * A2: the wired {@link MerkleLog} (for witness checks / inclusion proofs), or `null`
+   * when no merkle layer is wired.
+   */
+  merkleLog(): MerkleLog | null;
 }
 
 // ---------------------------------------------------------------------------
@@ -403,6 +437,16 @@ export interface RatificationDeps {
    * DERIVATION citation.
    */
   readonly weakInfluence?: WeakInfluenceLedger;
+  /**
+   * A2 [optional/latent] — wire a {@link MerkleLog} over the SAME ratification ledger so
+   * a witness can detect a hidden disown (mk-m3). OMITTED (the default) ⇒ behavior is
+   * back-compatible: A1 MUTATION receipts are STILL journaled latently into the ledger
+   * (the audit COVERAGE), but NO STH is published and no sink is written. When supplied,
+   * the engine builds the log at construction (`createMerkleLog` enforces ≥2 independent
+   * sinks — fail-closed at wiring time) and exposes {@link IntelligentDb.anchorEpoch} /
+   * {@link IntelligentDb.publishGenesis} / {@link IntelligentDb.merkleLog}.
+   */
+  readonly merkle?: { readonly signer: KeyPair; readonly sinks: readonly PublicationSink[] };
 }
 
 /**
@@ -592,6 +636,13 @@ class IntelligentDbImpl implements IntelligentDb {
   readonly #ratification: RatificationDeps | null;
 
   /**
+   * A2 [optional/latent] — the wired Merkle log over the ratification ledger, or null
+   * when `ratification.merkle` was omitted. Built once at construction; never touched on
+   * a verb path (anchoring is exclusively {@link anchorEpoch}).
+   */
+  readonly #merkleLog: MerkleLog | null;
+
+  /**
    * M3 anti-grief (BATCH 4, OD-2 seam family) — the per-source-pair contradiction
    * RATE-LIMITER. Keyed `${contradictor}->${target}:${class}` → the witness time it
    * last SCARRED. A given contradictor→target pair may add a NON-DECAYING scar at most
@@ -617,6 +668,41 @@ class IntelligentDbImpl implements IntelligentDb {
     this.#consolidation = consolidation;
     this.#reputation = reputation;
     this.#ratification = ratification;
+    // A2: build the Merkle log over the SAME ratification ledger when wired.
+    // `createMerkleLog` throws on <2 sinks — correct fail-closed, surfaced at construction.
+    this.#merkleLog =
+      ratification?.merkle !== undefined
+        ? createMerkleLog({
+            ledger: ratification.ledger,
+            signer: ratification.merkle.signer,
+            sinks: ratification.merkle.sinks,
+          })
+        : null;
+  }
+
+  /**
+   * A1 [Merkle MUTATION coverage] — journal ONE content-addressed MUTATION receipt into
+   * the wired ratification ledger, signed by the system signer. A no-op when no
+   * ratification ledger is wired (nowhere to journal — the latent-journaling gate). Call
+   * sites sit INSIDE the compound op's `withTxn` envelope so receipt + mutation commit
+   * atomically.
+   */
+  #emitMutation(payload: MutationPayload): void {
+    if (this.#ratification !== null) {
+      this.#ratification.ledger.appendMutation(payload, this.#ratification.systemSigner);
+    }
+  }
+
+  anchorEpoch(at?: EpochMs): STH | null {
+    return this.#merkleLog === null ? null : this.#merkleLog.anchor(at ?? now());
+  }
+
+  publishGenesis(at?: EpochMs): STH | null {
+    return this.#merkleLog === null ? null : this.#merkleLog.publishGenesis(at ?? now());
+  }
+
+  merkleLog(): MerkleLog | null {
+    return this.#merkleLog;
   }
 
   // -------------------------------------------------------------------------
@@ -1091,7 +1177,23 @@ class IntelligentDbImpl implements IntelligentDb {
               };
               this.#store.putEdge(edge);
             }
+            // A1 — capture the loser's pre-persist (store-side) state for the receipt,
+            // then persist the demotion.
+            const demoteBefore = hashStrandState(loser);
             this.#store.putStrand(loserObj);
+            // A1 — journal the DEMOTE EFFECT (afterHash commits fact_state + outranked_by;
+            // refEventId names the OUTRANKS edge). Inside this withTxn ⇒ atomic.
+            this.#emitMutation(
+              mutationReceipt(
+                "DEMOTE",
+                String(d.demoted),
+                String(loserObj.content_hash),
+                demoteBefore,
+                hashStrandState(loserObj),
+                at,
+                String(d.outranks),
+              ),
+            );
             // Reputation: a contradicted claim craters its authors' earned trust. M3
             // (BATCH 4): this is an ADJUDICATED contradiction, so it SCARS (routes `c·w`
             // into the NON-DECAYING `scarBeta`, suppressing the betrayer's depth-floor)
@@ -1106,7 +1208,19 @@ class IntelligentDbImpl implements IntelligentDb {
               for (const root of loserObj.provenance) {
                 if (root.sourceId === null) continue;
                 const scarring = this.#admitScar(contradictor, root.sourceId, root.independenceClass, at);
-                this.#reputation.contradict(root.sourceId, at, undefined, scarring);
+                const before = this.#reputation.stateOf(root.sourceId);
+                const post = this.#reputation.contradict(root.sourceId, at, undefined, scarring);
+                // A1 — journal the REPUTATION_CONTRADICT EFFECT (before/after rep state).
+                this.#emitMutation(
+                  mutationReceipt(
+                    "REPUTATION_CONTRADICT",
+                    String(root.sourceId),
+                    hashSubjectId(String(root.sourceId)),
+                    hashReputationState(before),
+                    hashReputationState(post),
+                    at,
+                  ),
+                );
               }
             }
           }
@@ -1316,6 +1430,23 @@ class IntelligentDbImpl implements IntelligentDb {
     // With the audit ledger + reputation ledger riding the SAME shared db handle as the
     // store, all three enroll in this single transaction.
     const resolved = withTxn(this.#store, () => {
+      // A1 — snapshot the dispute authors' reputation BEFORE the ledger drives its moves
+      // (winner ratified / losers contradicted happen INSIDE `ledger.approve`), so the
+      // EFFECT receipts can carry an exact before/after. Members come from the open
+      // pending; authors are resolved through the same `ctx` the gate uses.
+      const repBefore = new Map<SourceId, ReputationState | null>();
+      if (this.#reputation !== null) {
+        const members =
+          this.#ratification!.ledger
+            .listPending()
+            .find((p) => p.contradictionSetId === contradictionSetId)?.members ?? [];
+        for (const m of members) {
+          for (const a of ctx.authorsOf(m)) {
+            if (!repBefore.has(a)) repBefore.set(a, this.#reputation.stateOf(a));
+          }
+        }
+      }
+
       const plan = this.#ratification!.ledger.approve(
         contradictionSetId,
         winnerStrandId,
@@ -1333,9 +1464,66 @@ class IntelligentDbImpl implements IntelligentDb {
       for (const edge of plan.outranksEdges) {
         this.#store.putEdge(edge);
       }
+      const edgeFor = new Map<StrandId, EdgeId>();
+      for (const edge of plan.outranksEdges) edgeFor.set(edge.to, edge.id);
       for (const d of plan.demotions) {
-        const loser = handed.get(d.demoted) ?? this.#store.getStrand(d.demoted);
-        if (loser !== null) this.#store.putStrand(loser);
+        // A1 — capture the loser's pre-persist store state for the DEMOTE receipt.
+        const fromStore = this.#store.getStrand(d.demoted);
+        const beforeHash = fromStore !== null ? hashStrandState(fromStore) : EMPTY_STATE_HASH;
+        const loser = handed.get(d.demoted) ?? fromStore;
+        if (loser !== null) {
+          this.#store.putStrand(loser);
+          const refEdge = edgeFor.get(d.demoted);
+          this.#emitMutation(
+            mutationReceipt(
+              "DEMOTE",
+              String(d.demoted),
+              String(loser.content_hash),
+              beforeHash,
+              hashStrandState(loser),
+              when,
+              refEdge === undefined ? undefined : String(refEdge),
+            ),
+          );
+        }
+      }
+
+      // A1 — journal the reputation EFFECTS the ledger drove (one receipt per distinct
+      // author per effect, deterministic by source id). The signed APPROVAL leaf already
+      // commits the DECISION; these add the EFFECT leaves so a hidden reputation move is
+      // detectable. before = the pre-approve snapshot; after = the now-final state.
+      if (this.#reputation !== null) {
+        const loserAuthors = new Set<SourceId>();
+        for (const d of plan.demotions) {
+          for (const a of ctx.authorsOf(d.demoted)) loserAuthors.add(a);
+        }
+        const winnerAuthors = new Set<SourceId>(ctx.authorsOf(winnerStrandId));
+        const sortIds = (xs: Iterable<SourceId>): SourceId[] =>
+          [...xs].sort((x, y) => (String(x) < String(y) ? -1 : String(x) > String(y) ? 1 : 0));
+        for (const a of sortIds(loserAuthors)) {
+          this.#emitMutation(
+            mutationReceipt(
+              "REPUTATION_CONTRADICT",
+              String(a),
+              hashSubjectId(String(a)),
+              hashReputationState(repBefore.get(a) ?? null),
+              hashReputationState(this.#reputation.stateOf(a)),
+              when,
+            ),
+          );
+        }
+        for (const a of sortIds(winnerAuthors)) {
+          this.#emitMutation(
+            mutationReceipt(
+              "REPUTATION_RATIFY",
+              String(a),
+              hashSubjectId(String(a)),
+              hashReputationState(repBefore.get(a) ?? null),
+              hashReputationState(this.#reputation.stateOf(a)),
+              when,
+            ),
+          );
+        }
       }
       return plan;
     });

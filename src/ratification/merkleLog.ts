@@ -656,6 +656,15 @@ class MerkleLogImpl implements MerkleLog {
   readonly #signer: KeyPair;
   readonly #sinks: readonly PublicationSink[];
 
+  /**
+   * A1 [O(n²) `anchor()` close, lever 1] — the INCREMENTAL leaf-hash cache.
+   * `#leafCache[i] = leafHashOf(records()[i])`. Append-only immutability ⇒ leaf `i`
+   * never changes, so `#leaves` hashes ONLY the new tail `[#leafCache.length, n)` per
+   * call instead of re-SHA-256-ing every record (O(Δ), not O(n)). OUTPUT IS
+   * BYTE-IDENTICAL to the prior loop — the cache returns exactly the hashes it produces.
+   */
+  readonly #leafCache: Hash[] = [];
+
   constructor(deps: {
     ledger: PendingLedger;
     signer: KeyPair;
@@ -668,10 +677,15 @@ class MerkleLogImpl implements MerkleLog {
 
   #leaves(upTo?: number): Hash[] {
     const recs = this.#ledger.records();
+    // FAIL-SAFE: append-only ⇒ the cache can only GROW. If the ledger ever shrank (a
+    // contract violation that must not happen), rebuild from scratch rather than serve a
+    // stale root — never silently trust a cache that outran its source.
+    if (recs.length < this.#leafCache.length) this.#leafCache.length = 0;
+    for (let i = this.#leafCache.length; i < recs.length; i++) {
+      this.#leafCache.push(leafHashOf(recs[i]!));
+    }
     const n = upTo === undefined ? recs.length : upTo;
-    const out: Hash[] = [];
-    for (let i = 0; i < n; i++) out.push(leafHashOf(recs[i]!));
-    return out;
+    return this.#leafCache.slice(0, n);
   }
 
   treeSize(): number {

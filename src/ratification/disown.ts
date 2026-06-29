@@ -71,9 +71,15 @@ import type { ReputationLedger } from "../identity/reputation.js";
 import type { CorroborationLedger } from "./corroboration.js";
 import type { WeakInfluenceLedger } from "./weakInfluence.js";
 import type { AdjudicationProvenanceLedger } from "./adjudicationProvenance.js";
-import type { PendingLedger } from "./pendingLedger.js";
+import type { MutationPayload, PendingLedger } from "./pendingLedger.js";
 import type { KeyPair } from "../identity/keys.js";
 import { demote } from "../forgetting/consolidation.js";
+import {
+  hashReputationState,
+  hashStrandState,
+  hashSubjectId,
+  mutationReceipt,
+} from "./mutationReceipt.js";
 
 // ---------------------------------------------------------------------------
 // Result
@@ -465,8 +471,21 @@ export function downstreamDisownSweep(
   // ATOMIC: the whole sweep is ONE all-or-nothing unit of work over the shared handle
   // (crater + every demotion/edge + every contradict + every precise credit reversal).
   // A mid-sweep crash leaves either the FULL sweep or NONE — never a half-clawed state.
+  // A1 [Merkle MUTATION coverage] — journal each control-plane effect as a signed,
+  // content-addressed MUTATION receipt INSIDE this same sweep transaction (so a receipt
+  // + the mutation it describes commit or roll back as ONE unit). Emitted ONLY when a
+  // ratification ledger + system signer are wired (latent-journaling gate); with no
+  // ledger there is nowhere to journal and the path is byte-identical to today.
+  const emitMut = (payload: MutationPayload): void => {
+    if (pending !== undefined && systemSigner !== undefined) {
+      pending.appendMutation(payload, systemSigner);
+    }
+  };
+
   return withSweepTxn(store, () => {
   // --- 1. DIRECT SEED + authoritative idempotency ----------------------------
+  // Capture the disowned source's PRE-crater reputation state for the receipt.
+  const craterBefore = ledger.stateOf(sourceId);
   const direct = ledger.disownSweep(sourceId, assertedStrandIds);
   const seedClawedBack = direct.clawedBack;
 
@@ -484,6 +503,18 @@ export function downstreamDisownSweep(
       visitedCount: 0,
     };
   }
+
+  // A1 — the direct-seed crater happened: journal it (before/after reputation state).
+  emitMut(
+    mutationReceipt(
+      "DISOWN_CRATER",
+      String(sourceId),
+      hashSubjectId(String(sourceId)),
+      hashReputationState(craterBefore),
+      hashReputationState(ledger.stateOf(sourceId)),
+      now,
+    ),
+  );
 
   // --- 2. TAINT ROOTS (dedupe by content_hash) + tainted class set ------------
   const visited = new Set<StrandId>();
@@ -583,10 +614,25 @@ export function downstreamDisownSweep(
           w: 1 as Unit,
           out_weight_sum: 1 as Unit,
         };
+        const demoteBefore = hashStrandState(derived); // pre-mutation audit state
         store.putEdge(stubEdge);
         demote(derived, stubEdge); // mutates fact_state + outranked_by in place
         store.putStrand(derived);
         demotedDownstream.push(derived.id);
+
+        // A1 — journal the demotion (its OUTRANKS edge is covered by the after-state's
+        // `outranked_by` + the edge id in `refEventId`; no separate per-edge receipt).
+        emitMut(
+          mutationReceipt(
+            "DEMOTE",
+            String(derived.id),
+            String(derived.content_hash),
+            demoteBefore,
+            hashStrandState(derived),
+            now,
+            String(stubEdge.id),
+          ),
+        );
 
         // -- CONTRADICT downstream sources, BOUNDED BY TAINTED CLASS ----------
         // Only claw back credit from a source whose OWN provenance class is in the
@@ -617,7 +663,19 @@ export function downstreamDisownSweep(
     String(a) < String(b) ? -1 : String(a) > String(b) ? 1 : 0,
   );
   for (const s of contradicted) {
-    ledger.contradict(s, now);
+    const before = ledger.stateOf(s);
+    const post = ledger.contradict(s, now);
+    // A1 — journal the downstream contradict (before/after reputation state).
+    emitMut(
+      mutationReceipt(
+        "REPUTATION_CONTRADICT",
+        String(s),
+        hashSubjectId(String(s)),
+        hashReputationState(before),
+        hashReputationState(post),
+        now,
+      ),
+    );
   }
 
   // --- 5. PRECISE CORROBORATION-CREDIT REVERSAL (bounded, over the tainted closure) ----
@@ -637,8 +695,21 @@ export function downstreamDisownSweep(
     // Walk the intersecting events in the ledger's stable append order for determinism.
     for (const ev of corrob.eventsIntersecting(taintedStrandIds)) {
       if (!corrob.markReversed(ev.eventId)) continue; // already reversed: skip
-      ledger.reverseCredit(ev.beneficiarySourceId, ev.reputationDelta, now);
+      const before = ledger.stateOf(ev.beneficiarySourceId);
+      const post = ledger.reverseCredit(ev.beneficiarySourceId, ev.reputationDelta, now);
       reversedCorroborationEventIds.push(ev.eventId);
+      // A1 — journal the exact credit reversal (refEventId = the corroboration eventId).
+      emitMut(
+        mutationReceipt(
+          "REPUTATION_REVERSE_CREDIT",
+          String(ev.beneficiarySourceId),
+          hashSubjectId(String(ev.beneficiarySourceId)),
+          hashReputationState(before),
+          hashReputationState(post),
+          now,
+          ev.eventId,
+        ),
+      );
     }
   }
 

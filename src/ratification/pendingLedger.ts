@@ -75,8 +75,45 @@ import type { ReputationLedger } from "../identity/reputation.js";
 // Record shapes (the VAULT's contents)
 // ---------------------------------------------------------------------------
 
-/** The two kinds of record the ratification ledger holds. */
-export type LedgerRecordKind = "PENDING" | "APPROVAL";
+/** The three kinds of record the ratification ledger holds. */
+export type LedgerRecordKind = "PENDING" | "APPROVAL" | "MUTATION";
+
+/**
+ * A1 [Merkle MUTATION coverage] — the control-plane state transitions journaled as
+ * content-addressed MUTATION receipts. Each names the FACT of a trust mutation the
+ * undo engine performed, so every effect (disown crater / demotion / reputation move /
+ * credit reversal) earns a committed Merkle leaf — closing the "hide-a-disown" hole
+ * (mk-m3) where a demotion had no leaf and could be hidden with `verifyChain` green.
+ */
+export type MutationOp =
+  | "DISOWN_CRATER" // the disowned source's direct-seed reputation crater
+  | "DEMOTE" // a strand demoted (covers its OUTRANKS edge by after-state)
+  | "REPUTATION_CONTRADICT" // a contradict β-bump (adjudicate loser / disown downstream)
+  | "REPUTATION_RATIFY" // an approve winner's α-bump
+  | "REPUTATION_REVERSE_CREDIT"; // an exact corroboration-credit reversal
+
+/**
+ * A1 — a content-addressed MUTATION receipt: the immutable WITNESS that a control-plane
+ * trust mutation occurred. It commits to the FACT of a transition (subject + before/after
+ * digests), NEVER to a claim's truth (governing invariant 1: the model never witnesses).
+ * `refEventId` optionally links the receipt to the driving artifact (a corroboration
+ * `eventId`, a `contradictionSetId`, the OUTRANKS edge id) for offline audit. All fields
+ * are primitive id/hash strings → plain, stable canonical JSON.
+ */
+export interface MutationPayload {
+  readonly op: MutationOp;
+  /** The acted-on subject id (a StrandId, SourceId, or ContradictionSetId), as a string. */
+  readonly subjectId: string;
+  /** Content-address of the subject's IDENTITY (e.g. a strand's content_hash, a source id hash). */
+  readonly subjectHash: string;
+  /** Content-address of the PRE-mutation state ({@link EMPTY_STATE_HASH} if none). */
+  readonly beforeHash: string;
+  /** Content-address of the POST-mutation state. */
+  readonly afterHash: string;
+  /** OPTIONAL link to the driving artifact (corroboration eventId / dispute id / edge id). */
+  readonly refEventId?: string;
+  readonly at: EpochMs;
+}
 
 /**
  * The body of a PENDING record: the deferred independent dispute, exactly as the
@@ -145,7 +182,7 @@ export interface LedgerRecord {
   /** sha256 (hex) of the previous record's `thisHash`; genesis = sha256("GENESIS"). */
   readonly prevHash: string;
   readonly kind: LedgerRecordKind;
-  readonly payload: PendingPayload | ApprovalPayload;
+  readonly payload: PendingPayload | ApprovalPayload | MutationPayload;
   /** The {@link SourceId} of the signer (derived from its passport public key). */
   readonly signerSourceId: SourceId;
   /** sha256 (hex) over canonical({seq,prevHash,kind,payload,signerSourceId}). */
@@ -371,6 +408,17 @@ export interface PendingLedger {
   ): ResolvedDispute;
 
   /**
+   * A1 [Merkle MUTATION coverage] — journal ONE content-addressed MUTATION receipt,
+   * signed by the system signer. Appends a `MUTATION` record to the immortal chain (the
+   * previously-missing Merkle leaf for an undo-engine EFFECT). Does NOT participate in
+   * the doorbell: a MUTATION never appears in {@link listPending} and is inert to the
+   * OD-2 dedup/cap scan (those filter strictly on `kind === "PENDING"`). Idempotency /
+   * dedup is the CALLER's concern (the compound op emits exactly the transitions it
+   * performed). Returns the appended record.
+   */
+  appendMutation(payload: MutationPayload, signer: KeyPair): LedgerRecord;
+
+  /**
    * THE MONEY ARTIFACT. Walk the whole chain: recompute each record's
    * genesis-anchored `prevHash` link, recompute its `thisHash`, and verify its
    * signature against the signer's registered public key. Returns `{ok:true,
@@ -438,11 +486,47 @@ function canonicalApproval(p: ApprovalPayload): string {
   return parts.join("");
 }
 
+/**
+ * A1 — the "no prior state" sentinel `beforeHash` for a {@link MutationPayload} whose
+ * subject had no pre-mutation state (e.g. a never-before-seen reputation state). A
+ * stable, module-level constant so two runs hash identically.
+ */
+export const EMPTY_STATE_HASH = sha256Hex("∅");
+
+/**
+ * A1 — CANONICAL JSON of a MUTATION payload: explicit, hand-ordered primitive fields,
+ * the leading `"MUTATION"` tag domain-separating it from PENDING / APPROVAL. `refEventId`
+ * is emitted ONLY-WHEN-PRESENT (the same emit-only-if-present pattern as
+ * {@link canonicalPending}'s `contentHash`), so a receipt without a `refEventId` hashes
+ * stably. Joined with the SAME `\x01` payload separator the other canonical forms use.
+ */
+function canonicalMutation(p: MutationPayload): string {
+  const parts = [
+    "MUTATION",
+    p.op,
+    p.subjectId,
+    p.subjectHash,
+    p.beforeHash,
+    p.afterHash,
+    String(p.at),
+    p.refEventId === undefined ? "" : "ref:" + p.refEventId,
+  ];
+  return parts.join("\x01");
+}
+
 /** Canonical serialization of a payload, discriminated by record kind. */
-function canonicalPayload(kind: LedgerRecordKind, payload: PendingPayload | ApprovalPayload): string {
-  return kind === "PENDING"
-    ? canonicalPending(payload as PendingPayload)
-    : canonicalApproval(payload as ApprovalPayload);
+function canonicalPayload(
+  kind: LedgerRecordKind,
+  payload: PendingPayload | ApprovalPayload | MutationPayload,
+): string {
+  switch (kind) {
+    case "PENDING":
+      return canonicalPending(payload as PendingPayload);
+    case "APPROVAL":
+      return canonicalApproval(payload as ApprovalPayload);
+    case "MUTATION":
+      return canonicalMutation(payload as MutationPayload);
+  }
 }
 
 /**
@@ -453,7 +537,7 @@ function hashPreimage(
   seq: number,
   prevHash: string,
   kind: LedgerRecordKind,
-  payload: PendingPayload | ApprovalPayload,
+  payload: PendingPayload | ApprovalPayload | MutationPayload,
   signerSourceId: SourceId,
 ): string {
   return [
@@ -552,6 +636,10 @@ class InMemoryPendingLedger implements PendingLedger {
     }
 
     return this.append("PENDING", payload, systemSigner);
+  }
+
+  appendMutation(payload: MutationPayload, signer: KeyPair): LedgerRecord {
+    return this.append("MUTATION", payload, signer);
   }
 
   /** The OPEN PENDING records (a PENDING with no later APPROVAL) — the OD-2 scan set. */
@@ -747,7 +835,7 @@ class InMemoryPendingLedger implements PendingLedger {
    */
   private append(
     kind: LedgerRecordKind,
-    payload: PendingPayload | ApprovalPayload,
+    payload: PendingPayload | ApprovalPayload | MutationPayload,
     signer: KeyPair,
   ): LedgerRecord {
     // Register the signer's verifying key (idempotent on its sourceId).
@@ -944,6 +1032,10 @@ class SqlitePendingLedgerImpl implements SqlitePendingLedger {
     return this.#append("PENDING", payload, systemSigner);
   }
 
+  appendMutation(payload: MutationPayload, signer: KeyPair): LedgerRecord {
+    return this.#append("MUTATION", payload, signer);
+  }
+
   /** The OPEN PENDING records (a PENDING with no later APPROVAL) — the OD-2 scan set. */
   #openPendingRecords(): LedgerRecord[] {
     const chain = this.#chain();
@@ -1111,7 +1203,7 @@ class SqlitePendingLedgerImpl implements SqlitePendingLedger {
    */
   #append(
     kind: LedgerRecordKind,
-    payload: PendingPayload | ApprovalPayload,
+    payload: PendingPayload | ApprovalPayload | MutationPayload,
     signer: KeyPair,
   ): LedgerRecord {
     const passport: Passport = {

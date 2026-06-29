@@ -223,8 +223,13 @@ describe("engine.adjudicate — routing the consolidation outcome", () => {
     expect(edge?.from).toBe(a.id);
     expect(edge?.to).toBe(b.id);
 
-    // The immortal record now holds PENDING + APPROVAL and verifies end-to-end.
-    expect(ledger.records().map((r) => r.kind)).toEqual(["PENDING", "APPROVAL"]);
+    // The immortal record now holds PENDING + APPROVAL (the doorbell traffic) plus the
+    // A1 latent MUTATION effect leaves (DEMOTE / REPUTATION_CONTRADICT / REPUTATION_RATIFY);
+    // filtering MUTATION recovers the doorbell sequence, and the whole chain verifies.
+    expect(ledger.records().map((r) => r.kind).filter((k) => k !== "MUTATION")).toEqual([
+      "PENDING",
+      "APPROVAL",
+    ]);
     expect(ledger.verifyChain()).toEqual({ ok: true, firstBrokenSeq: null });
     expect(db.listPending().length).toBe(0);
 
@@ -284,7 +289,12 @@ describe("engine.adjudicate — routing the consolidation outcome", () => {
     expect(store.getStrand(a.id)?.fact_state).toBe(FactState.LIVE);
     expect(store.getStrand(b.id)?.fact_state).toBe(FactState.DEMOTED);
     expect(store.getStrand(b.id)?.outranked_by).not.toBeNull();
-    expect(ledger.records().length).toBe(0); // resolved in-graph, no human horn
+    // No DOORBELL traffic (no PENDING/APPROVAL) — resolved in-graph, no human horn. The
+    // A1 latent MUTATION leaves (the DEMOTE / REPUTATION_CONTRADICT effect receipts) are
+    // additive audit coverage and verify in the chain.
+    expect(ledger.records().filter((r) => r.kind !== "MUTATION").length).toBe(0);
+    expect(ledger.records().every((r) => r.kind === "MUTATION")).toBe(true);
+    expect(ledger.verifyChain()).toEqual({ ok: true, firstBrokenSeq: null });
   });
 
   it("DEFERRED with NO ledger wired THROWS (a deferral is never silently dropped)", () => {
