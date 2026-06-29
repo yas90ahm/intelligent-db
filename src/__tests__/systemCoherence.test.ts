@@ -392,6 +392,13 @@ describe("END-TO-END SYSTEM COHERENCE — the whole pipeline over one shared SQL
     // (class:CHAL, fresh). Hand-filed so the classes are explicit.
     const winStrand = fileStrand(store, "strand:win", winnerSrc, "class:WIN", { v: "Berlin" });
     const chalStrand = fileStrand(store, "strand:chal", challengerSrc, "class:CHAL", { v: "Tokyo" });
+    // F4a/F4b (batch 3): a multi-class auto-resolve now requires the WINNING VALUE to be
+    // backed by >= 2 mutually anchor-INDEPENDENT roots (F4a structural floor) AND >= 1
+    // in-domain co-asserter (F4b). corroboratorSrc is anchor-DISJOINT from winnerSrc
+    // (asserted above), so a second "Berlin" strand makes the engine-derived #R = 2 and
+    // the in-domain corroboration count = 1 — the decisive winner RESOLVES. The
+    // corroborator AGREES (same value), so it is NOT demoted.
+    fileStrand(store, "strand:win-corrob", corroboratorSrc, "class:WINCORROB", { v: "Berlin" });
 
     // ORDINARY adjudication: a decisive, earned winner AUTO-RESOLVES the independent
     // dispute (reputation is an EXTERNAL signal; never headcount). Loser demoted.
@@ -407,7 +414,12 @@ describe("END-TO-END SYSTEM COHERENCE — the whole pipeline over one shared SQL
     // HIGH-IMPACT variant: a fresh, comparable multi-class dispute where the winner
     // CANNOT clear the irreversible-decision gate (only 1 corroboration, 1 anchor class,
     // recently contradicted) DEFERS to a human no matter the LCB gap.
-    const hiWinner = fileStrand(store, "strand:hi-win", winnerSrc, "class:HIWIN", { v: "Berlin" }, ATTR_HI);
+    // NB (batch 3): the winning value here is "Bonn" — DISTINCT from the resolved dispute's
+    // "Berlin" — because the engine's agreement set is entity+content_hash scoped (NOT
+    // attribute-scoped), so reusing "Berlin" would let the independent ATTR co-asserter above
+    // leak in and lift the engine-derived #R to 2. A unique value keeps hiWinner a SINGLE
+    // actor (#R = 1), which is the whole point of the high-impact DEFER below.
+    const hiWinner = fileStrand(store, "strand:hi-win", winnerSrc, "class:HIWIN", { v: "Bonn" }, ATTR_HI);
     const hiChallenger = fileStrand(
       store,
       "strand:hi-chal",

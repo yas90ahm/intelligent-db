@@ -255,22 +255,29 @@ describe("BATCH 1 — OD-8 engine-owned-evidence invariant (junior add-on)", () 
     expect(COMPILE_ONLY).toBe(false);
   });
 
-  it("(a/b) the BOOLEAN drives the engine-built gate: false ⇒ RESOLVE, true ⇒ DEFER (same graph)", () => {
-    // Two independent runs of the IDENTICAL self-stacked graph; the ONLY difference is
-    // the caller's intent bit. Proves the engine builds the gate evidence itself: a
-    // decisive LCB margin auto-resolves an ordinary multi-class dispute, but flagging it
-    // IRREVERSIBLE engages the engine-derived #R = 1 (one actor) check ⇒ DEFER.
+  it("(a/b) F4a UNCONDITIONAL #R>=2 floor: a self-stacked (R=1) multi-class dispute DEFERS for BOTH intents", () => {
+    // BATCH 3 (F4a) closes the al-c3-05 "build-once-flip-everywhere" amortization that the
+    // OLD high-impact-only #R check left open on the DEFAULT-impact path. The engine now
+    // applies the >= 2-independent-root structural floor on EVERY multi-class auto-resolve,
+    // REGARDLESS of the caller's intent bit. On the IDENTICAL self-stacked graph (winner =
+    // ONE actor wearing four anchor-CLASS costumes ⇒ engine-derived #R = 1), BOTH
+    // { highImpact: false } and { highImpact: true } now DEFER and demote NOTHING — the
+    // self-stacked winner can no longer flip the default-impact path. (The boolean still
+    // gates the high-impact-ONLY count/recency clauses on an R>=2 graph; see (b/d).)
     const ordinary = selfStackedScenario();
     const ordinaryOutcome = ordinary.db.adjudicate(ATTR, { highImpact: false });
-    expect(ordinaryOutcome.kind).toBe("RESOLVED");
+    expect(ordinaryOutcome.kind).toBe("DEFERRED");
+    expect(ordinary.store.getStrand(asStrandId("strand:win"))?.fact_state).toBe(
+      FactState.LIVE,
+    );
     expect(ordinary.store.getStrand(asStrandId("strand:chal"))?.fact_state).toBe(
-      FactState.DEMOTED,
+      FactState.LIVE,
     );
 
     const irreversible = selfStackedScenario();
     const irreversibleOutcome = irreversible.db.adjudicate(ATTR, { highImpact: true });
     expect(irreversibleOutcome.kind).toBe("DEFERRED");
-    // Nothing demoted: the human horn owns the irreversible call.
+    // Nothing demoted: the unconditional floor (and the human horn) owns the call.
     expect(irreversible.store.getStrand(asStrandId("strand:win"))?.fact_state).toBe(
       FactState.LIVE,
     );

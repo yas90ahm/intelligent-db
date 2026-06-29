@@ -99,6 +99,21 @@ export interface PendingPayload {
    * is recorded and bodies are reviewed out-of-band.
    */
   readonly contentHash?: string;
+  /**
+   * OD-2 [horn rate-limiting] OPTIONAL cross-attribute dedup key = a fingerprint of the
+   * disputed VALUE + the sorted disputing-source set, with `attribute` EXCLUDED (so the
+   * SAME source-pair disputing the SAME value across many attributes coalesces to one
+   * enqueue). Engine-computed (OD-8). Omitted by legacy callers ⇒ within-attribute dedup
+   * falls back to {@link contentHash}. Emitted into the hash preimage ONLY WHEN PRESENT.
+   */
+  readonly coalesceKey?: string;
+  /**
+   * OD-2 [horn rate-limiting] OPTIONAL distinct disputing SOURCE ids (as strings) behind
+   * this dispute's members, engine-resolved from `provenance[].sourceId` (the ledger has
+   * no identity layer — OD-8 engine-owned evidence). Used by the per-source pending cap.
+   * Emitted into the hash preimage ONLY WHEN PRESENT.
+   */
+  readonly disputingSources?: readonly string[];
 }
 
 /**
@@ -137,6 +152,94 @@ export interface LedgerRecord {
   readonly thisHash: string;
   /** Detached Ed25519 signature over utf8(thisHash), base64url. */
   readonly sig: string;
+}
+
+// ---------------------------------------------------------------------------
+// OD-2 — HORN RATE-LIMITING (cross-attribute dedup + per-source pending cap)
+// ---------------------------------------------------------------------------
+
+/**
+ * The default per-source OPEN-pending cap K (OD-2.1.2): beyond K open disputes naming a
+ * single source, a further pending naming that source is coalesced / rejected (no-op).
+ * Well above any honest review backlog, far below a flood. Interim tunable; the
+ * STRUCTURAL closure (stake-to-enqueue) is a COMMITTED FOLLOW-ON, NOT V2.
+ */
+const DEFAULT_PER_SOURCE_CAP = 64;
+
+/**
+ * OD-2 [horn rate-limiting] OPTIONAL, ADDITIVE evidence the ENGINE supplies so the ledger
+ * can bound the human horn WITHOUT importing the identity layer (it sees only StrandIds;
+ * the disputing source-pair is engine-owned evidence — OD-8). Omitting `opts` entirely
+ * ⇒ EXACTLY today's behavior (unconditional append), so the 272 baseline and existing
+ * ledger tests stay green.
+ *
+ * F4a strictly INCREASES deferrals (`al-c3-05`, Sandbag-the-Doorbell — "the DEFER is the
+ * payload"); shipping F4a on an uncapped horn would convert an integrity DEFER into an
+ * availability DOS-DEFER = breach. OD-2 is therefore the HARD PREREQUISITE bundled with
+ * F4a: it makes the extra deferrals bounded.
+ */
+export interface AppendPendingOptions {
+  /** The distinct disputing SOURCE ids behind this dispute's members (engine-resolved). */
+  readonly disputingSources?: readonly SourceId[];
+  /**
+   * Attribute-INDEPENDENT dispute fingerprint = value content-hash + sorted disputing
+   * sources, with `attribute` EXCLUDED; used for cross-attribute dedup. Omitted ⇒ fall
+   * back to the in-payload {@link PendingPayload.contentHash} (within-attribute dedup only).
+   */
+  readonly coalesceKey?: string;
+  /** Per-source OPEN-pending cap; defaults to {@link DEFAULT_PER_SOURCE_CAP} if omitted. */
+  readonly perSourceCap?: number;
+}
+
+/**
+ * The OD-2 horn rate-limit decision: scanning the currently-OPEN PENDING records, decide
+ * whether the new pending is a DUPLICATE (same coalesce key already open) or a CAP HIT
+ * (some disputing source already at its per-source cap). Either way return the EXISTING
+ * matching OPEN record (a no-op: the chain is NOT advanced, no second signed leaf is
+ * minted, callers reading the return get a stable record). Returns `null` when the
+ * pending is genuinely new and must be appended.
+ *
+ * The chain therefore stays a faithful record of DISTINCT disputes; one attacker flooding
+ * N attributes from one source collapses to a bounded number of enqueues.
+ */
+function hornRateLimitDecision(
+  openRecords: readonly LedgerRecord[],
+  newPayload: PendingPayload,
+  opts: AppendPendingOptions,
+): LedgerRecord | null {
+  // (1) Cross-attribute dedup: explicit coalesceKey, else fall back to contentHash.
+  const newKey = newPayload.coalesceKey ?? newPayload.contentHash;
+  if (newKey !== undefined) {
+    for (const r of openRecords) {
+      const p = r.payload as PendingPayload;
+      const existingKey = p.coalesceKey ?? p.contentHash;
+      if (existingKey !== undefined && existingKey === newKey) {
+        return r; // duplicate dispute already OPEN ⇒ no-op
+      }
+    }
+  }
+
+  // (2) Per-source pending cap K: if any disputing source already names >= cap OPEN
+  //     pendings, a further pending naming it is coalesced (no-op). Per-source, so one
+  //     attacker cannot consume the shared serial human resource.
+  const sources = newPayload.disputingSources ?? [];
+  if (sources.length > 0) {
+    const cap = opts.perSourceCap ?? DEFAULT_PER_SOURCE_CAP;
+    for (const s of sources) {
+      let count = 0;
+      let witness: LedgerRecord | null = null;
+      for (const r of openRecords) {
+        const ds = (r.payload as PendingPayload).disputingSources;
+        if (ds !== undefined && ds.includes(s)) {
+          count++;
+          if (witness === null) witness = r;
+        }
+      }
+      if (count >= cap && witness !== null) return witness; // cap hit ⇒ no-op
+    }
+  }
+
+  return null; // genuinely new dispute ⇒ append
 }
 
 // ---------------------------------------------------------------------------
@@ -225,8 +328,18 @@ export interface PendingLedger {
    * THE DOORBELL (ring). Record a deferred independent dispute as a signed PENDING
    * record, signed by the SYSTEM signer (the engine's own passport). Returns the
    * appended record. This is the only way a dispute enters the queue.
+   *
+   * OD-2 [horn rate-limiting]: when `opts` carries the engine-resolved disputing sources
+   * + coalesce key, a DUPLICATE (same coalesce key already OPEN) or a CAP HIT (a source
+   * already at its per-source cap) is a NO-OP that returns the EXISTING matching OPEN
+   * record without advancing the chain. Omitting `opts` ⇒ exactly today's unconditional
+   * append (back-compatible).
    */
-  appendPending(pending: PendingRatification, systemSigner: KeyPair): LedgerRecord;
+  appendPending(
+    pending: PendingRatification,
+    systemSigner: KeyPair,
+    opts?: AppendPendingOptions,
+  ): LedgerRecord;
 
   /**
    * The OPEN disputes awaiting a human decision: every PENDING whose
@@ -303,6 +416,12 @@ function canonicalPending(p: PendingPayload): string {
     String(p.reason),
     String(p.createdAt),
     p.contentHash === undefined ? "" : "ch:" + p.contentHash,
+    // OD-2: emit-only-if-present (mirrors contentHash above) so legacy pendings hash
+    // EXACTLY as today; disputingSources sorted for an order-independent preimage.
+    p.coalesceKey === undefined ? "" : "ck:" + p.coalesceKey,
+    p.disputingSources === undefined
+      ? ""
+      : "ds:" + [...p.disputingSources].map(String).sort().join(","),
   ];
   return parts.join("");
 }
@@ -357,6 +476,37 @@ export function recordPreimage(rec: LedgerRecord): string {
   return hashPreimage(rec.seq, rec.prevHash, rec.kind, rec.payload, rec.signerSourceId);
 }
 
+/**
+ * Build the {@link PendingPayload} both ledger impls append, identically. Applies the
+ * content-blindness fingerprint (computed over the BASE payload, so it is stable and
+ * UNAFFECTED by the OD-2 fields) and then attaches the OD-2 `coalesceKey` /
+ * `disputingSources` ONLY WHEN PRESENT (exactOptionalPropertyTypes: omit, never assign
+ * `undefined`). A legacy call (`opts` omitted, plain mode) yields exactly today's payload.
+ */
+function buildPendingPayload(
+  pending: PendingRatification,
+  contentBlind: boolean,
+  opts: AppendPendingOptions | undefined,
+): PendingPayload {
+  const basePayload: PendingPayload = {
+    contradictionSetId: pending.contradictionSetId,
+    attribute: pending.attribute,
+    members: [...pending.members],
+    reason: pending.reason,
+    createdAt: pending.createdAt,
+  };
+  let payload: PendingPayload = contentBlind
+    ? { ...basePayload, contentHash: sha256Hex(canonicalPending(basePayload)) }
+    : basePayload;
+  if (opts?.coalesceKey !== undefined) {
+    payload = { ...payload, coalesceKey: opts.coalesceKey };
+  }
+  if (opts?.disputingSources !== undefined && opts.disputingSources.length > 0) {
+    payload = { ...payload, disputingSources: opts.disputingSources.map(String) };
+  }
+  return payload;
+}
+
 // ---------------------------------------------------------------------------
 // In-memory implementation
 // ---------------------------------------------------------------------------
@@ -386,46 +536,42 @@ class InMemoryPendingLedger implements PendingLedger {
     return this.chain;
   }
 
-  appendPending(pending: PendingRatification, systemSigner: KeyPair): LedgerRecord {
-    const basePayload: PendingPayload = {
-      contradictionSetId: pending.contradictionSetId,
-      attribute: pending.attribute,
-      members: [...pending.members],
-      reason: pending.reason,
-      createdAt: pending.createdAt,
-    };
-    // Content-blindness option: record only a content fingerprint of the dispute
-    // (the human reviews bodies out-of-band). Built from the immutable members +
-    // attribute so the same dispute always fingerprints the same.
-    const payload: PendingPayload = this.contentBlind
-      ? {
-          ...basePayload,
-          contentHash: sha256Hex(
-            canonicalPending(basePayload),
-          ),
-        }
-      : basePayload;
+  appendPending(
+    pending: PendingRatification,
+    systemSigner: KeyPair,
+    opts?: AppendPendingOptions,
+  ): LedgerRecord {
+    const payload = buildPendingPayload(pending, this.contentBlind, opts);
+
+    // OD-2 [horn rate-limiting]: dedup + per-source cap. Skipped ENTIRELY when opts is
+    // omitted (back-compat: exactly today's unconditional append). On a duplicate /
+    // cap-hit, return the existing OPEN record WITHOUT advancing the chain.
+    if (opts !== undefined) {
+      const limited = hornRateLimitDecision(this.openPendingRecords(), payload, opts);
+      if (limited !== null) return limited;
+    }
 
     return this.append("PENDING", payload, systemSigner);
   }
 
-  listPending(): readonly PendingPayload[] {
-    // A dispute is OPEN iff it has a PENDING and no later APPROVAL. Approvals are
-    // terminal, so a single pass collecting approved set ids then filtering pendings
-    // is sufficient.
+  /** The OPEN PENDING records (a PENDING with no later APPROVAL) — the OD-2 scan set. */
+  private openPendingRecords(): LedgerRecord[] {
     const approved = new Set<string>();
     for (const r of this.chain) {
       if (r.kind === "APPROVAL") {
         approved.add(String((r.payload as ApprovalPayload).contradictionSetId));
       }
     }
-    const open: PendingPayload[] = [];
+    const out: LedgerRecord[] = [];
     for (const r of this.chain) {
       if (r.kind !== "PENDING") continue;
-      const p = r.payload as PendingPayload;
-      if (!approved.has(String(p.contradictionSetId))) open.push(p);
+      if (!approved.has(String((r.payload as PendingPayload).contradictionSetId))) out.push(r);
     }
-    return open;
+    return out;
+  }
+
+  listPending(): readonly PendingPayload[] {
+    return this.openPendingRecords().map((r) => r.payload as PendingPayload);
   }
 
   approve(
@@ -778,21 +924,28 @@ class SqlitePendingLedgerImpl implements SqlitePendingLedger {
     return this.#chain();
   }
 
-  appendPending(pending: PendingRatification, systemSigner: KeyPair): LedgerRecord {
-    const basePayload: PendingPayload = {
-      contradictionSetId: pending.contradictionSetId,
-      attribute: pending.attribute,
-      members: [...pending.members],
-      reason: pending.reason,
-      createdAt: pending.createdAt,
-    };
-    const payload: PendingPayload = this.#contentBlind
-      ? { ...basePayload, contentHash: sha256Hex(canonicalPending(basePayload)) }
-      : basePayload;
+  appendPending(
+    pending: PendingRatification,
+    systemSigner: KeyPair,
+    opts?: AppendPendingOptions,
+  ): LedgerRecord {
+    const payload = buildPendingPayload(pending, this.#contentBlind, opts);
+
+    // OD-2 [horn rate-limiting]: dedup + per-source cap, INSIDE the same single-writer
+    // path as the append so a concurrent writer never double-appends. Skipped entirely
+    // when opts is omitted (back-compat). The OPEN-pending scan is the records table
+    // filtered to PENDING-without-APPROVAL (the new fields live in the existing payload
+    // JSON blob — no schema migration).
+    if (opts !== undefined) {
+      const limited = hornRateLimitDecision(this.#openPendingRecords(), payload, opts);
+      if (limited !== null) return limited;
+    }
+
     return this.#append("PENDING", payload, systemSigner);
   }
 
-  listPending(): readonly PendingPayload[] {
+  /** The OPEN PENDING records (a PENDING with no later APPROVAL) — the OD-2 scan set. */
+  #openPendingRecords(): LedgerRecord[] {
     const chain = this.#chain();
     const approved = new Set<string>();
     for (const r of chain) {
@@ -800,13 +953,16 @@ class SqlitePendingLedgerImpl implements SqlitePendingLedger {
         approved.add(String((r.payload as ApprovalPayload).contradictionSetId));
       }
     }
-    const open: PendingPayload[] = [];
+    const out: LedgerRecord[] = [];
     for (const r of chain) {
       if (r.kind !== "PENDING") continue;
-      const p = r.payload as PendingPayload;
-      if (!approved.has(String(p.contradictionSetId))) open.push(p);
+      if (!approved.has(String((r.payload as PendingPayload).contradictionSetId))) out.push(r);
     }
-    return open;
+    return out;
+  }
+
+  listPending(): readonly PendingPayload[] {
+    return this.#openPendingRecords().map((r) => r.payload as PendingPayload);
   }
 
   approve(

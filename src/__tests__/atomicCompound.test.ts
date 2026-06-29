@@ -172,6 +172,17 @@ function kycAnchor(): AnchorBinding {
   };
 }
 
+/** A DOMAIN anchor — a DIFFERENT class than KYC, so it is mutually INDEPENDENT of a
+ *  KYC-anchored source (independenceBetween > 0). Used to corroborate a winning value
+ *  with a genuinely anchor-disjoint root so the F4a >= 2-root floor clears. */
+function domainAnchor(): AnchorBinding {
+  return {
+    anchorClass: AnchorClass.DOMAIN,
+    realizedCost: 0.35 as Unit,
+    independenceWeight: 0.35 as Unit,
+  };
+}
+
 /**
  * Build a fully-wired engine over ONE shared SQLite handle: the StrandStore, the
  * reputation ledger, and the ratification (audit) ledger all ride `db`, and the
@@ -257,6 +268,22 @@ describe("atomic compound writes — a forced mid-op error rolls back fully (no 
       attribute: ATTR,
       payload: { capitalOf: "Germany" },
       stamp: winnerStamp,
+    });
+
+    // F4a/F4b (batch 3): a MULTI-CLASS auto-resolve now requires the WINNING VALUE to be
+    // backed by >= 2 mutually anchor-INDEPENDENT roots (F4a) AND >= 1 in-domain co-asserter
+    // (F4b). Corroborate "Germany" from a DOMAIN-anchored source DISJOINT from the
+    // incumbent's KYC anchor, so the engine-derived #R(winner) = 2 and the in-domain
+    // corroboration count = 1. The corroborator AGREES, so it is NOT one of the two losers;
+    // the RESOLVED demotion loop still demotes BOTH Tokyo + Paris (>= 2 iterations).
+    const corroborator = generatePassport();
+    w.keys.register(corroborator);
+    w.anchors.bind(corroborator.sourceId, [domainAnchor()]);
+    w.engine.writeFact({
+      entity: ENTITY,
+      attribute: ATTR,
+      payload: { capitalOf: "Germany" },
+      stamp: w.identity.stampFor(corroborator.sourceId),
     });
 
     // Two losing claims from FRESH zero-rep sources (so they lose), same class each

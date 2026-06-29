@@ -315,6 +315,7 @@ export type {
   ChainVerification,
   ResolvedDispute,
   ApproveContext,
+  AppendPendingOptions,
 } from "./ratification/pendingLedger.js";
 
 export {

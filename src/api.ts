@@ -706,6 +706,36 @@ class IntelligentDbImpl implements IntelligentDb {
     };
   }
 
+  /**
+   * OD-2 [horn rate-limiting]: the distinct disputing SOURCE ids behind a dispute's
+   * members — engine-OWNED evidence the ledger cannot derive (it sees only StrandIds and
+   * has no identity layer). Unions `provenance[].sourceId` across the disputed members,
+   * dropping nulls, deduped + sorted for determinism. O(members), control-plane.
+   */
+  #disputingSourcesOf(members: readonly Strand[]): SourceId[] {
+    const set = new Set<SourceId>();
+    for (const m of members) {
+      for (const root of m.provenance) {
+        if (root.sourceId !== null) set.add(root.sourceId);
+      }
+    }
+    return [...set].sort();
+  }
+
+  /**
+   * OD-2 [horn rate-limiting]: the cross-attribute dedup key — a hash of the disputed
+   * VALUE fingerprint (the sorted member `content_hash`es) + the sorted disputing-source
+   * set, with `attribute` EXCLUDED. So the SAME source-pair disputing the SAME value
+   * across many attributes coalesces to ONE enqueue. O(members), control-plane.
+   */
+  #disputeCoalesceKey(members: readonly Strand[]): string {
+    const values = [...new Set(members.map((m) => String(m.content_hash)))].sort();
+    const sources = this.#disputingSourcesOf(members).map(String);
+    return createHash("sha256")
+      .update("vals:" + values.join(",") + "|srcs:" + sources.join(","), "utf8")
+      .digest("hex");
+  }
+
   // -------------------------------------------------------------------------
   // writeFact — the model FILES (it does not witness)
   // -------------------------------------------------------------------------
@@ -944,7 +974,34 @@ class IntelligentDbImpl implements IntelligentDb {
     // recency + ≥2 INDEPENDENT ROOTS via #R).
     const highImpactCtx =
       opts?.highImpact === true ? this.#buildHighImpactContext(members) : undefined;
-    const outcome = tryConsolidate(set, members, stampsByRoot, at, undefined, undefined, highImpactCtx);
+
+    // F4a + F4b (engine-owned evidence, OD-8): the engine ALWAYS supplies the real
+    // callbacks built from its OWN trust layer (#R / #deriveAgreementSet, the batch-1
+    // shared basis — OD-6, no second agreement set). The pure module's defaults
+    // (`() => 2` / `() => Infinity`) are never relied on in production.
+    //  - F4a: the count of mutually anchor-INDEPENDENT roots backing the winner (#R).
+    //    A self-stacked / lone winner is R=1 and DEFERS on EVERY multi-class resolve,
+    //    high-impact or not (the unconditional structural second lock).
+    //  - F4b: the count of in-domain co-asserters on the disputed value
+    //    (#deriveAgreementSet size) — the POLICY-interim CrossDomainSpend re-pricing.
+    const byId = new Map<StrandId, Strand>(members.map((m) => [m.id, m]));
+    const agreementRootCountOf = (winner: StrandId): number =>
+      this.#R(byId.get(winner) ?? null);
+    const attrCorroborationCountOf = (winner: StrandId): number => {
+      const w = byId.get(winner);
+      return w ? this.#deriveAgreementSet(w).length : 0; // fail-closed: 0 ⇒ DEFER
+    };
+    const outcome = tryConsolidate(
+      set,
+      members,
+      stampsByRoot,
+      at,
+      undefined,
+      undefined,
+      highImpactCtx,
+      agreementRootCountOf,
+      attrCorroborationCountOf,
+    );
 
     switch (outcome.kind) {
       case "RESOLVED": {
@@ -1011,9 +1068,17 @@ class IntelligentDbImpl implements IntelligentDb {
               "pass a RatificationDeps to createIntelligentDb so the dispute is recorded for a human.",
           );
         }
+        // OD-2 [horn rate-limiting]: supply the engine-OWNED dedup/cap evidence (the
+        // ledger has no identity layer — OD-8). The disputing source-pair and the
+        // attribute-INDEPENDENT coalesce key are resolved from the disputed members'
+        // provenance; with these the ledger bounds the human horn (cross-attribute dedup
+        // + per-source cap K) so F4a's extra deferrals can't become a DOS-DEFER.
+        const disputingSources = this.#disputingSourcesOf(members);
+        const coalesceKey = this.#disputeCoalesceKey(members);
         this.#ratification.ledger.appendPending(
           outcome.pending,
           this.#ratification.systemSigner,
+          { disputingSources, coalesceKey },
         );
         return outcome;
       }
