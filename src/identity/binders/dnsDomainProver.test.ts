@@ -33,7 +33,6 @@ import {
 } from "../../index.js";
 import type {
   SourceId,
-  EpochMs,
   KeyPair,
   AnchorAttestation,
   ETldResolver,

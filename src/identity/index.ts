@@ -219,7 +219,7 @@ export interface SourceIdentityLayer {
   /**
    * RC-5 — true MIS anchor-independence between two SOURCES (not a mere distinct
    * key). Reproduces the EXACT pair logic {@link independentRootCount}'s internal
-   * `independent` predicate uses (identity/index.ts:356–382), at the source level:
+   * `independent` predicate uses, at the source level:
    *   - if EITHER source is unresolvable (not registered) ⇒ fall open to `true`
    *     (the count layer's class-disjoint fallback; mirrors the null-source branch);
    *   - else PREFER the registry's source-aware `anchors.independentSources`
@@ -511,8 +511,8 @@ export function createSourceIdentityLayer(
     },
 
     independentSources(a: SourceId, b: SourceId): boolean {
-      // RC-5 — the SOURCE-level twin of the `independent`-pair predicate above
-      // (identity/index.ts:356–382), so RC-5's approve-gate and the forgetting
+      // RC-5 — the SOURCE-level twin of the `independent`-pair predicate in
+      // `independentRootCount` above, so RC-5's approve-gate and the forgetting
       // count share ONE independence notion (anti-drift).
       // A source is trivially not independent of itself (an echo).
       if (a === b) return false;

@@ -31,10 +31,10 @@
  * (traversal/walk.ts), the two-phase halting gates (traversal/halting.ts), the
  * contradiction adjudication / tier-eviction permission (forgetting/consolidation.ts),
  * and the full retroactive disown sweep (ratification/disown.ts, reached via the
- * `disown` verb) are all IMPLEMENTED. A couple of `// TODO(crack-B)` markers below name
+ * `disown` verb) are all IMPLEMENTED. A couple of `NOTE (crack-B seam)` markers below name
  * the optional `ConsolidationPort` keep-pressure recompute seam, which is a no-op until
- * a forgetting layer is injected — not an unfinished core. Every wiring, signature, and
- * type here is complete and type-checks against core/types.ts and the sibling contracts.
+ * a forgetting-layer adapter is injected — not an unfinished core. Every wiring, signature,
+ * and type here is complete and type-checks against core/types.ts and the sibling contracts.
  *
  * STACK NOTE: ESM + NodeNext means relative imports carry the `.js` extension;
  * `verbatimModuleSyntax` means every type-only import MUST use `import type`.
@@ -135,9 +135,10 @@ import {
 // `ConsolidationLayer`, it is intended to be assignable to this port and injected
 // where `#consolidation` is set.
 //
-// TODO(crack-B): replace this local port with a direct
-//   `import type { ConsolidationLayer } from "./forgetting/consolidation.js";`
-//   once that module exists, keeping the same keep-pressure recompute method.
+// NOTE (crack-B seam): forgetting/consolidation.ts exists but exposes no injectable
+//   `ConsolidationLayer` interface — its functions are pure and store-driven. This
+//   narrow port is therefore the engine's own keep-pressure recompute seam; a caller
+//   that wants the hook live supplies an adapter assignable to ConsolidationPort.
 
 /**
  * The narrow forgetting-layer surface the engine drives. Keeps api.ts independent
@@ -381,9 +382,10 @@ export interface IntelligentDb {
  * default backend; a faster one may replace it later); the identity layer is the
  * external trust root the web defers to for source independence.
  *
- * The forgetting/consolidation hook is optional in the scaffold (the eviction
- * gates are crack-B). Pass one once forgetting/consolidation.ts lands; until then
- * keep-pressure recompute is a no-op.
+ * The forgetting/consolidation hook is optional. The eviction-permission gates
+ * themselves are implemented in forgetting/ (tiers.ts + consolidation.ts), but no
+ * `ConsolidationPort` adapter ships in the default wiring, so the keep-pressure
+ * recompute seam is a no-op until a caller injects one.
  *
  * The reputation ledger is the LIVE CREDIT-SCORE backend (pillar 3). When supplied,
  * the `ratify` verb drives `ledger.ratify(...)` so earned trust accrues from the
@@ -501,28 +503,35 @@ function now(): EpochMs {
 function hashPayload(entity: EntityId, payload: unknown): ContentHash {
   const h = createHash("sha256");
   h.update(String(entity));
-  h.update(" ");
+  h.update("\u0000");
   h.update(JSON.stringify(payload ?? null));
   return h.digest("hex") as ContentHash;
 }
 
 /**
- * Build the provenance root-set for a newly observed strand from its stamp. The
- * source's passport key becomes the root's source; the independence CLASS is
- * offline-assigned elsewhere, so the scaffold seeds it from the source id (one
- * root, one class) — the identity layer's `independentRootCount` is the authority
- * that later collapses same-class echoes.
+ * Build a single provenance root from a source's stamp. The source's passport key
+ * becomes the root's source; the independence CLASS is offline-assigned elsewhere,
+ * so the scaffold seeds it from the source id (one root, one class) — the identity
+ * layer's `independentRootCount` is the authority that later collapses same-class
+ * echoes. Shared by the new-strand root-set ({@link provenanceFromStamp}) and the
+ * external root appended by `ratify`, so both mint roots identically.
+ */
+function provenanceRootFromStamp(stamp: IdentityStamp, at: EpochMs): ProvenanceRoot {
+  return {
+    rootId: (`root:${randomUUID()}` as ProvenanceRoot["rootId"]),
+    // Offline-assigned in production; scaffold derives one class per source key.
+    independenceClass: (`class:${String(stamp.source_id)}` as ProvenanceRoot["independenceClass"]),
+    sourceId: stamp.source_id,
+    establishedAt: at,
+  };
+}
+
+/**
+ * Build the provenance root-set for a newly observed strand from its stamp (one
+ * root, one class — see {@link provenanceRootFromStamp}).
  */
 function provenanceFromStamp(stamp: IdentityStamp, at: EpochMs): readonly ProvenanceRoot[] {
-  return [
-    {
-      rootId: (`root:${randomUUID()}` as ProvenanceRoot["rootId"]),
-      // Offline-assigned in production; scaffold derives one class per source key.
-      independenceClass: (`class:${String(stamp.source_id)}` as ProvenanceRoot["independenceClass"]),
-      sourceId: stamp.source_id,
-      establishedAt: at,
-    },
-  ];
+  return [provenanceRootFromStamp(stamp, at)];
 }
 
 /** Default per-traversal-independent salience for a freshly observed strand. */
@@ -982,12 +991,7 @@ class IntelligentDbImpl implements IntelligentDb {
     // independent-root counts (read from the identity layer, never self-computed)
     // see a real outside witness. fact_state/origin are mutable on Strand; the
     // provenance set is readonly, so we re-`putStrand` a clone with the added root.
-    const externalRoot: ProvenanceRoot = {
-      rootId: (`root:${randomUUID()}` as ProvenanceRoot["rootId"]),
-      independenceClass: (`class:${String(canonicalStamp.source_id)}` as ProvenanceRoot["independenceClass"]),
-      sourceId: canonicalStamp.source_id,
-      establishedAt: at,
-    };
+    const externalRoot: ProvenanceRoot = provenanceRootFromStamp(canonicalStamp, at);
 
     let nextOrigin = strand.origin;
     let nextState = strand.fact_state;
@@ -1015,11 +1019,11 @@ class IntelligentDbImpl implements IntelligentDb {
     // A fresh external ratification changes the strand's independent-root count, a
     // forgetting-layer input. Ask consolidation to recompute keep-pressure.
     //
-    // TODO(crack-B): the consolidation eviction-PERMISSION gates (low echo-discounted
+    // NOTE (crack-B seam): the consolidation eviction-PERMISSION gates (low echo-discounted
     //   unique value, fresh independence stamp, not-the-outranked-side of a live
     //   contradiction, not an earned bridge, independent-source-count <= 1, past the
-    //   grace floor) live in forgetting/consolidation.ts and are stubbed there. This
-    //   recompute inherits that stub via the ConsolidationPort.
+    //   grace floor) are implemented in forgetting/ (tiers.ts + consolidation.ts).
+    //   This recompute is a no-op unless a ConsolidationPort adapter is injected.
     this.#consolidation?.onExternalRatification(input.strandId, canonicalStamp);
 
     // Drive the LIVE credit-score pillar: an external ratification is exactly the

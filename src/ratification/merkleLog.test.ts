@@ -51,7 +51,6 @@ import type {
   PendingLedger,
   PendingRatification,
   STH,
-  StrandId,
 } from "../index.js";
 
 const NOW = asEpochMs(1_700_000_000_000);
