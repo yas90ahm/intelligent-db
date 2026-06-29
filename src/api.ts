@@ -80,7 +80,7 @@ import { activationWalk } from "./traversal/walk.js";
 import type { HaltingController } from "./traversal/halting.js";
 import { createHaltingController } from "./traversal/halting.js";
 import type { SourceIdentityLayer } from "./identity/index.js";
-import type { ReputationLedger } from "./identity/reputation.js";
+import type { ReputationLedger, ReputationState } from "./identity/reputation.js";
 import type { KeyPair } from "./identity/keys.js";
 
 import {
@@ -97,7 +97,21 @@ import type {
   PendingPayload,
   ResolvedDispute,
   ApproveContext,
+  MutationPayload,
 } from "./ratification/pendingLedger.js";
+import { EMPTY_STATE_HASH } from "./ratification/pendingLedger.js";
+import {
+  hashReputationState,
+  hashStrandState,
+  hashSubjectId,
+  mutationReceipt,
+} from "./ratification/mutationReceipt.js";
+import type {
+  MerkleLog,
+  PublicationSink,
+  STH,
+} from "./ratification/merkleLog.js";
+import { createMerkleLog } from "./ratification/merkleLog.js";
 import type { CorroborationLedger } from "./ratification/corroboration.js";
 import type { AdjudicationProvenanceLedger } from "./ratification/adjudicationProvenance.js";
 import type { WeakInfluenceLedger } from "./ratification/weakInfluence.js";
@@ -204,15 +218,12 @@ export interface RatifyInput {
   readonly strandId: StrandId;
   /** The external source's stamp authorizing the promotion (mandatory). */
   readonly externalStamp: IdentityStamp;
-  /**
-   * OPTIONAL: the specific strands `strandId` AGREED WITH (was corroborated by). When
-   * supplied AND a corroboration ledger is wired AND this ratification actually raises
-   * the source's reputation, the engine records an append-only corroboration event with
-   * the EXACT applied delta, so a later disown of any of these strands' sources can
-   * reverse precisely that credit. Omit it for an ordinary (non-corroboration) ratify;
-   * the link is recorded only because the caller named it — never guessed.
-   */
-  readonly corroboratingStrandIds?: readonly StrandId[];
+  // NOTE (OD-8, engine-owned-evidence): there is deliberately NO caller-supplied
+  // corroborator list. When this ratify raises the source's reputation AND a
+  // corroboration ledger is wired, the engine DERIVES the agreement set itself
+  // (#deriveAgreementSet — same entity + content_hash + LIVE) and records the event
+  // with the EXACT applied delta, so a later disown can reverse precisely that credit.
+  // The caller can no longer inject which strands "corroborated" the claim.
 }
 
 // ---------------------------------------------------------------------------
@@ -285,9 +296,11 @@ export interface IntelligentDb {
    * routing decision. The web NEVER picks an in-graph winner for an independent
    * dispute; it only queues it.
    *
-   * Supply {@link AdjudicateOptions.highImpact} to flag the decision IRREVERSIBLE: a
-   * decisive LCB margin then becomes necessary but NOT sufficient (the winner must also
-   * clear the count/recency/anchor-class gate, else DEFER no matter the gap).
+   * Set {@link AdjudicateOptions.highImpact} `true` to flag the decision IRREVERSIBLE: a
+   * decisive LCB margin then becomes necessary but NOT sufficient — the winner must also
+   * clear the ENGINE-BUILT count/recency/≥2-independent-root gate (the engine constructs
+   * that evidence from its own trust layer; the caller supplies only the intent flag),
+   * else DEFER no matter the gap.
    */
   adjudicate(attribute: AttributeKey, opts?: AdjudicateOptions): ConsolidationOutcome;
 
@@ -336,6 +349,26 @@ export interface IntelligentDb {
     approver: KeyPair,
     now?: EpochMs,
   ): ResolvedDispute;
+
+  /**
+   * A2 EPOCH TICK: publish the current Signed Tree Head to every wired sink
+   * (operator/cron-driven, NEVER per-op — this is the per-op anchoring VETO honored at
+   * the engine seam). Returns the published {@link STH}, or `null` when no merkle layer
+   * is wired. Off the write/recall path.
+   */
+  anchorEpoch(now?: EpochMs): STH | null;
+
+  /**
+   * A2: publish the GENESIS STH (the empty tree) once at init so pre-first-anchor history
+   * is not attacker-choosable. Returns the published STH, or `null` when unwired.
+   */
+  publishGenesis(now?: EpochMs): STH | null;
+
+  /**
+   * A2: the wired {@link MerkleLog} (for witness checks / inclusion proofs), or `null`
+   * when no merkle layer is wired.
+   */
+  merkleLog(): MerkleLog | null;
 }
 
 // ---------------------------------------------------------------------------
@@ -404,18 +437,32 @@ export interface RatificationDeps {
    * DERIVATION citation.
    */
   readonly weakInfluence?: WeakInfluenceLedger;
+  /**
+   * A2 [optional/latent] — wire a {@link MerkleLog} over the SAME ratification ledger so
+   * a witness can detect a hidden disown (mk-m3). OMITTED (the default) ⇒ behavior is
+   * back-compatible: A1 MUTATION receipts are STILL journaled latently into the ledger
+   * (the audit COVERAGE), but NO STH is published and no sink is written. When supplied,
+   * the engine builds the log at construction (`createMerkleLog` enforces ≥2 independent
+   * sinks — fail-closed at wiring time) and exposes {@link IntelligentDb.anchorEpoch} /
+   * {@link IntelligentDb.publishGenesis} / {@link IntelligentDb.merkleLog}.
+   */
+  readonly merkle?: { readonly signer: KeyPair; readonly sinks: readonly PublicationSink[] };
 }
 
 /**
- * Optional knobs for {@link IntelligentDb.adjudicate}. Supplying a `highImpact` context
+ * Optional knobs for {@link IntelligentDb.adjudicate}. Setting `highImpact: true`
  * flags the decision IRREVERSIBLE — a decisive LCB margin then becomes NECESSARY BUT
- * NOT SUFFICIENT: the winner must additionally clear the corroboration-count, recency-
- * clean, and ≥2-disjoint-anchor-class gate (ARCHITECTURE.md §2), else the dispute
- * DEFERS to a human no matter the gap. Omit it for ordinary adjudication.
+ * NOT SUFFICIENT: the winner must additionally clear the ENGINE-BUILT corroboration-
+ * count, recency-clean, and ≥2-independent-root gate (ARCHITECTURE.md §2), else the
+ * dispute DEFERS to a human no matter the gap. Omit it for ordinary adjudication.
  */
 export interface AdjudicateOptions {
-  /** The high-impact gate evidence the winner must clear for an irreversible decision. */
-  readonly highImpact?: HighImpactContext;
+  /**
+   * INTENT only: flag this decision IRREVERSIBLE. The engine builds the gate
+   * evidence from its OWN trust layer (#reputation + #identity + the agreement
+   * index); the caller supplies NO evidence proxy (OD-8, engine-owned-evidence).
+   */
+  readonly highImpact?: boolean;
 }
 
 /**
@@ -588,6 +635,27 @@ class IntelligentDbImpl implements IntelligentDb {
    */
   readonly #ratification: RatificationDeps | null;
 
+  /**
+   * A2 [optional/latent] — the wired Merkle log over the ratification ledger, or null
+   * when `ratification.merkle` was omitted. Built once at construction; never touched on
+   * a verb path (anchoring is exclusively {@link anchorEpoch}).
+   */
+  readonly #merkleLog: MerkleLog | null;
+
+  /**
+   * M3 anti-grief (BATCH 4, OD-2 seam family) — the per-source-pair contradiction
+   * RATE-LIMITER. Keyed `${contradictor}->${target}:${class}` → the witness time it
+   * last SCARRED. A given contradictor→target pair may add a NON-DECAYING scar at most
+   * ONCE per independence class per {@link #SCAR_WINDOW_MS}; a repeat inside the window
+   * falls back to an ordinary (decaying) contradiction. This blocks a single attacker
+   * STACKING many w-weighted contradictions to grief an honest incumbent, while leaving
+   * a genuine SECOND independent class free to scar (different pair / different class).
+   * First-arrival-safe: the scar penalizes the CONTRADICTED party, never the late-arriver.
+   */
+  readonly #scarLimiter = new Map<string, EpochMs>();
+  /** The per-pair scar rate-limit window (one decay half-life, 90 days). */
+  readonly #SCAR_WINDOW_MS = 90 * 86_400_000;
+
   constructor(
     store: StrandStore,
     identity: SourceIdentityLayer,
@@ -600,6 +668,204 @@ class IntelligentDbImpl implements IntelligentDb {
     this.#consolidation = consolidation;
     this.#reputation = reputation;
     this.#ratification = ratification;
+    // A2: build the Merkle log over the SAME ratification ledger when wired.
+    // `createMerkleLog` throws on <2 sinks — correct fail-closed, surfaced at construction.
+    this.#merkleLog =
+      ratification?.merkle !== undefined
+        ? createMerkleLog({
+            ledger: ratification.ledger,
+            signer: ratification.merkle.signer,
+            sinks: ratification.merkle.sinks,
+          })
+        : null;
+  }
+
+  /**
+   * A1 [Merkle MUTATION coverage] — journal ONE content-addressed MUTATION receipt into
+   * the wired ratification ledger, signed by the system signer. A no-op when no
+   * ratification ledger is wired (nowhere to journal — the latent-journaling gate). Call
+   * sites sit INSIDE the compound op's `withTxn` envelope so receipt + mutation commit
+   * atomically.
+   */
+  #emitMutation(payload: MutationPayload): void {
+    if (this.#ratification !== null) {
+      this.#ratification.ledger.appendMutation(payload, this.#ratification.systemSigner);
+    }
+  }
+
+  anchorEpoch(at?: EpochMs): STH | null {
+    return this.#merkleLog === null ? null : this.#merkleLog.anchor(at ?? now());
+  }
+
+  publishGenesis(at?: EpochMs): STH | null {
+    return this.#merkleLog === null ? null : this.#merkleLog.publishGenesis(at ?? now());
+  }
+
+  merkleLog(): MerkleLog | null {
+    return this.#merkleLog;
+  }
+
+  // -------------------------------------------------------------------------
+  // Engine-owned evidence: the shared R-primitive (OD-6) + the high-impact gate
+  // context the engine CONSTRUCTS from its own trust layer (OD-8).
+  // -------------------------------------------------------------------------
+
+  /**
+   * The AGREEMENT SET of a strand: every OTHER strand asserting the SAME VALUE about the
+   * SAME ENTITY and still LIVE. Agreement = same `entity` + same `content_hash` (the
+   * mechanical value fingerprint) + LIVE. Resolved via the store's ENTITY INDEX
+   * (`strandsByEntity`), so it is O(k) in the entity's strand count — NEVER an
+   * `allStrands()` scan (perf VETO). `attribute` may be null; entity-scoping plus
+   * content_hash equality IS the value test.
+   *
+   * The single shared agreement basis (OD-6): both the ratify corroboration recorder and
+   * {@link #R} read THIS, so the three downstream consumers cannot drift into ad-hoc sets.
+   */
+  #deriveAgreementSet(target: Strand): StrandId[] {
+    const out: StrandId[] = [];
+    for (const s of this.#store.strandsByEntity(target.entity)) {
+      if (s.id === target.id) continue;
+      if (s.fact_state !== FactState.LIVE) continue;
+      if (s.content_hash !== target.content_hash) continue; // same VALUE fingerprint
+      out.push(s.id);
+    }
+    return out;
+  }
+
+  /**
+   * The R-primitive (OD-6): the number of mutually anchor-INDEPENDENT actors backing the
+   * winning VALUE. Unions the provenance roots of `target` with every agreeing LIVE
+   * strand's roots (deduped by `rootId` so a same-root flood counts once), then defers to
+   * the identity layer's exact MIS (`independentRootCount`, Bron–Kerbosch +
+   * `min(distinctClassCount, maxSetSize)` clamp). The clamp is anti-inflationary: the
+   * count can only make the gate HARDER → never a false CLEAR, worst case over-defer.
+   *
+   * Per-VALUE (requires same `content_hash`) — corroboration arrives BOTH as `ratify`
+   * appending an external root AND as separate agreeing strands; the old single-strand
+   * `winner.provenance` read under-counted the latter.
+   */
+  #R(target: Strand | null): number {
+    if (target === null) return 0; // fail-closed
+    const byRootId = new Map<ProvenanceRootId, ProvenanceRoot>();
+    const absorb = (roots: readonly ProvenanceRoot[]): void => {
+      for (const r of roots) if (!byRootId.has(r.rootId)) byRootId.set(r.rootId, r);
+    };
+    absorb(target.provenance);
+    for (const sid of this.#deriveAgreementSet(target)) {
+      const s = this.#store.getStrand(sid);
+      if (s !== null) absorb(s.provenance);
+    }
+    return this.#identity.independentRootCount([...byRootId.values()]);
+  }
+
+  /**
+   * The PRIMARY (representative) source backing a strand — its first non-null provenance
+   * `sourceId` — used as the contradictor identity in the per-pair scar rate-limit. Null
+   * if the strand is unknown or carries no resolvable source.
+   */
+  #primarySourceOf(strandId: StrandId | null, members: readonly Strand[]): SourceId | null {
+    if (strandId === null) return null;
+    const s = members.find((m) => m.id === strandId) ?? this.#store.getStrand(strandId);
+    if (s === null) return null;
+    for (const root of s.provenance) if (root.sourceId !== null) return root.sourceId;
+    return null;
+  }
+
+  /**
+   * M3 anti-grief — decide whether an ADJUDICATED contradiction may SCAR (route into the
+   * NON-DECAYING `scarBeta`) under the per-source-pair rate-limit. Returns true (and
+   * records the witness time) the FIRST time a given `contradictor→target` pair scars a
+   * given independence `class` within {@link #SCAR_WINDOW_MS}; returns false for a repeat
+   * inside the window (so the caller falls back to an ordinary decaying contradiction).
+   * A null contradictor (unknown winner source) still scars once per (target, class) —
+   * fail-safe toward recording the betrayal, not toward griefing (the window still caps it).
+   */
+  #admitScar(contradictor: SourceId | null, target: SourceId, klass: string, at: EpochMs): boolean {
+    const key = `${String(contradictor ?? "?")}->${String(target)}:${klass}`;
+    const last = this.#scarLimiter.get(key);
+    if (last !== undefined && (at as number) - (last as number) < this.#SCAR_WINDOW_MS) {
+      return false; // already scarred this pair/class in-window ⇒ ordinary contradiction
+    }
+    this.#scarLimiter.set(key, at);
+    return true;
+  }
+
+  /**
+   * Build the {@link HighImpactContext} the pure consolidation gate consumes — entirely
+   * from the engine's OWN trust layer (#reputation + #identity + the agreement index),
+   * keyed by the prospective winner's {@link StrandId} (OD-8: no caller-supplied evidence
+   * proxy). The pure module's interface is UNCHANGED; only its CONSTRUCTION lives here.
+   */
+  #buildHighImpactContext(members: readonly Strand[]): HighImpactContext {
+    const byId = new Map<StrandId, Strand>();
+    for (const m of members) byId.set(m.id, m);
+
+    const rootsOf = (winner: StrandId): readonly ProvenanceRoot[] => {
+      const w = byId.get(winner);
+      return w ? w.provenance : [];
+    };
+
+    return {
+      // (a) earned corroboration count — from the reputation ledger the engine owns.
+      corroborationCountOf: (winner): number => {
+        if (this.#reputation === null) return 0; // fail-closed: no ledger ⇒ 0
+        let best = 0;
+        for (const root of rootsOf(winner)) {
+          if (root.sourceId === null) continue;
+          const st = this.#reputation.stateOf(root.sourceId);
+          if (st && st.ratifiedCount > best) best = st.ratifiedCount;
+        }
+        return best;
+      },
+      // (b) most-recent contradiction time — fail-closed if unknown: a contradicted
+      //     source carrying no timestamp is treated as contradicted-now so the recency
+      //     window FAILS and the dispute DEFERS.
+      lastContradictionAtOf: (winner): EpochMs | null => {
+        if (this.#reputation === null) return null;
+        let latest: EpochMs | null = null;
+        for (const root of rootsOf(winner)) {
+          if (root.sourceId === null) continue;
+          const st = this.#reputation.stateOf(root.sourceId);
+          if (!st) continue;
+          const t: EpochMs | null =
+            st.lastContradictionAt ?? (st.contradictedCount > 0 ? now() : null);
+          if (t !== null && (latest === null || (t as number) > (latest as number))) latest = t;
+        }
+        return latest;
+      },
+      // (c) F1: count independent ROOTS, not anchor CLASSES — the R-primitive.
+      anchorClassCountOf: (winner): number => this.#R(byId.get(winner) ?? null),
+    };
+  }
+
+  /**
+   * OD-2 [horn rate-limiting]: the distinct disputing SOURCE ids behind a dispute's
+   * members — engine-OWNED evidence the ledger cannot derive (it sees only StrandIds and
+   * has no identity layer). Unions `provenance[].sourceId` across the disputed members,
+   * dropping nulls, deduped + sorted for determinism. O(members), control-plane.
+   */
+  #disputingSourcesOf(members: readonly Strand[]): SourceId[] {
+    const set = new Set<SourceId>();
+    for (const m of members) {
+      for (const root of m.provenance) {
+        if (root.sourceId !== null) set.add(root.sourceId);
+      }
+    }
+    return [...set].sort();
+  }
+
+  /**
+   * OD-2 [horn rate-limiting]: the cross-attribute dedup key — a hash of the disputed
+   * VALUE fingerprint (the sorted member `content_hash`es) + the sorted disputing-source
+   * set, with `attribute` EXCLUDED. So the SAME source-pair disputing the SAME value
+   * across many attributes coalesces to ONE enqueue. O(members), control-plane.
+   */
+  #disputeCoalesceKey(members: readonly Strand[]): string {
+    const values = [...new Set(members.map((m) => String(m.content_hash)))].sort();
+    const sources = this.#disputingSourcesOf(members).map(String);
+    return createHash("sha256")
+      .update("vals:" + values.join(",") + "|srcs:" + sources.join(","), "utf8")
+      .digest("hex");
   }
 
   // -------------------------------------------------------------------------
@@ -771,10 +1037,20 @@ class IntelligentDbImpl implements IntelligentDb {
     // corroboration ledger is wired AND α actually moved (never guessed/coincidental).
     if (this.#reputation !== null) {
       const beforeAlpha = this.#reputation.stateOf(canonicalStamp.source_id)?.alpha ?? 1;
-      const after = this.#reputation.ratify(canonicalStamp.source_id, at);
+      // M2 (BATCH 4) — supply the engine-owned MIS corroboration DEPTH so the ledger can
+      // raise its NON-DECAYING depth-floor MONOTONE-MAX. `#R` is the SAME shared agreement
+      // basis (OD-6): the count of mutually anchor-INDEPENDENT roots backing this value
+      // (strand's roots ∪ agreeing LIVE strands' roots, via `independentRootCount`). The
+      // model never witnesses — the ledger only stores the max it is handed. A same-class
+      // (depth-1) flood passes depth 1 ⇒ `floorMass(1)=0` ⇒ buys no floor.
+      const depth = this.#R(strand);
+      const after = this.#reputation.ratify(canonicalStamp.source_id, at, undefined, depth);
       const deltaAlpha = after.alpha - beforeAlpha;
-      const corroborating = input.corroboratingStrandIds;
-      const namedCorroborators = corroborating !== undefined && corroborating.length > 0;
+      // ENGINE-OWNED EVIDENCE (OD-8): the corroborating set is DERIVED from the engine's
+      // own agreement index (same entity + content_hash + LIVE), never supplied by the
+      // caller. The CorroborationEvent ledger field is unchanged — only its source is.
+      const corroborating = this.#deriveAgreementSet(strand);
+      const namedCorroborators = corroborating.length > 0;
       let recorded = false;
       if (
         this.#ratification?.corroboration !== undefined &&
@@ -783,7 +1059,7 @@ class IntelligentDbImpl implements IntelligentDb {
       ) {
         this.#ratification.corroboration.record({
           ratifiedStrandId: input.strandId,
-          corroboratingStrandIds: [...corroborating!],
+          corroboratingStrandIds: [...corroborating],
           beneficiarySourceId: canonicalStamp.source_id,
           reputationDelta: deltaAlpha,
           at,
@@ -830,10 +1106,41 @@ class IntelligentDbImpl implements IntelligentDb {
     }
 
     const at = now();
-    // When the caller flags this decision IRREVERSIBLE, pass the high-impact gate
-    // context to the pure core: a decisive LCB margin is then necessary but NOT
-    // sufficient (the winner must also clear count + recency + ≥2 anchor classes).
-    const outcome = tryConsolidate(set, members, stampsByRoot, at, undefined, undefined, opts?.highImpact);
+    // When the caller flags this decision IRREVERSIBLE, the engine CONSTRUCTS the
+    // high-impact gate context from its OWN trust layer (#reputation + #identity + the
+    // agreement index) — the caller supplied only an intent flag (OD-8). A decisive LCB
+    // margin is then necessary but NOT sufficient (the winner must also clear count +
+    // recency + ≥2 INDEPENDENT ROOTS via #R).
+    const highImpactCtx =
+      opts?.highImpact === true ? this.#buildHighImpactContext(members) : undefined;
+
+    // F4a + F4b (engine-owned evidence, OD-8): the engine ALWAYS supplies the real
+    // callbacks built from its OWN trust layer (#R / #deriveAgreementSet, the batch-1
+    // shared basis — OD-6, no second agreement set). The pure module's defaults
+    // (`() => 2` / `() => Infinity`) are never relied on in production.
+    //  - F4a: the count of mutually anchor-INDEPENDENT roots backing the winner (#R).
+    //    A self-stacked / lone winner is R=1 and DEFERS on EVERY multi-class resolve,
+    //    high-impact or not (the unconditional structural second lock).
+    //  - F4b: the count of in-domain co-asserters on the disputed value
+    //    (#deriveAgreementSet size) — the POLICY-interim CrossDomainSpend re-pricing.
+    const byId = new Map<StrandId, Strand>(members.map((m) => [m.id, m]));
+    const agreementRootCountOf = (winner: StrandId): number =>
+      this.#R(byId.get(winner) ?? null);
+    const attrCorroborationCountOf = (winner: StrandId): number => {
+      const w = byId.get(winner);
+      return w ? this.#deriveAgreementSet(w).length : 0; // fail-closed: 0 ⇒ DEFER
+    };
+    const outcome = tryConsolidate(
+      set,
+      members,
+      stampsByRoot,
+      at,
+      undefined,
+      undefined,
+      highImpactCtx,
+      agreementRootCountOf,
+      attrCorroborationCountOf,
+    );
 
     switch (outcome.kind) {
       case "RESOLVED": {
@@ -870,11 +1177,50 @@ class IntelligentDbImpl implements IntelligentDb {
               };
               this.#store.putEdge(edge);
             }
+            // A1 — capture the loser's pre-persist (store-side) state for the receipt,
+            // then persist the demotion.
+            const demoteBefore = hashStrandState(loser);
             this.#store.putStrand(loserObj);
-            // Reputation: a contradicted claim craters its authors' earned trust.
+            // A1 — journal the DEMOTE EFFECT (afterHash commits fact_state + outranked_by;
+            // refEventId names the OUTRANKS edge). Inside this withTxn ⇒ atomic.
+            this.#emitMutation(
+              mutationReceipt(
+                "DEMOTE",
+                String(d.demoted),
+                String(loserObj.content_hash),
+                demoteBefore,
+                hashStrandState(loserObj),
+                at,
+                String(d.outranks),
+              ),
+            );
+            // Reputation: a contradicted claim craters its authors' earned trust. M3
+            // (BATCH 4): this is an ADJUDICATED contradiction, so it SCARS (routes `c·w`
+            // into the NON-DECAYING `scarBeta`, suppressing the betrayer's depth-floor)
+            // — UNLESS the per-source-pair rate-limit (OD-2 seam family) has already
+            // scarred this contradictor→target pair for this class in the window, in
+            // which case it falls back to an ordinary (decaying) contradiction so a
+            // single attacker cannot STACK many scars to grief an honest incumbent. The
+            // scar penalizes the CONTRADICTED (loser) party, never the late-arriver
+            // (first-arrival-safe).
             if (this.#reputation !== null) {
+              const contradictor = this.#primarySourceOf(winnerId, members);
               for (const root of loserObj.provenance) {
-                if (root.sourceId !== null) this.#reputation.contradict(root.sourceId, at);
+                if (root.sourceId === null) continue;
+                const scarring = this.#admitScar(contradictor, root.sourceId, root.independenceClass, at);
+                const before = this.#reputation.stateOf(root.sourceId);
+                const post = this.#reputation.contradict(root.sourceId, at, undefined, scarring);
+                // A1 — journal the REPUTATION_CONTRADICT EFFECT (before/after rep state).
+                this.#emitMutation(
+                  mutationReceipt(
+                    "REPUTATION_CONTRADICT",
+                    String(root.sourceId),
+                    hashSubjectId(String(root.sourceId)),
+                    hashReputationState(before),
+                    hashReputationState(post),
+                    at,
+                  ),
+                );
               }
             }
           }
@@ -900,9 +1246,17 @@ class IntelligentDbImpl implements IntelligentDb {
               "pass a RatificationDeps to createIntelligentDb so the dispute is recorded for a human.",
           );
         }
+        // OD-2 [horn rate-limiting]: supply the engine-OWNED dedup/cap evidence (the
+        // ledger has no identity layer — OD-8). The disputing source-pair and the
+        // attribute-INDEPENDENT coalesce key are resolved from the disputed members'
+        // provenance; with these the ledger bounds the human horn (cross-attribute dedup
+        // + per-source cap K) so F4a's extra deferrals can't become a DOS-DEFER.
+        const disputingSources = this.#disputingSourcesOf(members);
+        const coalesceKey = this.#disputeCoalesceKey(members);
         this.#ratification.ledger.appendPending(
           outcome.pending,
           this.#ratification.systemSigner,
+          { disputingSources, coalesceKey },
         );
         return outcome;
       }
@@ -961,9 +1315,22 @@ class IntelligentDbImpl implements IntelligentDb {
       }
       return best;
     };
+    // The winner's backing sources, widened to the ONE engine-owned agreement basis
+    // (`{winner} ∪ #deriveAgreementSet(winner)`) so a winner corroborated by SEPARATE
+    // agreeing LIVE strands is not under-counted — the same set `#R` reads (OD-6). This
+    // is the HARDENING-3 adjudication-provenance receipt (feeds margin-collapse re-open),
+    // NOT a security gate: a wider contributing set can only make a future re-open fire
+    // MORE readily (fail-safe-to-human), never auto-resolve anything.
     const winnerSources = new Set<SourceId>();
-    for (const root of winner.provenance) {
-      if (root.sourceId !== null) winnerSources.add(root.sourceId);
+    const absorbSources = (roots: readonly ProvenanceRoot[]): void => {
+      for (const root of roots) {
+        if (root.sourceId !== null) winnerSources.add(root.sourceId);
+      }
+    };
+    absorbSources(winner.provenance);
+    for (const sid of this.#deriveAgreementSet(winner)) {
+      const s = this.#store.getStrand(sid);
+      if (s !== null) absorbSources(s.provenance);
     }
 
     // The strongest NON-winner member's reputation (the runner-up the margin cleared).
@@ -1053,6 +1420,14 @@ class IntelligentDbImpl implements IntelligentDb {
       },
       mintEdgeId: (winner: StrandId, loser: StrandId): EdgeId =>
         asEdgeId(`edge:outranks:${randomUUID()}:${String(winner)}->${String(loser)}`),
+      // RC-5 — the two anchor-independence predicates the approve-gate consults.
+      // Both delegate to the SAME identity layer the rest of the web reads, so
+      // there is exactly ONE independence notion (no drift) and the ledger stays
+      // pure (no identity import — the engine supplies these).
+      independentSources: (a: SourceId, b: SourceId): boolean =>
+        this.#identity.independentSources(a, b),
+      approverHasAnchors: (sourceId: SourceId): boolean =>
+        this.#identity.stampFor(sourceId).anchor_cost > 0,
     };
 
     // ATOMIC: the ledger's APPROVAL append (the signed audit record) + the reputation
@@ -1063,6 +1438,23 @@ class IntelligentDbImpl implements IntelligentDb {
     // With the audit ledger + reputation ledger riding the SAME shared db handle as the
     // store, all three enroll in this single transaction.
     const resolved = withTxn(this.#store, () => {
+      // A1 — snapshot the dispute authors' reputation BEFORE the ledger drives its moves
+      // (winner ratified / losers contradicted happen INSIDE `ledger.approve`), so the
+      // EFFECT receipts can carry an exact before/after. Members come from the open
+      // pending; authors are resolved through the same `ctx` the gate uses.
+      const repBefore = new Map<SourceId, ReputationState | null>();
+      if (this.#reputation !== null) {
+        const members =
+          this.#ratification!.ledger
+            .listPending()
+            .find((p) => p.contradictionSetId === contradictionSetId)?.members ?? [];
+        for (const m of members) {
+          for (const a of ctx.authorsOf(m)) {
+            if (!repBefore.has(a)) repBefore.set(a, this.#reputation.stateOf(a));
+          }
+        }
+      }
+
       const plan = this.#ratification!.ledger.approve(
         contradictionSetId,
         winnerStrandId,
@@ -1080,9 +1472,66 @@ class IntelligentDbImpl implements IntelligentDb {
       for (const edge of plan.outranksEdges) {
         this.#store.putEdge(edge);
       }
+      const edgeFor = new Map<StrandId, EdgeId>();
+      for (const edge of plan.outranksEdges) edgeFor.set(edge.to, edge.id);
       for (const d of plan.demotions) {
-        const loser = handed.get(d.demoted) ?? this.#store.getStrand(d.demoted);
-        if (loser !== null) this.#store.putStrand(loser);
+        // A1 — capture the loser's pre-persist store state for the DEMOTE receipt.
+        const fromStore = this.#store.getStrand(d.demoted);
+        const beforeHash = fromStore !== null ? hashStrandState(fromStore) : EMPTY_STATE_HASH;
+        const loser = handed.get(d.demoted) ?? fromStore;
+        if (loser !== null) {
+          this.#store.putStrand(loser);
+          const refEdge = edgeFor.get(d.demoted);
+          this.#emitMutation(
+            mutationReceipt(
+              "DEMOTE",
+              String(d.demoted),
+              String(loser.content_hash),
+              beforeHash,
+              hashStrandState(loser),
+              when,
+              refEdge === undefined ? undefined : String(refEdge),
+            ),
+          );
+        }
+      }
+
+      // A1 — journal the reputation EFFECTS the ledger drove (one receipt per distinct
+      // author per effect, deterministic by source id). The signed APPROVAL leaf already
+      // commits the DECISION; these add the EFFECT leaves so a hidden reputation move is
+      // detectable. before = the pre-approve snapshot; after = the now-final state.
+      if (this.#reputation !== null) {
+        const loserAuthors = new Set<SourceId>();
+        for (const d of plan.demotions) {
+          for (const a of ctx.authorsOf(d.demoted)) loserAuthors.add(a);
+        }
+        const winnerAuthors = new Set<SourceId>(ctx.authorsOf(winnerStrandId));
+        const sortIds = (xs: Iterable<SourceId>): SourceId[] =>
+          [...xs].sort((x, y) => (String(x) < String(y) ? -1 : String(x) > String(y) ? 1 : 0));
+        for (const a of sortIds(loserAuthors)) {
+          this.#emitMutation(
+            mutationReceipt(
+              "REPUTATION_CONTRADICT",
+              String(a),
+              hashSubjectId(String(a)),
+              hashReputationState(repBefore.get(a) ?? null),
+              hashReputationState(this.#reputation.stateOf(a)),
+              when,
+            ),
+          );
+        }
+        for (const a of sortIds(winnerAuthors)) {
+          this.#emitMutation(
+            mutationReceipt(
+              "REPUTATION_RATIFY",
+              String(a),
+              hashSubjectId(String(a)),
+              hashReputationState(repBefore.get(a) ?? null),
+              hashReputationState(this.#reputation.stateOf(a)),
+              when,
+            ),
+          );
+        }
       }
       return plan;
     });

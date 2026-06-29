@@ -172,6 +172,17 @@ function kycAnchor(): AnchorBinding {
   };
 }
 
+/** A DOMAIN anchor — a DIFFERENT class than KYC, so it is mutually INDEPENDENT of a
+ *  KYC-anchored source (independenceBetween > 0). Used to corroborate a winning value
+ *  with a genuinely anchor-disjoint root so the F4a >= 2-root floor clears. */
+function domainAnchor(): AnchorBinding {
+  return {
+    anchorClass: AnchorClass.DOMAIN,
+    realizedCost: 0.35 as Unit,
+    independenceWeight: 0.35 as Unit,
+  };
+}
+
 /**
  * Build a fully-wired engine over ONE shared SQLite handle: the StrandStore, the
  * reputation ledger, and the ratification (audit) ledger all ride `db`, and the
@@ -259,6 +270,22 @@ describe("atomic compound writes — a forced mid-op error rolls back fully (no 
       stamp: winnerStamp,
     });
 
+    // F4a/F4b (batch 3): a MULTI-CLASS auto-resolve now requires the WINNING VALUE to be
+    // backed by >= 2 mutually anchor-INDEPENDENT roots (F4a) AND >= 1 in-domain co-asserter
+    // (F4b). Corroborate "Germany" from a DOMAIN-anchored source DISJOINT from the
+    // incumbent's KYC anchor, so the engine-derived #R(winner) = 2 and the in-domain
+    // corroboration count = 1. The corroborator AGREES, so it is NOT one of the two losers;
+    // the RESOLVED demotion loop still demotes BOTH Tokyo + Paris (>= 2 iterations).
+    const corroborator = generatePassport();
+    w.keys.register(corroborator);
+    w.anchors.bind(corroborator.sourceId, [domainAnchor()]);
+    w.engine.writeFact({
+      entity: ENTITY,
+      attribute: ATTR,
+      payload: { capitalOf: "Germany" },
+      stamp: w.identity.stampFor(corroborator.sourceId),
+    });
+
     // Two losing claims from FRESH zero-rep sources (so they lose), same class each
     // other is irrelevant — what matters is a single-class dispute resolves in-graph.
     const loserA = newSource(w);
@@ -337,6 +364,12 @@ describe("atomic compound writes — a forced mid-op error rolls back fully (no 
     // The structural integrity of the db is intact after the rollback.
     expect(w.store.integrityCheck()).toBe(true);
 
+    // A1 — the rollback covered the MUTATION RECEIPTS too: the DEMOTE/contradict receipt
+    // for the FIRST loser (emitted before the 2nd-loser throw) left NO orphan leaf.
+    expect(
+      w.ratification.ledger.records().filter((r) => r.kind === "MUTATION").length,
+    ).toBe(0);
+
     // PROVE this was genuinely the RESOLVED path (not a vacuous DEFERRED that demotes
     // nothing anyway): with putStrand restored, re-running adjudicate now SUCCEEDS and
     // resolves the SAME dispute, demoting BOTH losers — confirming the rolled-back op
@@ -348,6 +381,11 @@ describe("atomic compound writes — a forced mid-op error rolls back fully (no 
     }
     expect(w.store.getStrand(loserAId)!.fact_state).toBe(FactState.DEMOTED);
     expect(w.store.getStrand(loserBId)!.fact_state).toBe(FactState.DEMOTED);
+    // The redo cleanly produced the MUTATION effect leaves AND the chain verifies.
+    expect(
+      w.ratification.ledger.records().filter((r) => r.kind === "MUTATION").length,
+    ).toBeGreaterThan(0);
+    expect(w.ratification.ledger.verifyChain()).toEqual({ ok: true, firstBrokenSeq: null });
   });
 
   it("downstreamDisownSweep: a ledger.contradict throwing mid-sweep leaves NO demotion or clawback", () => {
@@ -460,6 +498,9 @@ describe("crash recovery — a committed compound op is fully present after an u
       // OUTRANKS + reputation, all in ONE txn over the shared handle).
       approverPassport = generatePassport();
       w.keys.register(approverPassport);
+      // RC-5: the approver needs a priced anchor (no anchor → no voice) that is
+      // disjoint from the members' KYC anchors (DOMAIN ⊥ VERIFIED_HUMAN ⇒ independent).
+      w.anchors.bind(approverPassport.sourceId, [domainAnchor()]);
       const resolved = w.engine.approve(csid, winnerId, approverPassport, NOW);
       expect(resolved.demotions.length).toBe(1);
       expect(resolved.outranksEdges.length).toBe(1);
@@ -495,7 +536,12 @@ describe("crash recovery — a committed compound op is fully present after an u
 
     // The signed APPROVAL record survived AND the chain re-verifies (signer key was
     // persisted in the SAME committed txn — no desync between audit + state).
-    expect(ledger2.records().map((r) => r.kind)).toEqual(["PENDING", "APPROVAL"]);
+    // The doorbell sequence (PENDING/APPROVAL) survived; the A1 latent MUTATION effect
+    // leaves are additive (filter them out to recover the doorbell sequence).
+    expect(ledger2.records().map((r) => r.kind).filter((k) => k !== "MUTATION")).toEqual([
+      "PENDING",
+      "APPROVAL",
+    ]);
     expect(ledger2.verifyChain()).toEqual({ ok: true, firstBrokenSeq: null });
     // The dispute is resolved (no longer open).
     expect(ledger2.listPending().length).toBe(0);
@@ -592,6 +638,8 @@ describe("corruption detection — never silently served as correct", () => {
       );
       const approver = generatePassport();
       w.keys.register(approver);
+      // RC-5: priced, member-disjoint anchor (DOMAIN ⊥ the members' KYC anchors).
+      w.anchors.bind(approver.sourceId, [domainAnchor()]);
       w.engine.approve(csid, winnerId, approver, NOW);
       // Clean close so the WAL is checkpointed into the main file we then tamper.
       w.db.close();

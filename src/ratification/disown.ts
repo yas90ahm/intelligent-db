@@ -44,11 +44,12 @@
  *  - DEDUPE BY ROOT (echo-collapse): the seed and the frontier are deduped by
  *    `content_hash` first, so a same-root flood counts once.
  *
- * HONESTY — what is graph-reachable now vs. what needs a substrate that does not
- * yet exist: see {@link downstreamDisownSweep} and the bounded `TODO(crack-A)`
- * `CORROBORATION_CREDIT_SUBSTRATE_SPEC` below. The graph-reachable path ships
- * COMPLETE and never throws; the precise corroboration-credit reversal is clearly
- * marked, not faked.
+ * HONESTY — what is reversed exactly vs. what stays a documented residual: see
+ * {@link downstreamDisownSweep} and the BOUNDED `CORROBORATION_CREDIT_SUBSTRATE_SPEC`
+ * below. The graph-reachable path ships COMPLETE and never throws; corroboration
+ * credit is reversed EXACTLY over the recorded DERIVATION + corroboration closure
+ * (seed ∪ demoted-downstream), while re-observed / uncited influence is a
+ * priced-not-prevented residual (SAFE-DEFER) — clearly marked, not faked.
  */
 
 import {
@@ -70,9 +71,15 @@ import type { ReputationLedger } from "../identity/reputation.js";
 import type { CorroborationLedger } from "./corroboration.js";
 import type { WeakInfluenceLedger } from "./weakInfluence.js";
 import type { AdjudicationProvenanceLedger } from "./adjudicationProvenance.js";
-import type { PendingLedger } from "./pendingLedger.js";
+import type { MutationPayload, PendingLedger } from "./pendingLedger.js";
 import type { KeyPair } from "../identity/keys.js";
 import { demote } from "../forgetting/consolidation.js";
+import {
+  hashReputationState,
+  hashStrandState,
+  hashSubjectId,
+  mutationReceipt,
+} from "./mutationReceipt.js";
 
 // ---------------------------------------------------------------------------
 // Result
@@ -96,8 +103,9 @@ export interface DownstreamDisownResult {
   /**
    * Corroboration events reversed by this sweep (the precise per-event credit
    * reversals). Each entry is the `eventId` of an event whose `corroboratingStrandIds`
-   * intersected the tainted seed set; each is reversed EXACTLY ONCE across any number
-   * of sweeps. Empty when no corroboration ledger is wired or none intersected.
+   * intersected the tainted CLOSURE (seed ∪ demoted-downstream); each is reversed
+   * EXACTLY ONCE across any number of sweeps. Empty when no corroboration ledger is
+   * wired or none intersected.
    */
   readonly reversedCorroborationEventIds: string[];
   /**
@@ -250,42 +258,55 @@ function disownSentinelFor(sourceId: SourceId): StrandId {
 }
 
 // ---------------------------------------------------------------------------
-// CLOSED (was crack-A): corroboration-credit attribution — the substrate now EXISTS
+// BOUNDED (was crack-A): corroboration-credit attribution over the recorded closure
 // ---------------------------------------------------------------------------
 
 /**
- * CLOSED — CORROBORATION-CREDIT ATTRIBUTION (formerly the bounded `TODO(crack-A)`).
+ * BOUNDED — CORROBORATION-CREDIT ATTRIBUTION (formerly the `TODO(crack-A)`).
  *
- * The residual this sweep could NOT close from the graph alone is now closed by a
- * real substrate: the CORROBORATION-EVENT LEDGER in `ratification/corroboration.ts`.
+ * The reversal is EXACT over the RECORDED DERIVATION + corroboration closure
+ * (seed ∪ demoted-downstream taint); re-observed / uncited influence remains a
+ * priced-not-prevented residual (SAFE-DEFER, not DEFENDED). The substrate that
+ * carries it is the CORROBORATION-EVENT LEDGER in `ratification/corroboration.ts`.
  *
- * The problem it closes: when a source B earned reputation BECAUSE its claim AGREED
+ * The problem it addresses: when a source B earned reputation BECAUSE its claim AGREED
  * WITH (was corroborated by) disowned source A's strand — yet B's own strand carries
  * NO DERIVATION edge to A's strand (B observed independently, then was credited for
  * matching) — the graph holds no edge recording "B's bump was funded by agreement
  * with A." Faking that reversal would claw back credit from a source that agreed
- * COINCIDENTALLY and independently (the exact thing pillar 4 forbids), so it was
- * never guessed.
+ * COINCIDENTALLY and independently (the exact thing pillar 4 forbids), so it is
+ * never guessed — only reversed where the recorded funding link intersects the taint.
  *
- * THE FIX (now live): the credit's link to A's strand is RECORDED AT EARNING TIME.
+ * THE MECHANISM (live): the credit's link to A's strand is RECORDED AT EARNING TIME.
  * A corroboration-driven reputation gain is recorded as an append-only event
  * `{ eventId, ratifiedStrandId, corroboratingStrandIds[], beneficiarySourceId,
  * reputationDelta, at }` carrying the EXACT applied delta (see
  * `reputation.ratifyWithCorroboration` / the `api.ratify` earning path). On disown,
  * {@link downstreamDisownSweep} looks up corroboration events whose
- * `corroboratingStrandIds` intersect the tainted (disowned-source seed) strand set
- * and, for each, calls `ledger.reverseCredit(beneficiarySourceId, reputationDelta)`
- * EXACTLY ONCE — bounded (a beneficiary with no matching event is untouched),
- * precise (exactly the recorded delta, clamped at floor 0), and idempotent (each
- * event reversed at most once across any number of sweeps, via the ledger's
- * `markReversed` guard). Coincidental independent agreement is still never punished.
+ * `corroboratingStrandIds` intersect the TAINTED CLOSURE (seed ∪ demoted-downstream,
+ * `taintedStrandIds`) and, for each, calls `ledger.reverseCredit(beneficiarySourceId,
+ * reputationDelta)` EXACTLY ONCE — bounded (a beneficiary with no matching event is
+ * untouched), precise (exactly the recorded delta, clamped at floor 0), and idempotent
+ * (each event reversed at most once across any number of sweeps, via the ledger's
+ * `markReversed` guard). The intersection IS the F3 guard: coincidental independent
+ * agreement (no recorded funding link into the closure) is never punished.
+ *
+ * THE BOUNDARY (OD-7, the documented residual): this reverses laundering routed
+ * through the DEMOTED DERIVATION closure ONLY. Re-observation laundering (which emits
+ * no corroboration event and even HEALS the independent-root count), bond-withdrawal
+ * credit, and coincidental agreers with no recorded funding link are OUTSIDE the
+ * recorded sigma-algebra — reported SAFE-DEFER, a priced-not-prevented residual, NOT
+ * "disown is exact" in the unqualified sense.
  */
 export const CORROBORATION_CREDIT_SUBSTRATE_SPEC: string =
-  "CLOSED: corroboration-event ledger (ratification/corroboration.ts) — append-only " +
-  "{ eventId, ratifiedStrandId, corroboratingStrandIds[], beneficiarySourceId, reputationDelta, at } " +
-  "recorded with the EXACT applied delta when a corroboration-driven gain is earned, so a disown " +
-  "reverses exactly the reputationDelta on each beneficiary whose corroboratingStrandIds intersect " +
-  "the tainted set — bounded, precise, idempotent, never punishing coincidental independent agreement.";
+  "BOUNDED — exact over the recorded DERIVATION + corroboration closure (seed ∪ " +
+  "demoted-downstream taint): corroboration-event ledger (ratification/corroboration.ts) — " +
+  "append-only { eventId, ratifiedStrandId, corroboratingStrandIds[], beneficiarySourceId, " +
+  "reputationDelta, at } recorded with the EXACT applied delta when a corroboration-driven gain " +
+  "is earned, so a disown reverses exactly the reputationDelta on each beneficiary whose " +
+  "corroboratingStrandIds intersect the tainted closure — bounded, precise, idempotent, never " +
+  "punishing coincidental independent agreement. Re-observed / uncited influence remains a " +
+  "priced-not-prevented residual (SAFE-DEFER), not DEFENDED.";
 
 // ---------------------------------------------------------------------------
 // Internal helpers
@@ -450,8 +471,21 @@ export function downstreamDisownSweep(
   // ATOMIC: the whole sweep is ONE all-or-nothing unit of work over the shared handle
   // (crater + every demotion/edge + every contradict + every precise credit reversal).
   // A mid-sweep crash leaves either the FULL sweep or NONE — never a half-clawed state.
+  // A1 [Merkle MUTATION coverage] — journal each control-plane effect as a signed,
+  // content-addressed MUTATION receipt INSIDE this same sweep transaction (so a receipt
+  // + the mutation it describes commit or roll back as ONE unit). Emitted ONLY when a
+  // ratification ledger + system signer are wired (latent-journaling gate); with no
+  // ledger there is nowhere to journal and the path is byte-identical to today.
+  const emitMut = (payload: MutationPayload): void => {
+    if (pending !== undefined && systemSigner !== undefined) {
+      pending.appendMutation(payload, systemSigner);
+    }
+  };
+
   return withSweepTxn(store, () => {
   // --- 1. DIRECT SEED + authoritative idempotency ----------------------------
+  // Capture the disowned source's PRE-crater reputation state for the receipt.
+  const craterBefore = ledger.stateOf(sourceId);
   const direct = ledger.disownSweep(sourceId, assertedStrandIds);
   const seedClawedBack = direct.clawedBack;
 
@@ -469,6 +503,18 @@ export function downstreamDisownSweep(
       visitedCount: 0,
     };
   }
+
+  // A1 — the direct-seed crater happened: journal it (before/after reputation state).
+  emitMut(
+    mutationReceipt(
+      "DISOWN_CRATER",
+      String(sourceId),
+      hashSubjectId(String(sourceId)),
+      hashReputationState(craterBefore),
+      hashReputationState(ledger.stateOf(sourceId)),
+      now,
+    ),
+  );
 
   // --- 2. TAINT ROOTS (dedupe by content_hash) + tainted class set ------------
   const visited = new Set<StrandId>();
@@ -568,10 +614,25 @@ export function downstreamDisownSweep(
           w: 1 as Unit,
           out_weight_sum: 1 as Unit,
         };
+        const demoteBefore = hashStrandState(derived); // pre-mutation audit state
         store.putEdge(stubEdge);
         demote(derived, stubEdge); // mutates fact_state + outranked_by in place
         store.putStrand(derived);
         demotedDownstream.push(derived.id);
+
+        // A1 — journal the demotion (its OUTRANKS edge is covered by the after-state's
+        // `outranked_by` + the edge id in `refEventId`; no separate per-edge receipt).
+        emitMut(
+          mutationReceipt(
+            "DEMOTE",
+            String(derived.id),
+            String(derived.content_hash),
+            demoteBefore,
+            hashStrandState(derived),
+            now,
+            String(stubEdge.id),
+          ),
+        );
 
         // -- CONTRADICT downstream sources, BOUNDED BY TAINTED CLASS ----------
         // Only claw back credit from a source whose OWN provenance class is in the
@@ -602,36 +663,70 @@ export function downstreamDisownSweep(
     String(a) < String(b) ? -1 : String(a) > String(b) ? 1 : 0,
   );
   for (const s of contradicted) {
-    ledger.contradict(s, now);
+    const before = ledger.stateOf(s);
+    // SCARRING (BATCH 4 M3): a downstream source clawed back by a disown is a
+    // tainted-by-fraud betrayal, not an ordinary contradiction — route its `c·w` mass
+    // into the NON-DECAYING `scarBeta` (like the disowned source's own crater) so the
+    // transitively-tainted source's LCB drop is PERMANENT and cannot be waited out.
+    // The class-bound above already guarantees only genuinely tainted-class sources
+    // reach here, so a coincidental independent agreer is never scarred (the F3 guard).
+    const post = ledger.contradict(s, now, undefined, true);
+    // A1 — journal the downstream contradict (before/after reputation state).
+    emitMut(
+      mutationReceipt(
+        "REPUTATION_CONTRADICT",
+        String(s),
+        hashSubjectId(String(s)),
+        hashReputationState(before),
+        hashReputationState(post),
+        now,
+      ),
+    );
   }
 
-  // --- 5. PRECISE CORROBORATION-CREDIT REVERSAL (closes the former crack-A) ----
-  // For each corroboration event whose `corroboratingStrandIds` intersect the TAINTED
-  // seed set (the disowned source's clawed-back seed strands), reverse EXACTLY the
-  // recorded `reputationDelta` on its beneficiary — bounded (a beneficiary with no
-  // intersecting event is untouched), precise (the exact earned delta, clamped at the
-  // floor by `reverseCredit`), and IDEMPOTENT (the ledger's `markReversed` guard means
-  // each event is reversed at most once across any number of sweeps — a second disown,
-  // or a different disowned source intersecting the same event, reverses nothing more).
+  // --- 5. PRECISE CORROBORATION-CREDIT REVERSAL (bounded, over the tainted closure) ----
+  // For each corroboration event whose `corroboratingStrandIds` intersect the FULL
+  // TAINTED CLOSURE (`taintedStrandIds` = seed ∪ every demoted-downstream strand),
+  // reverse EXACTLY the recorded `reputationDelta` on its beneficiary — bounded (a
+  // beneficiary with no intersecting event is untouched), precise (the exact earned
+  // delta, clamped at the floor by `reverseCredit`), and IDEMPOTENT (the ledger's
+  // `markReversed` guard means each event is reversed at most once across any number
+  // of sweeps — a second disown, or a different disowned source intersecting the same
+  // event, reverses nothing more). The intersection IS the F3 guard: a coincidental
+  // independent agreer whose event names no strand in the closure is never clawed
+  // (re-observed/uncited influence is the documented priced-not-prevented residual).
   const reversedCorroborationEventIds: string[] = [];
   if (corrob !== undefined) {
-    // The tainted strand set is the disowned source's deduped seed strands. Walk the
-    // intersecting events in the ledger's stable append order for determinism.
-    for (const ev of corrob.eventsIntersecting(seedClawedBack)) {
+    // The tainted closure is the disowned source's seed ∪ demoted-downstream strands.
+    // Walk the intersecting events in the ledger's stable append order for determinism.
+    for (const ev of corrob.eventsIntersecting(taintedStrandIds)) {
       if (!corrob.markReversed(ev.eventId)) continue; // already reversed: skip
-      ledger.reverseCredit(ev.beneficiarySourceId, ev.reputationDelta, now);
+      const before = ledger.stateOf(ev.beneficiarySourceId);
+      const post = ledger.reverseCredit(ev.beneficiarySourceId, ev.reputationDelta, now);
       reversedCorroborationEventIds.push(ev.eventId);
+      // A1 — journal the exact credit reversal (refEventId = the corroboration eventId).
+      emitMut(
+        mutationReceipt(
+          "REPUTATION_REVERSE_CREDIT",
+          String(ev.beneficiarySourceId),
+          hashSubjectId(String(ev.beneficiarySourceId)),
+          hashReputationState(before),
+          hashReputationState(post),
+          now,
+          ev.eventId,
+        ),
+      );
     }
   }
 
   // --- 6. HARDENING 1: WEAK-INFLUENCE REVIEW QUEUE (uncited-influence channel) --
-  // A work that CONSULTED a tainted seed strand (recorded as a weak-influence edge,
-  // NOT a DERIVATION edge) cannot be proven to depend on it — so it is queued for a
-  // HUMAN to review, never auto-demoted. Deduped by influenced strand (the ledger
+  // A work that CONSULTED a strand in the tainted closure (recorded as a weak-influence
+  // edge, NOT a DERIVATION edge) cannot be proven to depend on it — so it is queued for
+  // a HUMAN to review, never auto-demoted. Deduped by influenced strand (the ledger
   // does this), idempotent across re-sweeps (the ledger's `markReviewed` guard).
   const reviewQueued: ReviewQueueEntry[] = [];
   if (weakInfluence !== undefined) {
-    for (const edge of weakInfluence.edgesConsulting(seedClawedBack)) {
+    for (const edge of weakInfluence.edgesConsulting(taintedStrandIds)) {
       if (!weakInfluence.markReviewed(edge.strandId, String(sourceId))) continue;
       reviewQueued.push({
         strandId: edge.strandId,

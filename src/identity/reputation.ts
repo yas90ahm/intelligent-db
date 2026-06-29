@@ -100,6 +100,51 @@ export interface ReputationParams {
    * stamp contract; a contradicted source can crash to this floor.
    */
   readonly floor: Unit;
+
+  // -------------------------------------------------------------------------
+  // M2/M3 (BATCH 4, RC-1) — the NON-DECAYING depth-floor + scar tunables. All
+  // keyed on MIS DEPTH / independence-weighted MASS, never headcount/age/arrival.
+  // The §5.3 numeric gate is pinned by { floorDeadband=2, contradictionMultiplier=4,
+  // z=√3, floorMass=identity on [deadband, cap] } — changing any of those four
+  // re-derives §5.3.
+  // -------------------------------------------------------------------------
+
+  /**
+   * M2 — the MIS depth below which {@link floorMass} is 0 (the Sybil DEADBAND). A
+   * single anchor-reachable class (depth 1, e.g. a same-class flood collapsed to one
+   * independent root) earns NO permanent floor; the floor switches on at the
+   * ≥2-independent-roots bar F4a uses. Default `2`.
+   */
+  readonly floorDeadband: number;
+  /**
+   * M2 — the MIS depth at which {@link floorMass} SATURATES, bounding the permanent
+   * floor (the readout is anyway ceilinged by `repCap`). Default `12`.
+   */
+  readonly floorDepthCap: number;
+  /**
+   * M3 — the BOUND on {@link ReputationState.scarBeta} (anti grief pile-up). Well
+   * above any single high-value betrayal's `c·w = 4` so multiple genuine betrayals
+   * still accumulate, but finite so a stacked grief campaign cannot run away. Default
+   * `16`.
+   */
+  readonly scarCap: number;
+  /**
+   * M3 (SECONDARY lever) — the MAX realized-cap reduction `g(scarBeta)` saturates to.
+   * Belt-and-suspenders only; the PRIMARY lever is depth-suppression (`d_eff`).
+   * Default `0.45`.
+   */
+  readonly gMax: number;
+  /**
+   * M3 (SECONDARY lever) — softness of the cap-reduction curve
+   * `g = gMax·(1 − e^(−scarBeta/capReductionSoftness))`. Default `1.5`.
+   */
+  readonly capReductionSoftness: number;
+  /**
+   * M3 (SECONDARY lever) — the realized cap is never reduced BELOW this by the scar.
+   * Note this only floors a REDUCTION; it never RAISES a source's own `repCap` (a
+   * bare-key cap of 0.05 is preserved). Default `0.15`.
+   */
+  readonly capFloor: Unit;
 }
 
 /**
@@ -112,6 +157,13 @@ export const DEFAULT_REPUTATION_PARAMS: ReputationParams = {
   halfLifeDays: 90,
   z: Math.sqrt(3),
   floor: 0.0,
+  // M2/M3 (BATCH 4): the §5.3-pinned depth-floor + scar tunables.
+  floorDeadband: 2,
+  floorDepthCap: 12,
+  scarCap: 16,
+  gMax: 0.45,
+  capReductionSoftness: 1.5,
+  capFloor: 0.15 as Unit,
 };
 
 /** Milliseconds in one day, for the decay clock. */
@@ -151,8 +203,43 @@ export interface ReputationState {
   readonly ratifiedCount: number;
   /** AUDIT-ONLY: how many of this source's past claims were later contradicted. */
   readonly contradictedCount: number;
+  /**
+   * Witness time of this source's MOST RECENT contradiction, or null if never
+   * contradicted. Fail-closed if absent: a contradicted source (contradictedCount>0)
+   * with this unset is treated as contradicted-now by the high-impact gate.
+   */
+  readonly lastContradictionAt: EpochMs | null;
   /** When this state was last updated (witness time) — the decay clock anchor. */
   readonly lastUpdate: EpochMs;
+
+  // -------------------------------------------------------------------------
+  // M2/M3 (BATCH 4, RC-1) — two NON-DECAYING, DEPTH-KEYED structural fields.
+  // `decay()` copies them through untouched; the readout reads but never mutates
+  // them. Keyed on MIS depth / independence-weighted mass, NEVER on headcount,
+  // α-magnitude, age, or arrival (the OD-3 spine).
+  // -------------------------------------------------------------------------
+
+  /**
+   * M2 — NON-DECAYING corroboration DEPTH: the count of DISTINCT anchor-independent
+   * MIS classes that have corroborated this source (= the engine's
+   * `identity.independentRootCount(corroborating roots)`, supplied at the
+   * corroboration event — no new traversal). Stored MONOTONE-MAX: only a genuinely
+   * NEW independent class raises it; a same-class flood (which collapses to one
+   * independent root) leaves it unchanged. Feeds {@link floorMass} via `d_eff`.
+   * Default 0.
+   */
+  readonly corroborationDepth: number;
+
+  /**
+   * M3 — NON-DECAYING, independence-WEIGHTED, BOUNDED scar (the RT-1 resolution):
+   * `Σ` over adjudicated contradictions / disown craters of `c·w` (capped at
+   * `scarCap`), applied ONCE per independence class (engine dedups). Units are
+   * evidence-mass (`c·w`), commensurable with depth and β. SUPPRESSES the
+   * depth-floor (`d_eff = max(0, corroborationDepth − scarBeta)`) and adds to the
+   * effective β (`beta_eff = beta + scarBeta`). Recoverable ONLY by genuine NEW
+   * independent depth (M2), never by time. Default 0.
+   */
+  readonly scarBeta: number;
 }
 
 /**
@@ -169,7 +256,10 @@ export function newReputationState(sourceId: SourceId, now: EpochMs): Reputation
     score: 0 as Unit,
     ratifiedCount: 0,
     contradictedCount: 0,
+    lastContradictionAt: null,
     lastUpdate: now,
+    corroborationDepth: 0,
+    scarBeta: 0,
   };
 }
 
@@ -189,31 +279,104 @@ function lambdaOf(halfLifeDays: number): number {
 }
 
 /**
- * The LOWER-CONFIDENCE-BOUND readout of a Beta(α,β): `min(repCap, mean − z·sd)`,
- * clamped to [floor, 1]. `mean = α/(α+β)`; `sd = sqrt(α·β / ((α+β)²·(α+β+1)))`.
+ * M2 — the NON-DECAYING DEPTH-FLOOR mass: a monotone, capped map from MIS depth `d`
+ * to a permanent α-floor mass. PURE function of `depth` ONLY (the OD-3 spine — never
+ * reads `ratifiedCount`, α-magnitude, age, or arrival):
  *
- * A fresh / low-evidence source has high variance ⇒ a large `z·sd` margin ⇒ LCB ≈ 0
- * (whitewashing worthless). A well-corroborated source has tiny variance ⇒ LCB →
- * mean, but is HARD-CEILINGED at `repCap` so it approaches but never exceeds the cap.
+ * ```
+ * floorMass(d) = d < floorDeadband ? 0 : min(d, floorDepthCap)
+ * ```
  *
- * @param state  the source's current Beta state.
+ *  - `floorMass(0) = floorMass(1) = 0` (deadband): depth-0/1 (anonymous, or a
+ *    same-class Sybil flood collapsed to ONE independent root) earns NO floor — the
+ *    priced-not-prevented inheritance made mechanical.
+ *  - `floorMass(d) = d` for `floorDeadband ≤ d ≤ floorDepthCap`: one α-unit of
+ *    permanent floor per genuinely-independent corroborating class, switching on at
+ *    the ≥2-independent-roots bar (the same external second lock F4a uses).
+ *  - saturates at `floorDepthCap` so the floor is BOUNDED.
+ *
+ * Pinned to the §5.3 anchor points `floorMass(2)=2`, `floorMass(6)=6`.
+ */
+export function floorMass(
+  depth: number,
+  params: ReputationParams = DEFAULT_REPUTATION_PARAMS,
+): number {
+  const d = Number.isFinite(depth) ? Math.max(0, Math.floor(depth)) : 0;
+  if (d < params.floorDeadband) return 0;
+  return Math.min(d, params.floorDepthCap);
+}
+
+/**
+ * M3 (SECONDARY lever) — the bounded realized-cap REDUCTION as a function of the
+ * scar: `g(s) = gMax·(1 − e^(−s/capReductionSoftness))`. Belt-and-suspenders only;
+ * V2.md proves a cap-ONLY M3 leaves a 0.3465 > 0.30 gap (the PRIMARY lever is the
+ * depth-suppression `d_eff`). PURE function of `scarBeta` ONLY.
+ */
+export function scarCapReduction(
+  scarBeta: number,
+  params: ReputationParams = DEFAULT_REPUTATION_PARAMS,
+): number {
+  const s = Number.isFinite(scarBeta) ? Math.max(0, scarBeta) : 0;
+  const soft = params.capReductionSoftness > 0 ? params.capReductionSoftness : 1;
+  return params.gMax * (1 - Math.exp(-s / soft));
+}
+
+/**
+ * The LOWER-CONFIDENCE-BOUND readout of a Beta(α,β), now wiring M2 (the non-decaying
+ * depth-floor) + M3 (the non-decaying independence-weighted scar):
+ *
+ * ```
+ * d_eff       = max(0, corroborationDepth − scarBeta)     // M3 suppresses M2's depth
+ * alphaFloor  = 1 + floorMass(d_eff)                      // M2 permanent α-floor
+ * alpha_eff   = max(alpha_decayed, alphaFloor)            // floor PINS but never lowers
+ * beta_eff    = beta_decayed + scarBeta                   // M3 non-decaying β mass
+ * mean        = alpha_eff / (alpha_eff + beta_eff)
+ * sd          = sqrt(alpha_eff·beta_eff / ((sum)²·(sum+1)))
+ * realizedCap = min(repCap, max(repCap − g(scarBeta), capFloor))   // M3 secondary
+ * lcb         = mean − z·sd
+ * out         = clamp(min(realizedCap, lcb), floor, 1)
+ * ```
+ *
+ * A fresh / low-evidence source (depth 0, scar 0) reads EXACTLY 0 (high variance ⇒ a
+ * large `z·sd` margin, snapped to the floor). The two new fields default to 0, so a
+ * legacy / pre-batch-4 state reads IDENTICALLY to the old Beta readout (`alphaFloor =
+ * 1 ≤ α`; `beta_eff = β`; `realizedCap = repCap`) — integrity-additive.
+ *
+ * @param state  the source's current Beta state (+ the M2/M3 non-decaying fields).
  * @param repCap the source's reputation ceiling (from `anchors.repCapFor`).
- * @param params reads `z` (margin) and `floor` (lower clamp).
+ * @param params reads `z`, `floor`, and the M2/M3 tunables.
  */
 export function lcbReadout(
   state: ReputationState,
   repCap: Unit,
   params: ReputationParams = DEFAULT_REPUTATION_PARAMS,
 ): Unit {
-  const a = state.alpha;
-  const b = state.beta;
+  // M3 PRIMARY lever: the scar suppresses the net corroboration depth feeding M2.
+  const dEff = Math.max(0, state.corroborationDepth - state.scarBeta);
+  const alphaFloor = 1 + floorMass(dEff, params);
+  // M2: the floor PINS α (never LOWERS it — a fresh source whose earned α exceeds the
+  // floor still reads its earned α).
+  const a = Math.max(state.alpha, alphaFloor);
+  // M3: the scar adds NON-DECAYING β mass.
+  const b = state.beta + state.scarBeta;
   const sum = a + b;
-  // (α+β) and (α+β+1) are always >= 2 (prior), so the denominator is never 0.
+  // (α_eff+β_eff) and (sum+1) are always >= 2 (prior), so the denominator is never 0.
   const mean = a / sum;
   const variance = (a * b) / (sum * sum * (sum + 1));
   // Guard against a tiny negative under sqrt from floating error.
   const sd = Math.sqrt(Math.max(0, variance));
   const lcb = mean - params.z * sd;
+  // The binding ceiling is the source's own `repCap`. The PRIMARY M3 lever is the
+  // depth-suppression above (it already pins the wait-out: with non-decaying `d_eff`
+  // and `beta_eff` the post-betrayal LCB is 0.09549 and does NOT recover by time). The
+  // SECONDARY cap-reduction `scarCapReduction(scarBeta)` (= `g`, §3.3) is SHIPPED +
+  // documented as belt-and-suspenders but is NOT folded into this binding min: V2/RT-1
+  // proves a cap-ONLY M3 fails, and — critically — a hard `g`-reduced cap (0.1813 for a
+  // betrayed DOMAIN) would also CAP the legitimate depth-recovery branch (depth-10 ⇒
+  // 0.34652) below 0.30, breaking "recovery is priced in NEW independent DEPTH, not
+  // time". The primary depth-suppression makes the secondary redundant for the wait-out
+  // (the only invariant it guards), so applying it would only break recovery — hence it
+  // stays an exported helper a stricter policy may consult, not the readout's ceiling.
   const cap = clamp(repCap, 0, 1);
   const floor = clamp(params.floor, 0, 1);
   const out = clamp(Math.min(cap, lcb), floor, 1);
@@ -272,7 +435,12 @@ export function decay(
       beta,
       ratifiedCount: state.ratifiedCount,
       contradictedCount: state.contradictedCount,
+      lastContradictionAt: state.lastContradictionAt,
       lastUpdate: now,
+      // M2/M3: NON-DECAYING — copied through untouched (they are structural depth /
+      // scar mass, not evidence mass that drifts to the prior).
+      corroborationDepth: state.corroborationDepth,
+      scarBeta: state.scarBeta,
     },
     repCap,
     params,
@@ -301,9 +469,15 @@ export function applyRatification(
   repCap: Unit,
   now: EpochMs,
   params: ReputationParams = DEFAULT_REPUTATION_PARAMS,
+  depth?: number,
 ): ReputationState {
   const decayed = decay(state, repCap, now, params);
   const wClamped = clamp(Number.isFinite(w) ? w : 0, 0, 1);
+  // M2 — MONOTONE-MAX corroboration DEPTH (engine-supplied MIS depth). Only a
+  // genuinely NEW independent class can raise it; a same-class flood (depth 1, or no
+  // depth supplied) leaves it unchanged. NON-DECAYING.
+  const depthIn = typeof depth === "number" && Number.isFinite(depth) ? Math.max(0, Math.floor(depth)) : 0;
+  const corroborationDepth = Math.max(decayed.corroborationDepth, depthIn);
   return withReadout(
     {
       sourceId: decayed.sourceId,
@@ -311,7 +485,10 @@ export function applyRatification(
       beta: decayed.beta,
       ratifiedCount: decayed.ratifiedCount + 1,
       contradictedCount: decayed.contradictedCount,
+      lastContradictionAt: decayed.lastContradictionAt,
       lastUpdate: now,
+      corroborationDepth,
+      scarBeta: decayed.scarBeta,
     },
     repCap,
     params,
@@ -339,18 +516,30 @@ export function applyContradiction(
   repCap: Unit,
   now: EpochMs,
   params: ReputationParams = DEFAULT_REPUTATION_PARAMS,
+  scarring = false,
 ): ReputationState {
   const decayed = decay(state, repCap, now, params);
   const wClamped = clamp(Number.isFinite(w) ? w : 0, 0, 1);
   const c = params.contradictionMultiplier > 0 ? params.contradictionMultiplier : 1;
+  // M3 — when this contradiction is an ADJUDICATED betrayal / disown crater, route its
+  // `c·w` mass into the NON-DECAYING `scarBeta` (bounded by `scarCap`) INSTEAD of the
+  // decaying β, so the betrayer cannot wait it out. `beta_eff = beta + scarBeta` in the
+  // readout, so a pure adjudicated betrayal still reads β_eff = 1 + c·w. An ordinary
+  // (non-scarring) contradiction keeps the legacy decaying-β behavior (back-compat).
+  const charge = c * wClamped;
+  const beta = scarring ? decayed.beta : decayed.beta + charge;
+  const scarBeta = scarring ? Math.min(params.scarCap, decayed.scarBeta + charge) : decayed.scarBeta;
   return withReadout(
     {
       sourceId: decayed.sourceId,
       alpha: decayed.alpha,
-      beta: decayed.beta + c * wClamped,
+      beta,
       ratifiedCount: decayed.ratifiedCount,
       contradictedCount: decayed.contradictedCount + 1,
+      lastContradictionAt: now,
       lastUpdate: now,
+      corroborationDepth: decayed.corroborationDepth,
+      scarBeta,
     },
     repCap,
     params,
@@ -390,7 +579,47 @@ export function applyCreditReversal(
       beta: decayed.beta,
       ratifiedCount: decayed.ratifiedCount,
       contradictedCount: decayed.contradictedCount,
+      lastContradictionAt: decayed.lastContradictionAt,
       lastUpdate: now,
+      corroborationDepth: decayed.corroborationDepth,
+      scarBeta: decayed.scarBeta,
+    },
+    repCap,
+    params,
+  );
+}
+
+/**
+ * Build the CRATERED state for a DISOWNED source (the direct-seed crater): RESET the
+ * Beta mass to the prior (α=β=1) AND the corroboration depth to 0 (so the M2 floor is
+ * gone) — its LCB is provably 0 again — while STAMPING a NON-DECAYING M3 scar
+ * (`scarBeta += c`, the max-betrayal `w=1` charge, capped at `scarCap`). The scar makes
+ * the disown wait-out-proof and recoverable ONLY by genuine NEW independent depth: even
+ * if the disowned source later re-earns corroboration depth, `d_eff = max(0, depth −
+ * scarBeta)` stays suppressed until it pays for `> scarBeta` NEW independent classes.
+ * Reads EXACTLY 0 immediately (α=1, β_eff = 1 + scarBeta, d_eff = 0 ⇒ LCB clamps to 0).
+ */
+function craterState(
+  prior: ReputationState,
+  repCap: Unit,
+  params: ReputationParams,
+  contradictionAt: EpochMs,
+): ReputationState {
+  const c = params.contradictionMultiplier > 0 ? params.contradictionMultiplier : 1;
+  return withReadout(
+    {
+      sourceId: prior.sourceId,
+      alpha: 1,
+      beta: 1,
+      ratifiedCount: prior.ratifiedCount,
+      contradictedCount: prior.contradictedCount + 1,
+      // A disown is a contradiction event: stamp the witness time so the
+      // fail-closed high-impact recency gate sees a real contradiction.
+      lastContradictionAt: contradictionAt,
+      lastUpdate: prior.lastUpdate,
+      // M2/M3: depth wiped, NON-DECAYING scar stamped (max-betrayal w=1 ⇒ c·1).
+      corroborationDepth: 0,
+      scarBeta: Math.min(params.scarCap, prior.scarBeta + c),
     },
     repCap,
     params,
@@ -467,18 +696,28 @@ export interface ReputationLedger {
    * `rep_cap`. Creates a fresh prior-state source first. The caller is responsible for
    * passing ONE call per independence class (headcount denial).
    *
+   * Optional `depth` (M2, BATCH 4) is the engine-supplied MIS corroboration DEPTH
+   * (`identity.independentRootCount(corroborating roots)`); stored MONOTONE-MAX into
+   * the NON-DECAYING `corroborationDepth`, feeding the permanent α-floor. The ledger
+   * NEVER computes depth itself (the model never witnesses).
+   *
    * @returns the source's resulting {@link ReputationState} after the corroboration.
    */
-  ratify(sourceId: SourceId, now: EpochMs, w?: number): ReputationState;
+  ratify(sourceId: SourceId, now: EpochMs, w?: number, depth?: number): ReputationState;
 
   /**
    * Record ONE contradiction for a source with independence weight `w` (default 1):
    * decay, then `β += c·clamp(w,0,1)` (c = 4 asymmetric). The LCB drops sharply;
    * recovering it takes strictly more corroboration than the event removed.
    *
+   * Optional `scarring` (M3, BATCH 4) routes the `c·w` mass into the NON-DECAYING
+   * `scarBeta` (suppressing the depth-floor + adding to β_eff) INSTEAD of the decaying
+   * β, so an ADJUDICATED betrayal / disown crater cannot be waited out. The engine sets
+   * it on the adjudicate path; an ordinary contradiction leaves it false (back-compat).
+   *
    * @returns the source's resulting {@link ReputationState} after the contradiction.
    */
-  contradict(sourceId: SourceId, now: EpochMs, w?: number): ReputationState;
+  contradict(sourceId: SourceId, now: EpochMs, w?: number, scarring?: boolean): ReputationState;
 
   /**
    * PRECISE per-event credit reversal: decay, then subtract EXACTLY `w` from `α`
@@ -550,16 +789,16 @@ class InMemoryReputationLedger implements ReputationLedger {
     return lcbReadout(decayed, cap, this.params);
   }
 
-  ratify(sourceId: SourceId, now: EpochMs, w: number = DEFAULT_INDEPENDENCE_WEIGHT): ReputationState {
+  ratify(sourceId: SourceId, now: EpochMs, w: number = DEFAULT_INDEPENDENCE_WEIGHT, depth?: number): ReputationState {
     const cap = this.repCapOf(sourceId);
-    const next = applyRatification(this.ensure(sourceId, now), w, cap, now, this.params);
+    const next = applyRatification(this.ensure(sourceId, now), w, cap, now, this.params, depth);
     this.book.set(sourceId, next);
     return next;
   }
 
-  contradict(sourceId: SourceId, now: EpochMs, w: number = DEFAULT_INDEPENDENCE_WEIGHT): ReputationState {
+  contradict(sourceId: SourceId, now: EpochMs, w: number = DEFAULT_INDEPENDENCE_WEIGHT, scarring = false): ReputationState {
     const cap = this.repCapOf(sourceId);
-    const next = applyContradiction(this.ensure(sourceId, now), w, cap, now, this.params);
+    const next = applyContradiction(this.ensure(sourceId, now), w, cap, now, this.params, scarring);
     this.book.set(sourceId, next);
     return next;
   }
@@ -600,21 +839,7 @@ class InMemoryReputationLedger implements ReputationLedger {
     const cap = this.repCapOf(sourceId);
     const prior =
       this.book.get(sourceId) ?? newReputationState(sourceId, 0 as EpochMs);
-    this.book.set(
-      sourceId,
-      withReadout(
-        {
-          sourceId,
-          alpha: 1,
-          beta: 1,
-          ratifiedCount: prior.ratifiedCount,
-          contradictedCount: prior.contradictedCount + 1,
-          lastUpdate: prior.lastUpdate,
-        },
-        cap,
-        this.params,
-      ),
-    );
+    this.book.set(sourceId, craterState(prior, cap, this.params, this.clock()));
 
     return { clawedBack };
   }
@@ -713,7 +938,12 @@ interface LegacyReputationRow {
   readonly beta?: number;
   readonly ratifiedCount?: number;
   readonly contradictedCount?: number;
+  readonly lastContradictionAt?: number | null;
   readonly lastUpdate?: number;
+  // M2/M3 (BATCH 4) — absent in a pre-batch-4 row ⇒ default 0 (M2/M3 inert for legacy
+  // rows, the safe direction).
+  readonly corroborationDepth?: number;
+  readonly scarBeta?: number;
 }
 
 /**
@@ -731,10 +961,14 @@ function parseReputationRow(json: string, params: ReputationParams, repCap: Unit
   const sourceId = row.sourceId;
   const ratifiedCount = row.ratifiedCount ?? 0;
   const contradictedCount = row.contradictedCount ?? 0;
+  const lastContradictionAt = (row.lastContradictionAt ?? null) as EpochMs | null;
   const lastUpdate = (row.lastUpdate ?? 0) as EpochMs;
+  // M2/M3 (BATCH 4): a pre-batch-4 row has neither field; reading 0 makes them inert.
+  const corroborationDepth = typeof row.corroborationDepth === "number" ? row.corroborationDepth : 0;
+  const scarBeta = typeof row.scarBeta === "number" ? row.scarBeta : 0;
   if (typeof row.alpha === "number" && typeof row.beta === "number") {
     return withReadout(
-      { sourceId, alpha: row.alpha, beta: row.beta, ratifiedCount, contradictedCount, lastUpdate },
+      { sourceId, alpha: row.alpha, beta: row.beta, ratifiedCount, contradictedCount, lastContradictionAt, lastUpdate, corroborationDepth, scarBeta },
       repCap,
       params,
     );
@@ -742,7 +976,7 @@ function parseReputationRow(json: string, params: ReputationParams, repCap: Unit
   // Legacy multiplicative row: synthesize a Beta prior from the old score.
   const legacyScore = clamp(row.score ?? 0, 0, 1);
   return withReadout(
-    { sourceId, alpha: 1 + legacyScore, beta: 1, ratifiedCount, contradictedCount, lastUpdate },
+    { sourceId, alpha: 1 + legacyScore, beta: 1, ratifiedCount, contradictedCount, lastContradictionAt, lastUpdate, corroborationDepth, scarBeta },
     repCap,
     params,
   );
@@ -837,16 +1071,16 @@ class SqliteReputationLedgerImpl implements SqliteReputationLedger {
     return lcbReadout(decayed, cap, this.params);
   }
 
-  ratify(sourceId: SourceId, now: EpochMs, w: number = DEFAULT_INDEPENDENCE_WEIGHT): ReputationState {
+  ratify(sourceId: SourceId, now: EpochMs, w: number = DEFAULT_INDEPENDENCE_WEIGHT, depth?: number): ReputationState {
     const cap = this.repCapOf(sourceId);
-    const next = applyRatification(this.#ensure(sourceId, now), w, cap, now, this.params);
+    const next = applyRatification(this.#ensure(sourceId, now), w, cap, now, this.params, depth);
     this.#write(next);
     return next;
   }
 
-  contradict(sourceId: SourceId, now: EpochMs, w: number = DEFAULT_INDEPENDENCE_WEIGHT): ReputationState {
+  contradict(sourceId: SourceId, now: EpochMs, w: number = DEFAULT_INDEPENDENCE_WEIGHT, scarring = false): ReputationState {
     const cap = this.repCapOf(sourceId);
-    const next = applyContradiction(this.#ensure(sourceId, now), w, cap, now, this.params);
+    const next = applyContradiction(this.#ensure(sourceId, now), w, cap, now, this.params, scarring);
     this.#write(next);
     return next;
   }
@@ -879,24 +1113,12 @@ class SqliteReputationLedgerImpl implements SqliteReputationLedger {
       clawedBack.push(id);
     }
 
-    // Crater to the prior Beta(1,1) + record a contradiction. Fails CLOSED.
+    // Crater to the prior Beta(1,1) + wipe depth + stamp the NON-DECAYING M3 scar +
+    // record a contradiction. Fails CLOSED.
     const cap = this.repCapOf(sourceId);
     const prior =
       this.#read(sourceId) ?? newReputationState(sourceId, 0 as EpochMs);
-    this.#write(
-      withReadout(
-        {
-          sourceId,
-          alpha: 1,
-          beta: 1,
-          ratifiedCount: prior.ratifiedCount,
-          contradictedCount: prior.contradictedCount + 1,
-          lastUpdate: prior.lastUpdate,
-        },
-        cap,
-        this.params,
-      ),
-    );
+    this.#write(craterState(prior, cap, this.params, this.#clock()));
 
     return { clawedBack };
   }

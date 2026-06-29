@@ -119,7 +119,11 @@ function derivationEdge(derived: StrandId, witness: StrandId): Edge {
 }
 
 function ledgerWithCap(cap = 0.9): ReputationLedger {
-  return createReputationLedger(() => cap as Unit);
+  // Pin the decay-on-read clock to the test's logical NOW so reads at NOW are Δt=0
+  // (the fixtures earn at the synthetic NOW; without pinning, the default Date.now()
+  // clock would treat the whole gap to the real wall clock as dormancy, decaying every
+  // earned LCB toward the prior and intermittently flaking the score assertions).
+  return createReputationLedger(() => cap as Unit, undefined, () => NOW);
 }
 
 // ===========================================================================

@@ -32,6 +32,7 @@ import {
   FactOrigin,
   Tier,
   EdgeType,
+  AnchorClass,
   asEpochMs,
   asStrandId,
 } from "../index.js";
@@ -158,7 +159,7 @@ function fileStrand(
 describe("engine.adjudicate — routing the consolidation outcome", () => {
   it("INVARIANT 3: a multi-class dispute DEFERS, records a signed PENDING, demotes NOTHING", () => {
     const store = createMemoryStore();
-    const reputation = createReputationLedger(() => 0.9);
+    const reputation = createReputationLedger(() => 0.9, undefined, () => NOW);
     const identity = makeIdentity({ scoreOf: (s) => reputation.scoreOf(s) });
     const ledger = createPendingLedger({ reputation });
     const systemSigner = generatePassport();
@@ -191,7 +192,7 @@ describe("engine.adjudicate — routing the consolidation outcome", () => {
 
   it("END-TO-END: an external approve() through the engine resolves the deferred dispute", () => {
     const store = createMemoryStore();
-    const reputation = createReputationLedger(() => 0.9);
+    const reputation = createReputationLedger(() => 0.9, undefined, () => NOW);
     const identity = makeIdentity({ scoreOf: (s) => reputation.scoreOf(s) });
     const ledger = createPendingLedger({ reputation });
     const systemSigner = generatePassport();
@@ -204,8 +205,13 @@ describe("engine.adjudicate — routing the consolidation outcome", () => {
     const b = fileStrand(store, "strand:b", "src:b" as SourceId, "class:B", { v: "Atlantis" });
     expect(db.adjudicate(ATTR).kind).toBe("DEFERRED");
 
-    // An EXTERNAL, distinct approver designates a as the winner.
+    // An EXTERNAL, distinct approver designates a as the winner. RC-5: the approver
+    // must hold a priced anchor (no anchor → no independent voice) and be MIS-
+    // independent of the member authors (src:a/src:b are unregistered ⇒ fail-open).
     const approver = generatePassport(); // not src:a, not src:b
+    identity.register(approver, [
+      { anchorClass: AnchorClass.DOMAIN, realizedCost: 0.35 as Unit, independenceWeight: 0.35 as Unit },
+    ]);
     const csid = ledger.listPending()[0]!.contradictionSetId as ContradictionSetId;
     const resolved = db.approve(csid, a.id, approver, NOW);
 
@@ -223,8 +229,13 @@ describe("engine.adjudicate — routing the consolidation outcome", () => {
     expect(edge?.from).toBe(a.id);
     expect(edge?.to).toBe(b.id);
 
-    // The immortal record now holds PENDING + APPROVAL and verifies end-to-end.
-    expect(ledger.records().map((r) => r.kind)).toEqual(["PENDING", "APPROVAL"]);
+    // The immortal record now holds PENDING + APPROVAL (the doorbell traffic) plus the
+    // A1 latent MUTATION effect leaves (DEMOTE / REPUTATION_CONTRADICT / REPUTATION_RATIFY);
+    // filtering MUTATION recovers the doorbell sequence, and the whole chain verifies.
+    expect(ledger.records().map((r) => r.kind).filter((k) => k !== "MUTATION")).toEqual([
+      "PENDING",
+      "APPROVAL",
+    ]);
     expect(ledger.verifyChain()).toEqual({ ok: true, firstBrokenSeq: null });
     expect(db.listPending().length).toBe(0);
 
@@ -235,7 +246,7 @@ describe("engine.adjudicate — routing the consolidation outcome", () => {
 
   it("engine.approve through a self-approver (authored a member) is REJECTED", () => {
     const store = createMemoryStore();
-    const reputation = createReputationLedger(() => 0.9);
+    const reputation = createReputationLedger(() => 0.9, undefined, () => NOW);
     const identity = makeIdentity({ scoreOf: (s) => reputation.scoreOf(s) });
     const ledger = createPendingLedger({ reputation });
     const systemSigner = generatePassport();
@@ -263,7 +274,7 @@ describe("engine.adjudicate — routing the consolidation outcome", () => {
 
   it("SAFE single-class dispute RESOLVES in-graph (no human horn) and demotes the loser", () => {
     const store = createMemoryStore();
-    const reputation = createReputationLedger(() => 0.9);
+    const reputation = createReputationLedger(() => 0.9, undefined, () => NOW);
     const identity = makeIdentity({ scoreOf: (s) => reputation.scoreOf(s) });
     const ledger = createPendingLedger({ reputation });
     const db = createIntelligentDb(store, identity, null, reputation, {
@@ -284,12 +295,17 @@ describe("engine.adjudicate — routing the consolidation outcome", () => {
     expect(store.getStrand(a.id)?.fact_state).toBe(FactState.LIVE);
     expect(store.getStrand(b.id)?.fact_state).toBe(FactState.DEMOTED);
     expect(store.getStrand(b.id)?.outranked_by).not.toBeNull();
-    expect(ledger.records().length).toBe(0); // resolved in-graph, no human horn
+    // No DOORBELL traffic (no PENDING/APPROVAL) — resolved in-graph, no human horn. The
+    // A1 latent MUTATION leaves (the DEMOTE / REPUTATION_CONTRADICT effect receipts) are
+    // additive audit coverage and verify in the chain.
+    expect(ledger.records().filter((r) => r.kind !== "MUTATION").length).toBe(0);
+    expect(ledger.records().every((r) => r.kind === "MUTATION")).toBe(true);
+    expect(ledger.verifyChain()).toEqual({ ok: true, firstBrokenSeq: null });
   });
 
   it("DEFERRED with NO ledger wired THROWS (a deferral is never silently dropped)", () => {
     const store = createMemoryStore();
-    const reputation = createReputationLedger(() => 0.9);
+    const reputation = createReputationLedger(() => 0.9, undefined, () => NOW);
     const identity = makeIdentity({ scoreOf: (s) => reputation.scoreOf(s) });
     // No ratification deps passed.
     const db = createIntelligentDb(store, identity, null, reputation);
@@ -308,7 +324,7 @@ describe("engine.adjudicate — routing the consolidation outcome", () => {
 describe("engine hardening integration", () => {
   it("HARDENING 3: adjudicate RECORDS provenance, and a later disown RE-OPENS the tipped dispute", () => {
     const store = createMemoryStore();
-    const reputation = createReputationLedger(() => 0.9);
+    const reputation = createReputationLedger(() => 0.9, undefined, () => NOW);
     const identity = makeIdentity({ scoreOf: (s) => reputation.scoreOf(s) });
     const ledger = createPendingLedger({ reputation });
     const systemSigner = generatePassport();
@@ -348,7 +364,7 @@ describe("engine hardening integration", () => {
 
   it("HARDENING 2: ratify() THROWS OffLedgerReputationError when it earns credit naming corroborators but no corroboration ledger is wired", () => {
     const store = createMemoryStore();
-    const reputation = createReputationLedger(() => 0.9);
+    const reputation = createReputationLedger(() => 0.9, undefined, () => NOW);
     const identity = makeIdentity({ scoreOf: (s) => reputation.scoreOf(s) });
     const ledger = createPendingLedger({ reputation });
     // NOTE: no `corroboration` in the ratification deps — so a corroboration-naming
@@ -358,22 +374,24 @@ describe("engine hardening integration", () => {
       systemSigner: generatePassport(),
     });
 
-    const witness = fileStrand(store, "strand:w", "src:w" as SourceId, "class:W", { v: "x" });
+    // witness AGREES with target (same entity + content_hash + LIVE) so the engine
+    // DERIVES it as the corroborator (OD-8) — no caller-supplied list.
+    const witness = fileStrand(store, "strand:w", "src:w" as SourceId, "class:W", { v: "y" });
     const target = fileStrand(store, "strand:t", "src:t" as SourceId, "class:T", { v: "y" });
+    void witness;
     const externalStamp = identity.stampFor("src:ext" as SourceId);
 
     expect(() =>
       db.ratify({
         strandId: target.id,
         externalStamp,
-        corroboratingStrandIds: [witness.id],
       }),
     ).toThrow(OffLedgerReputationError);
   });
 
   it("HARDENING 2: the same ratify SUCCEEDS and records an event when a corroboration ledger IS wired", () => {
     const store = createMemoryStore();
-    const reputation = createReputationLedger(() => 0.9);
+    const reputation = createReputationLedger(() => 0.9, undefined, () => NOW);
     const identity = makeIdentity({ scoreOf: (s) => reputation.scoreOf(s) });
     const ledger = createPendingLedger({ reputation });
     const corroboration = createCorroborationLedger();
@@ -383,12 +401,15 @@ describe("engine hardening integration", () => {
       corroboration,
     });
 
-    const witness = fileStrand(store, "strand:w", "src:w" as SourceId, "class:W", { v: "x" });
+    // witness AGREES with target (same entity + content_hash + LIVE) so the engine
+    // DERIVES it as the corroborator (OD-8) — no caller-supplied list.
+    const witness = fileStrand(store, "strand:w", "src:w" as SourceId, "class:W", { v: "y" });
     const target = fileStrand(store, "strand:t", "src:t" as SourceId, "class:T", { v: "y" });
     const externalStamp = identity.stampFor("src:ext" as SourceId);
 
-    db.ratify({ strandId: target.id, externalStamp, corroboratingStrandIds: [witness.id] });
+    db.ratify({ strandId: target.id, externalStamp });
     expect(corroboration.all().length).toBe(1);
     expect(corroboration.all()[0]!.beneficiarySourceId).toBe("src:ext" as SourceId);
+    expect(corroboration.all()[0]!.corroboratingStrandIds.map(String)).toContain(String(witness.id));
   });
 });

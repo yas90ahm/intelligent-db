@@ -500,6 +500,12 @@ export interface HaltStamp {
   readonly popCount: number;
   /** Bridges crossed during the mandatory sweep. */
   readonly bridgesCrossed: number;
+  /**
+   * B1 — count of bridge crossings whose seed energy was down-weighted (factor
+   * < 1) by a resolved-but-weak origin independence stamp (0 < indep < 1).
+   * Bare-key bridges (indep == 0) stay at γ by design and are NOT counted.
+   */
+  readonly bridgeSeedsDownweighted: number;
   /** True when the result is partial (TRUNCATED or BRIDGE_STARVED). */
   readonly degraded: boolean;
 }

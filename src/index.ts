@@ -256,6 +256,12 @@ export type {
   DnsDomainBindDeps,
 } from "./identity/binders/dnsDomainProver.js";
 
+export {
+  registrableDomain as pslRegistrableDomain,
+  publicSuffixOf as pslPublicSuffixOf,
+  pslResolver,
+} from "./identity/binders/publicSuffix.js";
+
 export { createAnchorRegistry } from "./identity/anchorRegistry.js";
 
 export type {
@@ -268,6 +274,8 @@ export {
   newReputationState,
   decay,
   lcbReadout,
+  floorMass,
+  scarCapReduction,
   applyRatification,
   applyContradiction,
   applyCreditReversal,
@@ -303,6 +311,7 @@ export {
   createPendingLedger,
   createSqlitePendingLedger,
   recordPreimage,
+  EMPTY_STATE_HASH,
 } from "./ratification/pendingLedger.js";
 
 export type {
@@ -312,10 +321,20 @@ export type {
   LedgerRecordKind,
   PendingPayload,
   ApprovalPayload,
+  MutationPayload,
+  MutationOp,
   ChainVerification,
   ResolvedDispute,
   ApproveContext,
+  AppendPendingOptions,
 } from "./ratification/pendingLedger.js";
+
+export {
+  hashStrandState,
+  hashReputationState,
+  hashSubjectId,
+  mutationReceipt,
+} from "./ratification/mutationReceipt.js";
 
 export {
   downstreamDisownSweep,

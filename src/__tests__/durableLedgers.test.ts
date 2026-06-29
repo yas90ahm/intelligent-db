@@ -160,6 +160,13 @@ function ctxOver(byId: Map<StrandId, Strand>): ApproveContext {
     mintEdgeId(winner: StrandId, loser: StrandId): EdgeId {
       return ("edge:outranks:" + String(winner) + "->" + String(loser)) as EdgeId;
     },
+    // RC-5 — anchored, anchor-independent approver (the gate only ADDS rejections).
+    independentSources(_a: SourceId, _b: SourceId): boolean {
+      return true;
+    },
+    approverHasAnchors(_sourceId: SourceId): boolean {
+      return true;
+    },
   };
 }
 
@@ -365,6 +372,55 @@ describe("SqlitePendingLedger — audit chain survives a restart and stays tampe
     const open = reopened.listPending();
     expect(open.length).toBe(1);
     expect((open[0] as PendingPayload).contradictionSetId).toBe(CSID);
+  });
+
+  it("OD-2 (SQLite path): cross-attribute dedup + per-source cap bound the durable horn; chain stays verifiable", () => {
+    const path = freshPath("od2-bound");
+    const sys = generatePassport();
+    const led = track(createSqlitePendingLedger({ path }));
+    const S = "src:attacker" as SourceId;
+    const a = asStrandId("strand:a");
+    const b = asStrandId("strand:b");
+
+    // First dispute appends.
+    const first = led.appendPending(
+      { ...pendingOf([a, b]), contradictionSetId: "cset:od2-1" as ContradictionSetId, attribute: "attr#1" as AttributeKey },
+      sys,
+      { disputingSources: [S], coalesceKey: "DUP", perSourceCap: 2 },
+    );
+    expect(led.records().length).toBe(1);
+
+    // Same coalesce key across a DIFFERENT attribute ⇒ no-op returning the existing record.
+    const dup = led.appendPending(
+      { ...pendingOf([a, b]), contradictionSetId: "cset:od2-2" as ContradictionSetId, attribute: "attr#2" as AttributeKey },
+      sys,
+      { disputingSources: [S], coalesceKey: "DUP", perSourceCap: 2 },
+    );
+    expect(dup.seq).toBe(first.seq);
+    expect(led.records().length).toBe(1); // chain NOT advanced
+
+    // A distinct dispute naming S still appends (1 -> 2)...
+    led.appendPending(
+      { ...pendingOf([a, b]), contradictionSetId: "cset:od2-3" as ContradictionSetId, attribute: "attr#3" as AttributeKey },
+      sys,
+      { disputingSources: [S], coalesceKey: "K3", perSourceCap: 2 },
+    );
+    expect(led.records().length).toBe(2);
+
+    // ...but the per-source cap (2) now rejects a further pending naming S (no-op).
+    led.appendPending(
+      { ...pendingOf([a, b]), contradictionSetId: "cset:od2-4" as ContradictionSetId, attribute: "attr#4" as AttributeKey },
+      sys,
+      { disputingSources: [S], coalesceKey: "K4", perSourceCap: 2 },
+    );
+    expect(led.records().length).toBe(2);
+    expect(led.verifyChain()).toEqual({ ok: true, firstBrokenSeq: null });
+
+    // The bound survives a close + reopen (the dedup/cap fields persisted in the JSON blob).
+    led.close();
+    const reopened = track(createSqlitePendingLedger({ path }));
+    expect(reopened.records().length).toBe(2);
+    expect(reopened.verifyChain()).toEqual({ ok: true, firstBrokenSeq: null });
   });
 });
 

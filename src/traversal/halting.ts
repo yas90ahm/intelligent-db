@@ -87,6 +87,18 @@ export interface HaltStoreView {
   litBridgesFrom(strandId: StrandId): readonly EdgeId[];
   /** Resolve the far-side strand a bridge edge crosses into. */
   bridgeTarget(edgeId: EdgeId): StrandId;
+  /**
+   * B1 — the bridge edge's `provenance_independence` stamp, in [0,1]. 0 if
+   * unknown (fail-open ⇒ caller stays at γ). Read off the already-loaded edge
+   * scalar — NEVER self-computed, NO MIS/identity round-trip (invariant 2).
+   */
+  bridgeIndependence(edgeId: EdgeId): number;
+  /**
+   * B2 — the `earned_bridge_value` of the strand that OWNS this bridge edge
+   * (its `from` strand; an offline-only field the query stream cannot write).
+   * 0 if unknown. Used only to ORDER the bounded sub-budget's spend.
+   */
+  bridgeEarnedValue(edgeId: EdgeId): number;
 }
 
 // ---------------------------------------------------------------------------
@@ -245,6 +257,12 @@ class TwoPhaseHaltingController implements HaltingController {
   private bridgePopsConsumed = 0;
   /** Bridges actually crossed during phase 2. */
   private bridgesCrossed = 0;
+  /**
+   * B1 — count of bridge crossings whose seed was down-weighted (factor < 1) by
+   * a resolved-but-weak origin independence stamp (0 < indep < 1). Fail-open:
+   * bare-key (indep == 0) bridges are NEVER counted here (they stay at γ).
+   */
+  private bridgeSeedsDownweighted = 0;
   /** Consecutive zero-yield crossings (circuit-breaker counter). */
   private consecutiveZeroYield = 0;
   /** True once the circuit-breaker tripped. */
@@ -367,6 +385,17 @@ class TwoPhaseHaltingController implements HaltingController {
         pending.push(edge);
       }
     }
+    // B2 — spend the bounded ~20% sub-budget on SIGNAL before DECOYS: order the
+    // owed set by the owning strand's offline `earned_bridge_value` DESC (an
+    // attacker's freshly-minted decoy bridge has earned_value 0 and sorts last),
+    // breaking ties deterministically by EdgeId ASC. Pure reordering — it does
+    // not change WHICH bridges are owed a crossing, only the visit order.
+    pending.sort((a, b) => {
+      const va = ctx.store.bridgeEarnedValue(a);
+      const vb = ctx.store.bridgeEarnedValue(b);
+      if (vb !== va) return vb - va; // earned_value DESC (signal first)
+      return a < b ? -1 : a > b ? 1 : 0; // deterministic id tiebreak ASC
+    });
     this.pendingBridges = pending;
   }
 
@@ -420,7 +449,21 @@ class TwoPhaseHaltingController implements HaltingController {
     const bridgeEdge = this.pendingBridges.shift()!;
     this.crossedBridges.add(bridgeEdge);
     const target = ctx.store.bridgeTarget(bridgeEdge);
-    return { bridgeEdge, target, seedActivation: this.config.gamma };
+    // B1 — independence-scaled seed: seed = γ × factor, factor ∈ [0,1].
+    //   indep == 0 (bare-key OR stamp-absent) ⇒ factor 1 ⇒ stays at γ. A bare-key
+    //     poison bridge is internally INDISTINGUISHABLE from an honest bare-key
+    //     INSIGHT bridge under the impossibility theorem; down-weighting it would
+    //     suppress genuine insight, so it stays at γ on purpose (fail-open).
+    //   0 < indep < 1 (resolved but WEAK anchor stamp) ⇒ factor indep ⇒ seed
+    //     proportionally down-weighted. The only case that moves.
+    //   indep >= 1 ⇒ factor 1 ⇒ never an UP-weight (would break the monotone-
+    //     non-increasing termination proof). seed ∈ [0, γ] ⊆ [0, γ), proof intact.
+    // O(1) multiply on the already-loaded edge scalar — NO MIS/identity round-trip.
+    const indep = ctx.store.bridgeIndependence(bridgeEdge);
+    const factor = indep > 0 && indep < 1 ? indep : 1;
+    if (factor < 1) this.bridgeSeedsDownweighted += 1;
+    const seed = (this.config.gamma * factor) as Activation;
+    return { bridgeEdge, target, seedActivation: seed };
   }
 
   // ------------------------------------------------------ recordCrossingYield
@@ -453,6 +496,7 @@ class TwoPhaseHaltingController implements HaltingController {
       reason,
       popCount: this.popCount,
       bridgesCrossed: this.bridgesCrossed,
+      bridgeSeedsDownweighted: this.bridgeSeedsDownweighted,
       degraded,
     };
   }

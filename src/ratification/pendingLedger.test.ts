@@ -115,6 +115,14 @@ function ctxOver(byId: Map<StrandId, Strand>): ApproveContext {
     mintEdgeId(winner: StrandId, loser: StrandId): EdgeId {
       return ("edge:outranks:" + String(winner) + "->" + String(loser)) as EdgeId;
     },
+    // RC-5 — default to an anchored, fully anchor-independent approver so the
+    // existing resolve-path tests are unaffected (the gate only ADDS rejections).
+    independentSources(_a: SourceId, _b: SourceId): boolean {
+      return true;
+    },
+    approverHasAnchors(_sourceId: SourceId): boolean {
+      return true;
+    },
   };
 }
 
@@ -249,7 +257,7 @@ describe("DOORBELL — second-admin PENDING -> approve flow", () => {
     const sys = generatePassport();
     const approver = generatePassport(); // distinct from src:a / src:b
     // A reputation ledger with a generous cap so ratify/contradict visibly move.
-    const reputation = createReputationLedger(() => 0.9);
+    const reputation = createReputationLedger(() => 0.9, undefined, () => NOW);
     const ledger = createPendingLedger({ reputation });
 
     const a = asStrandId("strand:a");
