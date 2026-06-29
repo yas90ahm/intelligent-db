@@ -509,22 +509,29 @@ function hashPayload(entity: EntityId, payload: unknown): ContentHash {
 }
 
 /**
- * Build the provenance root-set for a newly observed strand from its stamp. The
- * source's passport key becomes the root's source; the independence CLASS is
- * offline-assigned elsewhere, so the scaffold seeds it from the source id (one
- * root, one class) — the identity layer's `independentRootCount` is the authority
- * that later collapses same-class echoes.
+ * Build a single provenance root from a source's stamp. The source's passport key
+ * becomes the root's source; the independence CLASS is offline-assigned elsewhere,
+ * so the scaffold seeds it from the source id (one root, one class) — the identity
+ * layer's `independentRootCount` is the authority that later collapses same-class
+ * echoes. Shared by the new-strand root-set ({@link provenanceFromStamp}) and the
+ * external root appended by `ratify`, so both mint roots identically.
+ */
+function provenanceRootFromStamp(stamp: IdentityStamp, at: EpochMs): ProvenanceRoot {
+  return {
+    rootId: (`root:${randomUUID()}` as ProvenanceRoot["rootId"]),
+    // Offline-assigned in production; scaffold derives one class per source key.
+    independenceClass: (`class:${String(stamp.source_id)}` as ProvenanceRoot["independenceClass"]),
+    sourceId: stamp.source_id,
+    establishedAt: at,
+  };
+}
+
+/**
+ * Build the provenance root-set for a newly observed strand from its stamp (one
+ * root, one class — see {@link provenanceRootFromStamp}).
  */
 function provenanceFromStamp(stamp: IdentityStamp, at: EpochMs): readonly ProvenanceRoot[] {
-  return [
-    {
-      rootId: (`root:${randomUUID()}` as ProvenanceRoot["rootId"]),
-      // Offline-assigned in production; scaffold derives one class per source key.
-      independenceClass: (`class:${String(stamp.source_id)}` as ProvenanceRoot["independenceClass"]),
-      sourceId: stamp.source_id,
-      establishedAt: at,
-    },
-  ];
+  return [provenanceRootFromStamp(stamp, at)];
 }
 
 /** Default per-traversal-independent salience for a freshly observed strand. */
@@ -984,12 +991,7 @@ class IntelligentDbImpl implements IntelligentDb {
     // independent-root counts (read from the identity layer, never self-computed)
     // see a real outside witness. fact_state/origin are mutable on Strand; the
     // provenance set is readonly, so we re-`putStrand` a clone with the added root.
-    const externalRoot: ProvenanceRoot = {
-      rootId: (`root:${randomUUID()}` as ProvenanceRoot["rootId"]),
-      independenceClass: (`class:${String(canonicalStamp.source_id)}` as ProvenanceRoot["independenceClass"]),
-      sourceId: canonicalStamp.source_id,
-      establishedAt: at,
-    };
+    const externalRoot: ProvenanceRoot = provenanceRootFromStamp(canonicalStamp, at);
 
     let nextOrigin = strand.origin;
     let nextState = strand.fact_state;
