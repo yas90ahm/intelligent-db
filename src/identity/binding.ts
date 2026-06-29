@@ -48,6 +48,7 @@ import {
   type Unit,
 } from "../core/types.js";
 import { ANCHOR_TABLE } from "./anchors.js";
+import { pslResolver } from "./binders/publicSuffix.js";
 import { sign, verify, type KeyPair } from "./keys.js";
 
 // ---------------------------------------------------------------------------
@@ -309,8 +310,12 @@ export interface DomainBinderDeps {
   readonly checker: DomainProofChecker;
   /** Registrar/ASN operator lookup (the fleet axis). */
   readonly registrar: RegistrarLookup;
-  /** eTLD+1 resolver (the independence-class axis). */
-  readonly etld: ETldResolver;
+  /**
+   * eTLD+1 resolver (the independence-class axis). OPTIONAL: defaults to the
+   * PSL-backed {@link pslResolver}; an explicitly-passed resolver always wins
+   * (injection stays overridable for tests / a fuller list).
+   */
+  readonly etld?: ETldResolver;
   /** Verifier-held salt for the anchorId hash (never logged with the root). */
   readonly anchorSalt: string;
   /** Challenge TTL override (default {@link DEFAULT_CHALLENGE_TTL_MS}). */
@@ -333,6 +338,8 @@ export function createDomainBinder(deps: DomainBinderDeps): AnchorBinder {
   const challengeTtl = deps.challengeTtlMs ?? DEFAULT_CHALLENGE_TTL_MS;
   const attestationTtl = deps.attestationTtlMs ?? DEFAULT_ATTESTATION_TTL_MS;
   const weight = ANCHOR_TABLE[AnchorClass.DOMAIN].independenceWeight;
+  // Default to the PSL-backed resolver; an injected resolver always wins.
+  const etld = deps.etld ?? pslResolver;
 
   return {
     anchorType: AnchorClass.DOMAIN,
@@ -362,7 +369,7 @@ export function createDomainBinder(deps: DomainBinderDeps): AnchorBinder {
       if (passed !== true) {
         return { ok: false, reason: "DNS-01 proof failed" };
       }
-      const registrable = deps.etld.registrableDomain(domain).toLowerCase();
+      const registrable = etld.registrableDomain(domain).toLowerCase();
       const classId = registrable as unknown as IndependenceClassId;
       const operatorClassId = deps.registrar.operatorOf(domain);
       const body: Omit<AnchorAttestation, "verifierSig"> = {

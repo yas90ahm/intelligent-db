@@ -256,6 +256,12 @@ export type {
   DnsDomainBindDeps,
 } from "./identity/binders/dnsDomainProver.js";
 
+export {
+  registrableDomain as pslRegistrableDomain,
+  publicSuffixOf as pslPublicSuffixOf,
+  pslResolver,
+} from "./identity/binders/publicSuffix.js";
+
 export { createAnchorRegistry } from "./identity/anchorRegistry.js";
 
 export type {
