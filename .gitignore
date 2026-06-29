@@ -12,3 +12,8 @@ dist/
 *.db-wal
 *.db-shm
 *.sqlite
+
+# internal multi-agent run artifacts (kept local, not published)
+.arbor/
+ARBOR_CONTRACT.md
+research_config.yaml
