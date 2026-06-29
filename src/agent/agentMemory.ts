@@ -165,11 +165,7 @@ export interface AgentMemory {
    * RATIFY a strand on an external source's authority (DERIVED → OBSERVED, or
    * PROVISIONAL → LIVE). Multi-source case. `source` defaults to the agent source.
    */
-  ratify(
-    strandId: StrandId,
-    source?: SourceRef,
-    corroboratingStrandIds?: readonly StrandId[],
-  ): void;
+  ratify(strandId: StrandId, source?: SourceRef): void;
 
   /** ADJUDICATE a contradiction over an (entity, attribute). Multi-source case. */
   adjudicate(attribute: AttributeKey, opts?: AdjudicateOptions): ConsolidationOutcome;
@@ -409,19 +405,9 @@ export function createAgentMemory(opts?: AgentMemoryOptions): AgentMemory {
       return { facts, halt: result.halt };
     },
 
-    ratify(
-      strandId: StrandId,
-      source?: SourceRef,
-      corroboratingStrandIds?: readonly StrandId[],
-    ): void {
+    ratify(strandId: StrandId, source?: SourceRef): void {
       const stamp = resolveStamp(source);
-      engine.ratify({
-        strandId,
-        externalStamp: stamp,
-        ...(corroboratingStrandIds !== undefined
-          ? { corroboratingStrandIds }
-          : {}),
-      });
+      engine.ratify({ strandId, externalStamp: stamp });
     },
 
     adjudicate(attribute: AttributeKey, adjOpts?: AdjudicateOptions): ConsolidationOutcome {

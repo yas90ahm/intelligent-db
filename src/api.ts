@@ -1072,14 +1072,22 @@ class IntelligentDbImpl implements IntelligentDb {
       }
       return best;
     };
-    // TODO(OD-6): this single-strand `winner.provenance` read under-counts a winner
-    // corroborated by SEPARATE agreeing strands. It builds the corroboration-provenance
-    // record (not a security gate), so it is left as-is for Batch-1; a later batch should
-    // migrate it to derive contributing strands from `#deriveAgreementSet(winner) ∪
-    // {winner}` so there is ONE agreement basis.
+    // The winner's backing sources, widened to the ONE engine-owned agreement basis
+    // (`{winner} ∪ #deriveAgreementSet(winner)`) so a winner corroborated by SEPARATE
+    // agreeing LIVE strands is not under-counted — the same set `#R` reads (OD-6). This
+    // is the HARDENING-3 adjudication-provenance receipt (feeds margin-collapse re-open),
+    // NOT a security gate: a wider contributing set can only make a future re-open fire
+    // MORE readily (fail-safe-to-human), never auto-resolve anything.
     const winnerSources = new Set<SourceId>();
-    for (const root of winner.provenance) {
-      if (root.sourceId !== null) winnerSources.add(root.sourceId);
+    const absorbSources = (roots: readonly ProvenanceRoot[]): void => {
+      for (const root of roots) {
+        if (root.sourceId !== null) winnerSources.add(root.sourceId);
+      }
+    };
+    absorbSources(winner.provenance);
+    for (const sid of this.#deriveAgreementSet(winner)) {
+      const s = this.#store.getStrand(sid);
+      if (s !== null) absorbSources(s.provenance);
     }
 
     // The strongest NON-winner member's reputation (the runner-up the margin cleared).
