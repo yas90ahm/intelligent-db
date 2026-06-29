@@ -269,6 +269,70 @@ describe("downstreamDisownSweep — bounded: coincidental different-class agreem
     expect(res.contradictedSources).toContain(downstream);
     expect(ledger.scoreOf(downstream)).toBeLessThan(before);
   });
+
+  it("a downstream tainted-class source is SCARRED (non-decaying): its LCB stays suppressed after the clock advances, while a coincidental independent agreer is NOT scarred (F3)", () => {
+    // BATCH-4 M3 wiring: the disowned source's own crater scars permanently; this
+    // proves the TRANSITIVELY-tainted downstream source ALSO receives the permanent,
+    // non-decaying scar — its LCB drop cannot be waited out — while the F3 guard still
+    // spares a coincidental independent agreer (untainted class => no scar, no claw).
+    const store: StrandStore = createMemoryStore();
+    const DAY_MS = 86_400_000;
+    // A MOVABLE clock so we can advance time and prove the scar does NOT decay away.
+    let nowMs = NOW as number;
+    const ledger = createReputationLedger(
+      () => 0.9 as Unit,
+      DEFAULT_REPUTATION_PARAMS,
+      () => asEpochMs(nowMs),
+    );
+    const fraud = "src:fraud" as SourceId;
+    const tainted = "src:tainted" as SourceId; // downstream, IN the tainted class:A
+    const coincidental = "src:coincidental" as SourceId; // independent agreer (untainted)
+
+    earn(ledger, tainted);
+    earn(ledger, coincidental);
+    const taintedEarned = ledger.scoreOf(tainted);
+    const coincidentalEarned = ledger.scoreOf(coincidental);
+    expect(taintedEarned).toBeGreaterThan(0.05);
+
+    const seed = makeStrand({ idRaw: "s:seed", roots: [{ classRaw: "class:A", sourceIdRaw: fraud }] });
+    // Rests on the disowned seed AND is itself backed by the tainted class:A.
+    const derivedTainted = makeStrand({
+      idRaw: "s:derived-tainted",
+      origin: FactOrigin.DERIVED,
+      roots: [{ classRaw: "class:A", sourceIdRaw: tainted }],
+    });
+    // A coincidental independent strand: agrees but has NO derivation path and an
+    // untainted class — the F3 guard must spare it entirely.
+    const coincidentalStrand = makeStrand({
+      idRaw: "s:coincidental",
+      roots: [{ classRaw: "class:INDEPENDENT", sourceIdRaw: coincidental }],
+    });
+    store.putStrand(seed);
+    store.putStrand(derivedTainted);
+    store.putStrand(coincidentalStrand);
+    store.putEdge(derivationEdge(derivedTainted.id, seed.id));
+
+    const res = downstreamDisownSweep(fraud, [seed.id], store, ledger, asEpochMs(nowMs));
+
+    // The tainted-class downstream source is contradicted AND permanently scarred.
+    expect(res.contradictedSources).toContain(tainted);
+    const taintedState = ledger.stateOf(tainted)!;
+    expect(taintedState.scarBeta).toBeGreaterThan(0); // NON-DECAYING scar stamped
+    const taintedRightAfter = ledger.scoreOf(tainted);
+    expect(taintedRightAfter).toBeLessThan(taintedEarned);
+
+    // F3 guard: the coincidental independent agreer is untouched — no claw, no scar.
+    expect(res.contradictedSources).not.toContain(coincidental);
+    expect(ledger.stateOf(coincidental)!.scarBeta).toBe(0);
+    expect(ledger.scoreOf(coincidental)).toBe(coincidentalEarned);
+
+    // ADVANCE the clock far into the future (~36 half-lives). A non-scarring (decaying)
+    // contradiction would let the source's LCB recover toward the prior; the scar does
+    // NOT decay, so the tainted source's drop LASTS — its LCB stays below its earned
+    // value, while the untouched coincidental source merely drifts to the prior.
+    nowMs = (NOW as number) + 36 * 90 * DAY_MS;
+    expect(ledger.scoreOf(tainted)).toBeLessThan(taintedEarned);
+  });
 });
 
 describe("downstreamDisownSweep — idempotent", () => {
@@ -358,7 +422,7 @@ describe("downstreamDisownSweep — dedupe by root", () => {
 
     earn(ledger, downstream);
     const before = ledger.scoreOf(downstream);
-    const betaBefore = ledger.stateOf(downstream)!.beta;
+    const scarBefore = ledger.stateOf(downstream)!.scarBeta;
 
     // Three seed strands that are all echoes of one root (shared content_hash).
     const shared = "hash:one-root";
@@ -383,11 +447,12 @@ describe("downstreamDisownSweep — dedupe by root", () => {
     // strand is demoted exactly once and the downstream source contradicted once.
     expect(res.demotedDownstream.filter((id) => id === derived.id).length).toBe(1);
     expect(res.contradictedSources.filter((s) => s === downstream).length).toBe(1);
-    // Exactly ONE contradiction step under the Beta model: β rose by exactly c·w
-    // (= 4·1), NOT 3× that — proving the shared-root flood collapsed to one
-    // contradiction, not three. The LCB dropped (down-fast asymmetry: bad news 4×).
-    const betaAfter = ledger.stateOf(downstream)!.beta;
-    expect(betaAfter - betaBefore).toBeCloseTo(4, 6); // one step of c·w with c=4, w=1
+    // Exactly ONE contradiction step under the Beta model: the downstream claw-back now
+    // SCARS (non-decaying), so the NON-DECAYING scar mass rose by exactly c·w (= 4·1),
+    // NOT 3× that — proving the shared-root flood collapsed to one contradiction, not
+    // three. The LCB dropped (down-fast asymmetry: bad news 4×).
+    const scarAfter = ledger.stateOf(downstream)!.scarBeta;
+    expect(scarAfter - scarBefore).toBeCloseTo(4, 6); // one step of c·w with c=4, w=1
     expect(ledger.scoreOf(downstream)).toBeLessThan(before); // dropped, not tripled
   });
 });

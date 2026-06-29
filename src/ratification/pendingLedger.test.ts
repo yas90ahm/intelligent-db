@@ -257,7 +257,7 @@ describe("DOORBELL — second-admin PENDING -> approve flow", () => {
     const sys = generatePassport();
     const approver = generatePassport(); // distinct from src:a / src:b
     // A reputation ledger with a generous cap so ratify/contradict visibly move.
-    const reputation = createReputationLedger(() => 0.9);
+    const reputation = createReputationLedger(() => 0.9, undefined, () => NOW);
     const ledger = createPendingLedger({ reputation });
 
     const a = asStrandId("strand:a");

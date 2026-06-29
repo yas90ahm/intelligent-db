@@ -159,7 +159,7 @@ function fileStrand(
 describe("engine.adjudicate — routing the consolidation outcome", () => {
   it("INVARIANT 3: a multi-class dispute DEFERS, records a signed PENDING, demotes NOTHING", () => {
     const store = createMemoryStore();
-    const reputation = createReputationLedger(() => 0.9);
+    const reputation = createReputationLedger(() => 0.9, undefined, () => NOW);
     const identity = makeIdentity({ scoreOf: (s) => reputation.scoreOf(s) });
     const ledger = createPendingLedger({ reputation });
     const systemSigner = generatePassport();
@@ -192,7 +192,7 @@ describe("engine.adjudicate — routing the consolidation outcome", () => {
 
   it("END-TO-END: an external approve() through the engine resolves the deferred dispute", () => {
     const store = createMemoryStore();
-    const reputation = createReputationLedger(() => 0.9);
+    const reputation = createReputationLedger(() => 0.9, undefined, () => NOW);
     const identity = makeIdentity({ scoreOf: (s) => reputation.scoreOf(s) });
     const ledger = createPendingLedger({ reputation });
     const systemSigner = generatePassport();
@@ -246,7 +246,7 @@ describe("engine.adjudicate — routing the consolidation outcome", () => {
 
   it("engine.approve through a self-approver (authored a member) is REJECTED", () => {
     const store = createMemoryStore();
-    const reputation = createReputationLedger(() => 0.9);
+    const reputation = createReputationLedger(() => 0.9, undefined, () => NOW);
     const identity = makeIdentity({ scoreOf: (s) => reputation.scoreOf(s) });
     const ledger = createPendingLedger({ reputation });
     const systemSigner = generatePassport();
@@ -274,7 +274,7 @@ describe("engine.adjudicate — routing the consolidation outcome", () => {
 
   it("SAFE single-class dispute RESOLVES in-graph (no human horn) and demotes the loser", () => {
     const store = createMemoryStore();
-    const reputation = createReputationLedger(() => 0.9);
+    const reputation = createReputationLedger(() => 0.9, undefined, () => NOW);
     const identity = makeIdentity({ scoreOf: (s) => reputation.scoreOf(s) });
     const ledger = createPendingLedger({ reputation });
     const db = createIntelligentDb(store, identity, null, reputation, {
@@ -305,7 +305,7 @@ describe("engine.adjudicate — routing the consolidation outcome", () => {
 
   it("DEFERRED with NO ledger wired THROWS (a deferral is never silently dropped)", () => {
     const store = createMemoryStore();
-    const reputation = createReputationLedger(() => 0.9);
+    const reputation = createReputationLedger(() => 0.9, undefined, () => NOW);
     const identity = makeIdentity({ scoreOf: (s) => reputation.scoreOf(s) });
     // No ratification deps passed.
     const db = createIntelligentDb(store, identity, null, reputation);
@@ -324,7 +324,7 @@ describe("engine.adjudicate — routing the consolidation outcome", () => {
 describe("engine hardening integration", () => {
   it("HARDENING 3: adjudicate RECORDS provenance, and a later disown RE-OPENS the tipped dispute", () => {
     const store = createMemoryStore();
-    const reputation = createReputationLedger(() => 0.9);
+    const reputation = createReputationLedger(() => 0.9, undefined, () => NOW);
     const identity = makeIdentity({ scoreOf: (s) => reputation.scoreOf(s) });
     const ledger = createPendingLedger({ reputation });
     const systemSigner = generatePassport();
@@ -364,7 +364,7 @@ describe("engine hardening integration", () => {
 
   it("HARDENING 2: ratify() THROWS OffLedgerReputationError when it earns credit naming corroborators but no corroboration ledger is wired", () => {
     const store = createMemoryStore();
-    const reputation = createReputationLedger(() => 0.9);
+    const reputation = createReputationLedger(() => 0.9, undefined, () => NOW);
     const identity = makeIdentity({ scoreOf: (s) => reputation.scoreOf(s) });
     const ledger = createPendingLedger({ reputation });
     // NOTE: no `corroboration` in the ratification deps — so a corroboration-naming
@@ -391,7 +391,7 @@ describe("engine hardening integration", () => {
 
   it("HARDENING 2: the same ratify SUCCEEDS and records an event when a corroboration ledger IS wired", () => {
     const store = createMemoryStore();
-    const reputation = createReputationLedger(() => 0.9);
+    const reputation = createReputationLedger(() => 0.9, undefined, () => NOW);
     const identity = makeIdentity({ scoreOf: (s) => reputation.scoreOf(s) });
     const ledger = createPendingLedger({ reputation });
     const corroboration = createCorroborationLedger();

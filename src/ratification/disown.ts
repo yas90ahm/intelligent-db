@@ -664,7 +664,13 @@ export function downstreamDisownSweep(
   );
   for (const s of contradicted) {
     const before = ledger.stateOf(s);
-    const post = ledger.contradict(s, now);
+    // SCARRING (BATCH 4 M3): a downstream source clawed back by a disown is a
+    // tainted-by-fraud betrayal, not an ordinary contradiction — route its `c·w` mass
+    // into the NON-DECAYING `scarBeta` (like the disowned source's own crater) so the
+    // transitively-tainted source's LCB drop is PERMANENT and cannot be waited out.
+    // The class-bound above already guarantees only genuinely tainted-class sources
+    // reach here, so a coincidental independent agreer is never scarred (the F3 guard).
+    const post = ledger.contradict(s, now, undefined, true);
     // A1 — journal the downstream contradict (before/after reputation state).
     emitMut(
       mutationReceipt(
