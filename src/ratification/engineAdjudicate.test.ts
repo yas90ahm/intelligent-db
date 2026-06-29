@@ -358,15 +358,17 @@ describe("engine hardening integration", () => {
       systemSigner: generatePassport(),
     });
 
-    const witness = fileStrand(store, "strand:w", "src:w" as SourceId, "class:W", { v: "x" });
+    // witness AGREES with target (same entity + content_hash + LIVE) so the engine
+    // DERIVES it as the corroborator (OD-8) — no caller-supplied list.
+    const witness = fileStrand(store, "strand:w", "src:w" as SourceId, "class:W", { v: "y" });
     const target = fileStrand(store, "strand:t", "src:t" as SourceId, "class:T", { v: "y" });
+    void witness;
     const externalStamp = identity.stampFor("src:ext" as SourceId);
 
     expect(() =>
       db.ratify({
         strandId: target.id,
         externalStamp,
-        corroboratingStrandIds: [witness.id],
       }),
     ).toThrow(OffLedgerReputationError);
   });
@@ -383,12 +385,15 @@ describe("engine hardening integration", () => {
       corroboration,
     });
 
-    const witness = fileStrand(store, "strand:w", "src:w" as SourceId, "class:W", { v: "x" });
+    // witness AGREES with target (same entity + content_hash + LIVE) so the engine
+    // DERIVES it as the corroborator (OD-8) — no caller-supplied list.
+    const witness = fileStrand(store, "strand:w", "src:w" as SourceId, "class:W", { v: "y" });
     const target = fileStrand(store, "strand:t", "src:t" as SourceId, "class:T", { v: "y" });
     const externalStamp = identity.stampFor("src:ext" as SourceId);
 
-    db.ratify({ strandId: target.id, externalStamp, corroboratingStrandIds: [witness.id] });
+    db.ratify({ strandId: target.id, externalStamp });
     expect(corroboration.all().length).toBe(1);
     expect(corroboration.all()[0]!.beneficiarySourceId).toBe("src:ext" as SourceId);
+    expect(corroboration.all()[0]!.corroboratingStrandIds.map(String)).toContain(String(witness.id));
   });
 });

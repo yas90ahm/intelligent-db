@@ -92,7 +92,6 @@ import type {
   SourceIdentityLayer,
   Passport,
   KeyPair,
-  HighImpactContext,
   AlphaSnapshot,
   AnchorAttestation,
   IndependenceClassId,
@@ -361,9 +360,11 @@ describe("END-TO-END SYSTEM COHERENCE — the whole pipeline over one shared SQL
     // credit BECAUSE its claim agreed with f1 — so a later disown of f1's source must
     // reverse exactly this credit. The ratify raises the beneficiary's Beta LCB AND
     // records an append-only corroboration event carrying the EXACT applied alpha-mass.
+    // SAME entity + SAME payload as f1 ⇒ SAME content_hash, so the engine DERIVES the
+    // agreement set itself (#deriveAgreementSet finds f1) — no caller-supplied list (OD-8).
     const fBen = engine.writeFact({
       entity: ENTITY,
-      payload: { note: "beneficiary agrees with the winner" },
+      payload: { note: "berlin seed 1" },
       stamp: identity.stampFor(beneficiarySrc),
     });
     const beforeBeneficiary = reputation.scoreOf(beneficiarySrc);
@@ -371,7 +372,6 @@ describe("END-TO-END SYSTEM COHERENCE — the whole pipeline over one shared SQL
     engine.ratify({
       strandId: fBen,
       externalStamp: identity.stampFor(beneficiarySrc),
-      corroboratingStrandIds: [f1], // agreed with the winner's strand (later disowned)
     });
     expect(reputation.scoreOf(beneficiarySrc)).toBeGreaterThan(0); // earned slow, off 0
     const corrobEvents = corroboration.all();
@@ -416,12 +416,11 @@ describe("END-TO-END SYSTEM COHERENCE — the whole pipeline over one shared SQL
       { v: "Tokyo" },
       ATTR_HI,
     );
-    const highImpact: HighImpactContext = {
-      corroborationCountOf: () => 1, // < minCorroborationCount (2) => fails gate
-      lastContradictionAtOf: () => NOW, // contradicted "now" => not recency-clean
-      anchorClassCountOf: () => 1, // < minWinnerAnchorClasses (2) => fails gate
-    };
-    const highImpactOutcome = engine.adjudicate(ATTR_HI, { highImpact });
+    // OD-8: the caller supplies only the INTENT flag; the engine BUILDS the gate evidence
+    // from its own trust layer. hiWinner is backed by a SINGLE actor (winnerSrc) across one
+    // value fingerprint, so the engine-derived #R = 1 < minWinnerAnchorClasses (2) ⇒ the
+    // high-impact gate fails ⇒ DEFER no matter the decisive LCB gap.
+    const highImpactOutcome = engine.adjudicate(ATTR_HI, { highImpact: true });
     expect(highImpactOutcome.kind).toBe("DEFERRED");
     // The high-impact dispute is now in the human queue; nothing demoted.
     expect(store.getStrand(hiWinner.id)!.fact_state).toBe(FactState.LIVE);

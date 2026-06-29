@@ -151,6 +151,12 @@ export interface ReputationState {
   readonly ratifiedCount: number;
   /** AUDIT-ONLY: how many of this source's past claims were later contradicted. */
   readonly contradictedCount: number;
+  /**
+   * Witness time of this source's MOST RECENT contradiction, or null if never
+   * contradicted. Fail-closed if absent: a contradicted source (contradictedCount>0)
+   * with this unset is treated as contradicted-now by the high-impact gate.
+   */
+  readonly lastContradictionAt: EpochMs | null;
   /** When this state was last updated (witness time) — the decay clock anchor. */
   readonly lastUpdate: EpochMs;
 }
@@ -169,6 +175,7 @@ export function newReputationState(sourceId: SourceId, now: EpochMs): Reputation
     score: 0 as Unit,
     ratifiedCount: 0,
     contradictedCount: 0,
+    lastContradictionAt: null,
     lastUpdate: now,
   };
 }
@@ -272,6 +279,7 @@ export function decay(
       beta,
       ratifiedCount: state.ratifiedCount,
       contradictedCount: state.contradictedCount,
+      lastContradictionAt: state.lastContradictionAt,
       lastUpdate: now,
     },
     repCap,
@@ -311,6 +319,7 @@ export function applyRatification(
       beta: decayed.beta,
       ratifiedCount: decayed.ratifiedCount + 1,
       contradictedCount: decayed.contradictedCount,
+      lastContradictionAt: decayed.lastContradictionAt,
       lastUpdate: now,
     },
     repCap,
@@ -350,6 +359,7 @@ export function applyContradiction(
       beta: decayed.beta + c * wClamped,
       ratifiedCount: decayed.ratifiedCount,
       contradictedCount: decayed.contradictedCount + 1,
+      lastContradictionAt: now,
       lastUpdate: now,
     },
     repCap,
@@ -390,6 +400,7 @@ export function applyCreditReversal(
       beta: decayed.beta,
       ratifiedCount: decayed.ratifiedCount,
       contradictedCount: decayed.contradictedCount,
+      lastContradictionAt: decayed.lastContradictionAt,
       lastUpdate: now,
     },
     repCap,
@@ -609,6 +620,9 @@ class InMemoryReputationLedger implements ReputationLedger {
           beta: 1,
           ratifiedCount: prior.ratifiedCount,
           contradictedCount: prior.contradictedCount + 1,
+          // A disown is a contradiction event: stamp the witness time so the
+          // fail-closed high-impact recency gate sees a real contradiction.
+          lastContradictionAt: this.clock(),
           lastUpdate: prior.lastUpdate,
         },
         cap,
@@ -713,6 +727,7 @@ interface LegacyReputationRow {
   readonly beta?: number;
   readonly ratifiedCount?: number;
   readonly contradictedCount?: number;
+  readonly lastContradictionAt?: number | null;
   readonly lastUpdate?: number;
 }
 
@@ -731,10 +746,11 @@ function parseReputationRow(json: string, params: ReputationParams, repCap: Unit
   const sourceId = row.sourceId;
   const ratifiedCount = row.ratifiedCount ?? 0;
   const contradictedCount = row.contradictedCount ?? 0;
+  const lastContradictionAt = (row.lastContradictionAt ?? null) as EpochMs | null;
   const lastUpdate = (row.lastUpdate ?? 0) as EpochMs;
   if (typeof row.alpha === "number" && typeof row.beta === "number") {
     return withReadout(
-      { sourceId, alpha: row.alpha, beta: row.beta, ratifiedCount, contradictedCount, lastUpdate },
+      { sourceId, alpha: row.alpha, beta: row.beta, ratifiedCount, contradictedCount, lastContradictionAt, lastUpdate },
       repCap,
       params,
     );
@@ -742,7 +758,7 @@ function parseReputationRow(json: string, params: ReputationParams, repCap: Unit
   // Legacy multiplicative row: synthesize a Beta prior from the old score.
   const legacyScore = clamp(row.score ?? 0, 0, 1);
   return withReadout(
-    { sourceId, alpha: 1 + legacyScore, beta: 1, ratifiedCount, contradictedCount, lastUpdate },
+    { sourceId, alpha: 1 + legacyScore, beta: 1, ratifiedCount, contradictedCount, lastContradictionAt, lastUpdate },
     repCap,
     params,
   );
@@ -891,6 +907,9 @@ class SqliteReputationLedgerImpl implements SqliteReputationLedger {
           beta: 1,
           ratifiedCount: prior.ratifiedCount,
           contradictedCount: prior.contradictedCount + 1,
+          // A disown is a contradiction event: stamp the witness time so the
+          // fail-closed high-impact recency gate sees a real contradiction.
+          lastContradictionAt: this.#clock(),
           lastUpdate: prior.lastUpdate,
         },
         cap,
