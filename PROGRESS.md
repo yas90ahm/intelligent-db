@@ -174,7 +174,9 @@ Outputs land in `.arbor/sessions/poisonedrag/*.json` and `.arbor/sessions/transc
 - **Push to a remote** — no git remote / `gh` / auth is configured yet; the history is local.
 - **Fold non-oracle numbers into `docs/ARCHITECTURE_BENCHMARKS.md`** (currently they live in the
   audit + this file + memory).
-- **Unify the warm-up ratify constant** (12 in poisonedrag, 8 in reasoning) — audit §4.
+- ~~**Unify the warm-up ratify constant** (12 in the poisoning arms, 8 in `retrievers.ts`) — audit §4.~~
+  DONE (2026-07-01): one documented `PRIMARY_WARMUP_RATIFIES=12` in `src/__bench__/trustWarmup.ts`,
+  imported by all six clean-warm-up sites; `costlyIndependent`'s asymmetric 2/10 left intentional.
 - **MPBench / AgentPoison** — reconstruct when public code lands (scoped in `COVERAGE.md`).
 - **Tune the non-oracle knobs** (`NONORACLE_TAU`, `NONORACLE_MINECHO`) per threat model; consider
   routing the cluster-derived independence classes through the engine's `independentRootCount`

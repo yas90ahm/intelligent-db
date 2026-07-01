@@ -45,6 +45,7 @@ import type {
 } from "../../index.js";
 
 import { makeStrand, makeEdge, NOW } from "../fixtures.js";
+import { PRIMARY_WARMUP_RATIFIES } from "../trustWarmup.js";
 import { cosine } from "../retrieval/embed.js";
 import type { BenchItem } from "./datasets.js";
 import { hash32, type BankEntry } from "./poison.js";
@@ -263,7 +264,7 @@ export function substrateArm(
   const engine: IntelligentDb = createIntelligentDb(store, identity, null, reputation, ratification);
 
   // Pre-earn the trusted source(s) to a decisive LCB so adjudication resolves in their favor.
-  for (const s of trustedIds) for (let r = 0; r < 12; r++) reputation.ratify(s as SourceId, NOW, 1 as Unit);
+  for (const s of trustedIds) for (let r = 0; r < PRIMARY_WARMUP_RATIFIES; r++) reputation.ratify(s as SourceId, NOW, 1 as Unit);
 
   // Adjudicate every contradiction (attribute shared by ≥2 entries) → poison DEMOTED.
   const attrCount = new Map<string, number>();

@@ -48,6 +48,7 @@ import type {
 } from "../../index.js";
 
 import { cosine } from "../retrieval/embed.js";
+import { PRIMARY_WARMUP_RATIFIES } from "../trustWarmup.js";
 import type { Assertion, FWQuestion } from "./generate.js";
 
 export type FwArmId = "bare" | "rag" | "substrate" | "mem0";
@@ -222,7 +223,7 @@ export function substrateArm(assertions: readonly Assertion[]): FwArm {
   const ratification: RatificationDeps = { ledger: createPendingLedger(), systemSigner: generatePassport() };
   const engine = createIntelligentDb(store, identity, null, reputation, ratification);
 
-  for (const s of earnSources) for (let r = 0; r < 12; r++) reputation.ratify(s as SourceId, NOW, 1 as Unit);
+  for (const s of earnSources) for (let r = 0; r < PRIMARY_WARMUP_RATIFIES; r++) reputation.ratify(s as SourceId, NOW, 1 as Unit);
 
   // Adjudicate every (entity, attribute) with ≥2 distinct values → demote the losers.
   for (const [attrKey, vals] of distinctValues) if (vals.size >= 2) engine.adjudicate(attrKey as AttributeKey);

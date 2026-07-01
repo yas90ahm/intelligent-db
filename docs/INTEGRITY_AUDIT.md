@@ -77,7 +77,7 @@ the cluster." Honest fix: state the oracle assumption next to the ASR number; ci
   ratify counts.
 - `src/__bench__/generalization/multiSession.ts:193-254` — same 0.95/0.05, 12 ratifies.
 - `src/__bench__/retrieval/retrievers.ts:121-138` — trusted set = `dataset.trustedSources`
-  (oracle field); pre-earn loop (8 ratifies, note the inconsistent constant — §4). Worse: the
+  (oracle field); pre-earn loop (now `PRIMARY_WARMUP_RATIFIES`=12, unified — §4). Worse: the
   read-back at **142-153** compares LIVE state against the *known* `pair.trueFactId` /
   `pair.falseFactId`, i.e. the harness knows the exact true/false pair a-priori.
 
@@ -168,8 +168,8 @@ wins depend on the cheap-Sybil assumption**, which is precisely why §2.2 must b
 | Value | Locations | Classification |
 |---|---|---|
 | `repCap 0.95 / 0.05` (trusted vs untrusted) | poisonedrag/arms.ts:146, factworld:211, reasoning:251, costlyIndependent:287, multiSession:213, retrievers.ts:122,342, noTrustArm:124 | **Result-biasing** — label-derived; the *gap* between them plus the warm-up is what guarantees the demotion. Disclose as part of §1. |
-| Warm-up `12` ratifies | poisonedrag/arms.ts:154, factworld:225, reasoning:266, multiSession:254 | **Result-biasing tuning** — reverse-engineered so gold LCB clears `decisiveMargin=0.30` + `minWinnerReputation=0.20`. Legitimate as "model a credible source" but the exact count is chosen for the outcome. DISCLOSE. |
-| Warm-up `8` ratifies | retrievers.ts:138 | Same as above, **inconsistent constant** across benchmarks (12 elsewhere, 8 here) — no principled reason given; looks tuned per-benchmark. DISCLOSE / unify. |
+| Warm-up ratifies (now `PRIMARY_WARMUP_RATIFIES=12`) | `src/__bench__/trustWarmup.ts` (imported by poisonedrag/arms, factworld/arms, reasoning/arms, multiSession, spotcheckNq, retrievers) | **Result-biasing tuning** — reverse-engineered so gold LCB clears `decisiveMargin=0.30` + `minWinnerReputation=0.20`. Legitimate as "model a credible source" but the exact count is chosen for the outcome. DISCLOSE. **RESOLVED (2026-07-01):** unified into one documented shared constant; the former `8` in `retrievers.ts` was reconciled to `12` (only strengthens the trusted primary; suite still 368 green). |
+| ~~Warm-up `8` ratifies~~ | ~~retrievers.ts:138~~ | **RESOLVED** — the inconsistent per-benchmark constant is gone; all clean-warm-up sites now read `PRIMARY_WARMUP_RATIFIES` from `trustWarmup.ts`. (The deliberately asymmetric `TRUE/POISON_PRIMARY_RATIFIES=2/10` in costlyIndependent are intentionally NOT this constant — see next row.) |
 | `TRUE_PRIMARY_RATIFIES=2`, `POISON_PRIMARY_RATIFIES=10` | costlyIndependent.arm.ts:85-86 | **Result-shaping but openly documented** (LCB≈0.415 vs ≈0.784 vs the 0.30 gap). Honest; DISCLOSE the reverse-engineering. |
 | `independenceBetween ⇒ 0.5` for any disjoint pair | poisonedrag/arms.ts:143, factworld:163, costlyIndependent:219 | **BENIGN** — only the sign (>0) is load-bearing for MIS; magnitude irrelevant here. |
 | `decisiveMargin 0.30`, `minWinnerReputation 0.20` | engine `DEFAULT_ADJUDICATION_POLICY` (referenced costlyIndependent:78) | **Legitimate engine tuning constant**, not a bench artifact — but the bench ratify counts are fitted to it, so disclose the coupling. |
@@ -272,9 +272,11 @@ which is to the authors' credit.
 3. §2.2 — Results depend on the cheap-Sybil assumption (poison = one shared anchor class);
    distinct-domain poison would defeat the engine. Foreground `generalization/costlyIndependent`
    (§3), which honestly shows capture in that regime.
-4. §4 — Warm-up ratify counts (12; 8 in retrievers.ts) and 0.95/0.05 caps are reverse-
-   engineered to the engine's `decisiveMargin 0.30` / `minWinnerReputation 0.20`; disclose the
-   coupling and unify the inconsistent 8-vs-12 constant.
+4. §4 — Warm-up ratify counts and 0.95/0.05 caps are reverse-engineered to the engine's
+   `decisiveMargin 0.30` / `minWinnerReputation 0.20`; disclose the coupling. **The inconsistent
+   8-vs-12 constant is RESOLVED (2026-07-01)** — unified into one documented
+   `PRIMARY_WARMUP_RATIFIES=12` in `src/__bench__/trustWarmup.ts`; the coupling remains disclosed
+   there and in this table.
 5. §2.3 — Capability/cross-DB Arm1/Arm2/Arm3 are reimplemented decision rules (toy majority /
    inlined decisive-or-defer), not the shipped engine path; don't present them as real systems.
 6. §6 — LLM-scored ASR is reproducible on-box, only approximately across hardware.

@@ -46,6 +46,7 @@ import type {
 import { loadKB, loadQuestions } from "./data.js";
 import type { KBPassage, PRQuestion } from "./data.js";
 import { cosine, embedTexts } from "../retrieval/embed.js";
+import { PRIMARY_WARMUP_RATIFIES } from "../trustWarmup.js";
 
 const RUN = process.env["SPOTCHECK_NQ"] === "1";
 const CACHE = process.env["PR_CACHE"] ?? "D:\\Intelligent DB\\.arbor\\cache\\poisonedrag";
@@ -198,7 +199,7 @@ interface QueryRecord {
     const ratification: RatificationDeps = { ledger: createPendingLedger(), systemSigner: generatePassport() };
     const engine = createIntelligentDb(store, identity, null, reputation, ratification);
 
-    for (const s of earn) for (let r = 0; r < 12; r++) reputation.ratify(s as SourceId, NOW, 1 as Unit);
+    for (const s of earn) for (let r = 0; r < PRIMARY_WARMUP_RATIFIES; r++) reputation.ratify(s as SourceId, NOW, 1 as Unit);
 
     // ---- adjudicate per query and capture the outcome ----------------------
     const outcomes = new Map<string, string>();

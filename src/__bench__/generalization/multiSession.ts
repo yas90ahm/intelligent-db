@@ -25,6 +25,8 @@ import { createRequire } from "node:module";
 
 import type { DatabaseSync as DatabaseSyncType } from "node:sqlite";
 
+import { PRIMARY_WARMUP_RATIFIES } from "../trustWarmup.js";
+
 import {
   createIntelligentDb,
   createSqliteStore,
@@ -251,7 +253,7 @@ export function ingestSession1(dbPath: string, poisonCount = 8): MultiSessionWor
   }
 
   // Pre-earn ONLY the primary gold source (the corroborator stays at rep 0).
-  for (let r = 0; r < 12; r++) reputation.ratify(goldPrimary as SourceId, NOW, 1 as Unit);
+  for (let r = 0; r < PRIMARY_WARMUP_RATIFIES; r++) reputation.ratify(goldPrimary as SourceId, NOW, 1 as Unit);
 
   // Adjudicate the disputed (entity, attribute): gold (#R=2) wins, poison (#R=1) demoted.
   const outcome = engine.adjudicate(attrKey as AttributeKey);

@@ -47,6 +47,7 @@ import type {
 } from "../../index.js";
 
 import { makeStrand, makeEdge, NOW } from "../fixtures.js";
+import { PRIMARY_WARMUP_RATIFIES } from "../trustWarmup.js";
 import type { Dataset, QueryRecord, ContradictionPair } from "./dataset.js";
 import { cosine } from "./embed.js";
 import {
@@ -135,7 +136,7 @@ export function createIdRetriever(graph: SharedGraph, dataset: Dataset): IdRetri
 
   // 4) Pre-earn the trusted (authority) sources to a decisive LCB.
   for (const s of dataset.trustedSources) {
-    for (let i = 0; i < 8; i++) reputation.ratify(s as SourceId, NOW, 1 as Unit);
+    for (let i = 0; i < PRIMARY_WARMUP_RATIFIES; i++) reputation.ratify(s as SourceId, NOW, 1 as Unit);
   }
 
   // 5) Adjudicate every contradiction attribute; record the LIVE winner.
