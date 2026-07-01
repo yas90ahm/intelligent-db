@@ -30,9 +30,10 @@ the only variable is *how each arm adjudicates provenance*.
 
 ---
 
-## 1. The 5 arms (the experimental design)
+## 1. The arms (the experimental design)
 
-All poisoning benchmarks compare up to five memory "arms." An arm answers exactly one question:
+All poisoning benchmarks compare up to five headline memory "arms" (plus the ablation and
+non-oracle variants in §1.6–1.7). An arm answers exactly one question:
 *given a query, what memory context does the reader LLM see?* They differ only in retrieval /
 adjudication. The arm interfaces:
 - FactWorld: `FwArm.contextFor(q, qVec) → string[]` (`src/__bench__/factworld/arms.ts:55-60`).
@@ -129,6 +130,31 @@ The ablation runner asserts the encoded prediction as directional bounds:
 `noFilter > substrate`, `|noFilter − rag| < |noFilter − substrate|`, `|noTrust − rag| < |noTrust
 − substrate|`, `noTrust > substrate` (`poisonedrag/ablationRunner.test.ts:162-169`).
 
+### 1.7 `substrate-nonoracle` — the label-free structural defense (detection, not just use)
+
+The `substrate` arm derives its trust partition (anchor class + reputation) from the
+ground-truth `kind` label — so it measures *"given a correct identity oracle, does the engine
+USE it?"*, not *"can it DETECT the poison?"* (the audit's one BLOCKER, `docs/INTEGRITY_AUDIT.md`
+§0/§1). This arm removes the oracle: independence is inferred **in-band from candidate-pool text
+structure**, reading **zero labels** — `kind`/`value`/`source`/`anchor_class` are touched ONLY
+inside `if(stats)` measurement blocks, never in the drop decision
+(`poisonedrag/nonOracleArm.ts`).
+
+- **Signal.** A PoisonedRAG attack must inject N≈5 docs that all match the query AND assert the
+  same crafted answer → they form a dense mutual near-duplicate cluster. Measured
+  (`nonOracleCalibrate.test.ts`, `[CALIBRATE_BENCH]`): poison↔poison cosine mean **0.83–0.89**
+  vs a lone gold passage at **0.56–0.67**.
+- **Mechanism** = the web's own "a same-root flood collapses to multiplicity 1", applied at
+  retrieval: union-find near-duplicate clustering (`NONORACLE_TAU=0.78` transitive,
+  `NONORACLE_MINECHO=3` → only a genuine multiplicity collapses, never an incidental pair). Two
+  modes: **`collapse`** keeps the single best-ranked member (pure de-dup), **`exclude`** drops
+  the whole ≥3 flood (treats the flood itself as a Sybil signal — the non-oracle analog of the
+  oracle arm filtering the demoted poison, but *inferred* from structure).
+- **Result is a two-tier claim** (numbers in §2.2): structural detection alone cuts ASR
+  93–99%→14–23%; the external identity layer (the oracle `substrate`) closes the residual gap
+  and restores accuracy. The middle result — not a suspicious 0% — is the honest signature of a
+  real no-oracle defense.
+
 ---
 
 ## 2. The benchmark families
@@ -199,6 +225,29 @@ the reply**; **acc = the correct answer is a substring** (`poisonedrag/runner.te
 **Measured result** (`reports/confidence_intervals.md`, n=100/dataset, qwen2.5:7b): substrate ASR
 **nq 6% / hotpotqa 18% / msmarco 7%** with acc 86/82/85, vs rag 93/99/93 ASR (acc 22/11/16) and
 mem0 96/98/92 ASR. RAG-vs-IDB ASR 95% CIs are **disjoint on every dataset** (§4).
+
+**Non-oracle result** (`nonOracleRunner.test.ts`, `[NONORACLE_BENCH]`, n=100/dataset). The full
+honest spectrum — from undefended, through label-free structural detection, to the oracle upper
+bound — ASR (nq / hotpotqa / msmarco):
+
+| arm | qwen2.5:7b | qwen3:8b (thinking) |
+|---|---|---|
+| `rag` (no defense) | 93 / 99 / 93 | 90 / 97 / 94 |
+| `substrate-nonoracle` **collapse** (de-dup only) | 69 / 73 / 82 | 58 / 76 / 73 |
+| `substrate-nonoracle` **exclude** (structural, NO label) | **17 / 23 / 22** | **14 / 22 / 22** |
+| `substrate` (oracle upper bound) | 6 / 18 / 6 | 5 / 15 / 8 |
+
+Structural exclude accuracy 59–74% (qwen2.5) / 56–75% (qwen3) — below the oracle's 82–90% by the
+cost of occasionally excluding a gold passage pulled into a Sybil cluster. Echo-collapse purity
+**86–93%** (of dropped docs, ~9/10 were truly poison — inferred, never told), and the collapse
+counts are **byte-identical across the two models** (the decision is structural, blind to both
+the label and the reader's output). Findings: (1) **de-dup alone is insufficient** (collapse
+69–82% ASR — erasing multiplicity still leaves one top-ranked poison copy, and PoisonedRAG poison
+out-ranks gold, so *rank* is the second lever); (2) **structural exclude recovers the bulk** of
+the oracle defense with no identity signal (hotpotqa 23% ≈ oracle 18%); (3) the defense is
+**model-agnostic** (same spectrum on a thinking model, which does not resist poison on its own).
+Attacker evasion mirrors §2.5: shrink the flood below 3 (weakens concentration) or buy genuinely
+independent, textually-diverse sources (the "priced, not prevented" boundary).
 
 ### 2.3 The n=1000 PoisonedRAG-*style* scale test
 
@@ -554,6 +603,11 @@ Reads the completed FactWorld + PoisonedRAG JSONs; writes
 - **The boundary is disclosed, not hidden.** The costly-independent curve is presented as a
   **failure mode** — ID's ASR rises monotonically to the undefended ceiling as the attacker pays
   for real anchors + reputation. That is the central honesty of "priced, not prevented."
+- **The oracle assumption is disclosed AND removed.** The headline `substrate` arm is
+  oracle-conditional (trust partition from the label — §1.7). The `substrate-nonoracle` arm
+  removes the oracle entirely (independence inferred from text structure, zero labels) and still
+  cuts ASR 93–99%→14–23% (§2.2), so the win is not "reading the answer key." The two-tier
+  framing (structural detection + identity layer) is stated in plain words, not implied.
 
 ---
 
@@ -576,11 +630,15 @@ src/__bench__/
 │   ├── data.ts                      KB / questions JSONL loader
 │   ├── arms.ts                      bare / rag / substrate (+ applyDemotedFilter ablation flag)
 │   ├── noTrustArm.ts                substrate-notrust ablation control
+│   ├── nonOracleArm.ts              label-free structural Sybil defense (collapse / exclude)
 │   ├── mem0Arm.ts                   mem0 sidecar arm
 │   ├── runner.test.ts               ASR + acc (substring)                                [POISONEDRAG_BENCH]
+│   ├── nonOracleRunner.test.ts      rag / collapse / exclude / oracle spectrum           [NONORACLE_BENCH]
+│   ├── nonOracleCalibrate.test.ts   measures poison-cluster vs gold separation           [CALIBRATE_BENCH]
 │   ├── ablationRunner.test.ts       substrate vs nofilter vs notrust vs rag              [ABLATION_BENCH]
 │   ├── dualMetricRunner.test.ts     substring vs LLM-judge cross-validation             [DUALMETRIC_BENCH]
 │   ├── contrieverRunner.test.ts     apples-to-apples with the paper's retriever          [CONTRIEVER_BENCH]
+│   ├── transcriptRunner.test.ts     per-question raw model outputs → transcripts jsonl   [TRANSCRIPT_BENCH]
 │   └── spotcheckNq.test.ts          pure-engine-state "why poison dropped" trace          [SPOTCHECK_NQ]
 ├── generalization/
 │   ├── costlyIndependent.generate.ts    abstract per-item world
@@ -608,7 +666,15 @@ src/__bench__/
 | poisonedrag-hotpotqa | **18.0%** | **82.0%** | 99.0% | 98.0% |
 | poisonedrag-msmarco | **7.0%** | **85.0%** | 93.0% | 92.0% |
 
+**Non-oracle (label-free) PoisonedRAG ASR**, structural `exclude` mode, vs the `rag` floor and
+the oracle `substrate` upper bound (qwen2.5:7b / qwen3:8b):
+
+| benchmark | rag ASR | nonoracle-exclude ASR | oracle substrate ASR |
+|---|---|---|---|
+| poisonedrag-nq | 93 / 90 | **17 / 14** | 6 / 5 |
+| poisonedrag-hotpotqa | 99 / 97 | **23 / 22** | 18 / 15 |
+| poisonedrag-msmarco | 93 / 94 | **22 / 22** | 7 / 8 |
+
 Costly-independent boundary (no-LLM proxy): anchors-only L=1 → 0%, L≥2 → 50%; anchors+rep L≥3 →
-100% (the disclosed failure mode). Source: `reports/confidence_intervals.md`, `COVERAGE.md`.
-</content>
-</invoke>
+100% (the disclosed failure mode). Source: `reports/confidence_intervals.md`, `COVERAGE.md`,
+`nonOracleRunner.test.ts`.
