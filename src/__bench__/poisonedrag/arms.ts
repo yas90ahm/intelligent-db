@@ -15,15 +15,16 @@
 
 import {
   createIntelligentDb, createMemoryStore, createSourceIdentityLayer, createReputationLedger,
-  createPendingLedger, generatePassport, asStrandId, asEpochMs, FactState, FactOrigin, Tier, AnchorClass,
+  createPendingLedger, asStrandId, asEpochMs, FactState, FactOrigin, Tier, AnchorClass,
 } from "../../index.js";
 import type {
   Strand, StrandStore, SourceId, Unit, EpochMs, EntityId, AttributeKey, ProvenanceRoot,
-  ProvenanceRootId, IndependenceClassId, ContentHash, AnchorBinding, KeyRegistryPort,
+  ProvenanceRootId, IndependenceClassId, ContentHash, AnchorBinding, SourceRegistryPort,
   AnchorRegistryPort, ReputationLedger, ReputationLedgerPort, StakeLedgerPort, RatificationDeps,
 } from "../../index.js";
 
 import { cosine } from "../retrieval/embed.js";
+import { freshSource } from "../../testSupport/identityFixtures.js";
 import { PRIMARY_WARMUP_RATIFIES } from "../trustWarmup.js";
 import type { KBPassage, PRQuestion } from "./data.js";
 
@@ -131,7 +132,7 @@ export function substrateArm(passages: readonly KBPassage[], vecs: readonly Floa
   }
 
   // identity + reputation wiring
-  const keys: KeyRegistryPort = { register: () => {}, sourceIdOf: (s) => (known.has(String(s)) ? s : null), has: (s) => known.has(String(s)) };
+  const sources: SourceRegistryPort = { register: () => {}, sourceIdOf: (s) => (known.has(String(s)) ? s : null), has: (s) => known.has(String(s)) };
   const anchors: AnchorRegistryPort = {
     bind: () => {},
     anchorsOf: (s) => anchorBindings.get(String(s)) ?? [],
@@ -148,8 +149,8 @@ export function substrateArm(passages: readonly KBPassage[], vecs: readonly Floa
   const reputation: ReputationLedger = createReputationLedger(repCapOf, undefined, () => NOW);
   const reputationPort: ReputationLedgerPort = { scoreOf: (s) => reputation.scoreOf(s) };
   const stake: StakeLedgerPort = { postedFor: () => 0 as Unit };
-  const identity = createSourceIdentityLayer({ keys, anchors, reputation: reputationPort, stake });
-  const ratification: RatificationDeps = { ledger: createPendingLedger(), systemSigner: generatePassport() };
+  const identity = createSourceIdentityLayer({ sources, anchors, reputation: reputationPort, stake });
+  const ratification: RatificationDeps = { ledger: createPendingLedger(), systemSource: freshSource().sourceId };
   const engine = createIntelligentDb(store, identity, null, reputation, ratification);
 
   for (const s of earn) for (let r = 0; r < PRIMARY_WARMUP_RATIFIES; r++) reputation.ratify(s as SourceId, NOW, 1 as Unit);

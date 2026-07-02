@@ -29,6 +29,7 @@
  */
 
 import { describe, it, expect } from "vitest";
+import { freshSource } from "../testSupport/identityFixtures.js";
 
 import {
   createIntelligentDb,
@@ -36,8 +37,6 @@ import {
   createPendingLedger,
   createReputationLedger,
   createSourceIdentityLayer,
-  createStakeLedger,
-  generatePassport,
   independenceBetween,
   AnchorClass,
   FactOrigin,
@@ -54,8 +53,8 @@ import type {
   ContradictionSetId,
   EntityId,
   IntelligentDb,
-  KeyRegistryPort,
-  Passport,
+  SourceRegistryPort,
+  SourceRef,
   PendingLedger,
   PendingRatification,
   ProvenanceRoot,
@@ -79,10 +78,10 @@ const CHAL = "src:chal" as SourceId;
 
 // --- minimal pillar ports (mirrors engineOwnedEvidence.test.ts) -------------
 
-function makeKeyRegistry(): KeyRegistryPort {
+function makeSourceRegistry(): SourceRegistryPort {
   const known = new Set<SourceId>();
   return {
-    register(p: Passport): void {
+    register(p: SourceRef): void {
       known.add(p.sourceId);
     },
     sourceIdOf(s: SourceId): SourceId | null {
@@ -145,17 +144,17 @@ function makeEngine(): {
   const store = createMemoryStore();
   // FIXED clock — decay-on-read is Δt = 0 (per the known flaky-helper guidance).
   const reputation = createReputationLedger(() => 0.9 as Unit, undefined, () => NOW);
-  const stake = createStakeLedger();
-  const stakePort: StakeLedgerPort = { postedFor: (s) => stake.posted(s) };
+  // Staking is RETIRED (attribution replaces stake): a constant-zero port.
+  const stakePort: StakeLedgerPort = { postedFor: () => 0 };
   const repPort: ReputationLedgerPort = { scoreOf: (s) => reputation.scoreOf(s) };
   const identity = createSourceIdentityLayer({
-    keys: makeKeyRegistry(),
+    sources: makeSourceRegistry(),
     anchors: makeAnchorRegistry(),
     reputation: repPort,
     stake: stakePort,
   });
   const ledger = createPendingLedger({ reputation });
-  const ratification: RatificationDeps = { ledger, systemSigner: generatePassport() };
+  const ratification: RatificationDeps = { ledger, systemSource: freshSource().sourceId };
   const db = createIntelligentDb(store, identity, null, reputation, ratification);
   return { store, identity, reputation, ledger, db };
 }
@@ -202,10 +201,10 @@ describe("BATCH 3 — F4a unconditional >= 2-root floor (§5.1)", () => {
   it("A3+A4: single-source (#R=1) multi-class DEFERS for BOTH intents; a >= 2-disjoint-root winner RESOLVES", () => {
     // ---- A3: single-source DEFERS (at any point on the decay curve, regardless of intent)
     const a3 = makeEngine();
-    a3.identity.register({ ...generatePassport(), sourceId: WINNER } as Passport, [
+    a3.identity.register({ ...freshSource(), sourceId: WINNER } as SourceRef, [
       bindingOf(AnchorClass.DOMAIN, 0.35),
     ]);
-    a3.identity.register({ ...generatePassport(), sourceId: CHAL } as Passport, []);
+    a3.identity.register({ ...freshSource(), sourceId: CHAL } as SourceRef, []);
     // Earn the winner a DECISIVE, EARNED reputation so it WOULD have auto-resolved
     // pre-F4a — isolating F4a as the cause of the defer.
     for (let i = 0; i < 6; i++) a3.reputation.ratify(WINNER, NOW, 1);
@@ -221,13 +220,13 @@ describe("BATCH 3 — F4a unconditional >= 2-root floor (§5.1)", () => {
 
     // ---- A4: a genuinely >= 2-anchor-disjoint-root winner still RESOLVES (false-defer guard)
     const a4 = makeEngine();
-    a4.identity.register({ ...generatePassport(), sourceId: WINNER } as Passport, [
+    a4.identity.register({ ...freshSource(), sourceId: WINNER } as SourceRef, [
       bindingOf(AnchorClass.DOMAIN, 0.35),
     ]);
-    a4.identity.register({ ...generatePassport(), sourceId: CORROB } as Passport, [
+    a4.identity.register({ ...freshSource(), sourceId: CORROB } as SourceRef, [
       bindingOf(AnchorClass.PHONE_SIM, 0.2),
     ]);
-    a4.identity.register({ ...generatePassport(), sourceId: CHAL } as Passport, []);
+    a4.identity.register({ ...freshSource(), sourceId: CHAL } as SourceRef, []);
     for (let i = 0; i < 6; i++) a4.reputation.ratify(WINNER, NOW, 1);
     fileStrand(a4.store, "strand:win", "Berlin", [rootOf("win", "class:win", WINNER)]);
     // A genuinely anchor-DISJOINT co-asserter of the SAME value ⇒ #R = 2 AND the F4b
@@ -248,7 +247,7 @@ describe("BATCH 3 — F4a unconditional >= 2-root floor (§5.1)", () => {
     // as a DEFER-DoS). With no external-signal winner, the deterministic id tiebreak picks
     // one survivor and demotes the disagreeing echoes WITHOUT a vote — never a DEFER.
     const eng = makeEngine();
-    eng.identity.register({ ...generatePassport(), sourceId: WINNER } as Passport, []);
+    eng.identity.register({ ...freshSource(), sourceId: WINNER } as SourceRef, []);
     // Three same-class echoes (one shared class), one value disagreeing — a flood shape.
     fileStrand(eng.store, "strand:a", "Berlin", [rootOf("a", "class:same", WINNER)]);
     fileStrand(eng.store, "strand:b", "Berlin", [rootOf("b", "class:same", WINNER)]);
@@ -266,13 +265,13 @@ describe("BATCH 3 — F4a unconditional >= 2-root floor (§5.1)", () => {
 describe("BATCH 3 — F4b attribute-scoped corroboration count (CrossDomainSpend)", () => {
   it("a globally-high-rep winner with ZERO in-domain co-asserter DEFERS; adding one co-asserter RESOLVES", () => {
     const eng = makeEngine();
-    eng.identity.register({ ...generatePassport(), sourceId: WINNER } as Passport, [
+    eng.identity.register({ ...freshSource(), sourceId: WINNER } as SourceRef, [
       bindingOf(AnchorClass.DOMAIN, 0.35),
     ]);
-    eng.identity.register({ ...generatePassport(), sourceId: CORROB } as Passport, [
+    eng.identity.register({ ...freshSource(), sourceId: CORROB } as SourceRef, [
       bindingOf(AnchorClass.PHONE_SIM, 0.2),
     ]);
-    eng.identity.register({ ...generatePassport(), sourceId: CHAL } as Passport, []);
+    eng.identity.register({ ...freshSource(), sourceId: CHAL } as SourceRef, []);
     // High GLOBAL reputation earned elsewhere (throwaway facts in another domain).
     for (let i = 0; i < 6; i++) eng.reputation.ratify(WINNER, NOW, 1);
 
@@ -319,20 +318,20 @@ function makePending(
 describe("BATCH 3 — OD-2 horn rate-limiting (ledger unit)", () => {
   it("BACK-COMPAT: omitting opts appends unconditionally (exactly today's behavior); chain verifies", () => {
     const ledger = createPendingLedger();
-    const signer = generatePassport();
+    const signer = freshSource();
     // The SAME dispute appended twice WITHOUT opts ⇒ TWO records (no dedup), as today.
-    ledger.appendPending(makePending("x", "a#1", ["m1"]), signer);
-    ledger.appendPending(makePending("x", "a#1", ["m1"]), signer);
+    ledger.appendPending(makePending("x", "a#1", ["m1"]), signer.sourceId);
+    ledger.appendPending(makePending("x", "a#1", ["m1"]), signer.sourceId);
     expect(ledger.records().length).toBe(2);
     expect(ledger.verifyChain().ok).toBe(true);
   });
 
   it("CROSS-ATTRIBUTE DEDUP: same coalesce key already OPEN ⇒ no-op returning the existing record (chain not advanced)", () => {
     const ledger = createPendingLedger();
-    const signer = generatePassport();
+    const signer = freshSource();
     const S = "src:attacker" as SourceId;
 
-    const first = ledger.appendPending(makePending("c1", "attr#1", ["m1", "m2"]), signer, {
+    const first = ledger.appendPending(makePending("c1", "attr#1", ["m1", "m2"]), signer.sourceId, {
       disputingSources: [S],
       coalesceKey: "KEY",
     });
@@ -340,24 +339,24 @@ describe("BATCH 3 — OD-2 horn rate-limiting (ledger unit)", () => {
 
     // A DIFFERENT contradiction set / attribute but the SAME coalesce key (same source-pair
     // disputing the same value across attributes) ⇒ coalesced to a no-op.
-    const dup = ledger.appendPending(makePending("c2", "attr#2", ["m3", "m4"]), signer, {
+    const dup = ledger.appendPending(makePending("c2", "attr#2", ["m3", "m4"]), signer.sourceId, {
       disputingSources: [S],
       coalesceKey: "KEY",
     });
     expect(dup.seq).toBe(first.seq); // returned the EXISTING open record
-    expect(ledger.records().length).toBe(1); // chain NOT advanced — no second signed leaf
+    expect(ledger.records().length).toBe(1); // chain NOT advanced — no second record
     expect(ledger.verifyChain().ok).toBe(true);
   });
 
   it("PER-SOURCE CAP K: beyond K open pendings naming a source, further pendings are no-ops", () => {
     const ledger = createPendingLedger();
-    const signer = generatePassport();
+    const signer = freshSource();
     const S = "src:attacker" as SourceId;
     const CAP = 3;
 
     // CAP distinct disputes (distinct coalesce keys) all naming S ⇒ all append.
     for (let i = 0; i < CAP; i++) {
-      ledger.appendPending(makePending("c" + i, "attr#" + i, ["m" + i]), signer, {
+      ledger.appendPending(makePending("c" + i, "attr#" + i, ["m" + i]), signer.sourceId, {
         disputingSources: [S],
         coalesceKey: "K" + i,
         perSourceCap: CAP,
@@ -366,7 +365,7 @@ describe("BATCH 3 — OD-2 horn rate-limiting (ledger unit)", () => {
     expect(ledger.records().length).toBe(CAP);
 
     // The CAP+1-th distinct dispute naming S is rejected (no-op) — S is at its cap.
-    const overflow = ledger.appendPending(makePending("cX", "attr#X", ["mX"]), signer, {
+    const overflow = ledger.appendPending(makePending("cX", "attr#X", ["mX"]), signer.sourceId, {
       disputingSources: [S],
       coalesceKey: "KX",
       perSourceCap: CAP,
@@ -385,8 +384,8 @@ describe("BATCH 3 — OD-2 §5.2: an engine-level horn flood collapses to a boun
     // Two FRESH (rep-0) sources — every dispute DEFERS at the decisive/earned gate (or the
     // F4a floor), so each adjudicate floods the horn. The attacker source S is named in
     // EVERY dispute, so the per-source cap (default 64) bounds the queue.
-    eng.identity.register({ ...generatePassport(), sourceId: WINNER } as Passport, []);
-    eng.identity.register({ ...generatePassport(), sourceId: CHAL } as Passport, []);
+    eng.identity.register({ ...freshSource(), sourceId: WINNER } as SourceRef, []);
+    eng.identity.register({ ...freshSource(), sourceId: CHAL } as SourceRef, []);
 
     const N = 80;
     for (let i = 0; i < N; i++) {

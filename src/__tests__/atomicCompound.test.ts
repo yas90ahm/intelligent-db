@@ -24,7 +24,7 @@
  *   2. COMMITTED SURVIVES REOPEN (simulated crash): drive a full approve() compound
  *      op, then REOPEN a fresh handle on the same path WITHOUT a clean close of the
  *      first (WAL recovery) — assert demotions + OUTRANKS edges + reputation + the
- *      signed APPROVAL record are ALL present and verifyChain() is ok.
+ *      APPROVAL record are ALL present and verifyChain() is ok.
  *   3. INTEGRITY / CORRUPTION: integrityCheck() true on a clean db; flip a byte in a
  *      persisted audit row -> verifyChain().ok === false naming the first broken seq.
  *
@@ -33,6 +33,7 @@
  */
 
 import { createRequire } from "node:module";
+import { freshSource } from "../testSupport/identityFixtures.js";
 import { rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -49,9 +50,8 @@ import {
   createSqliteStore,
   createSqliteReputationLedger,
   createSqlitePendingLedger,
-  createStakeLedger,
+  createSqliteCorroborationLedger,
   downstreamDisownSweep,
-  generatePassport,
   independenceBetween,
   repCapFor,
   AnchorClass,
@@ -65,12 +65,12 @@ import type {
   AnchorBinding,
   AnchorRegistryPort,
   AttributeKey,
+  CorroborationLedger,
   EdgeId,
   EntityId,
   IntelligentDb,
-  KeyPair,
-  KeyRegistryPort,
-  Passport,
+  SourceRegistryPort,
+  SourceRef,
   RatificationDeps,
   ReputationLedger,
   ReputationLedgerPort,
@@ -129,10 +129,10 @@ afterEach(() => {
 
 // --- identity-layer wiring backed by the SHARED reputation ledger -----------
 
-function makeKeyRegistry(): KeyRegistryPort {
+function makeSourceRegistry(): SourceRegistryPort {
   const known = new Set<SourceId>();
   return {
-    register(p: Passport): void {
+    register(p: SourceRef): void {
       known.add(p.sourceId);
     },
     sourceIdOf(s: SourceId): SourceId | null {
@@ -197,14 +197,15 @@ interface Wired {
   ratification: RatificationDeps;
   engine: IntelligentDb;
   anchors: AnchorRegistryPort;
-  keys: KeyRegistryPort;
+  sources: SourceRegistryPort;
+  corroboration?: CorroborationLedger;
 }
 
-function wire(path: string): Wired {
+function wire(path: string, opts?: { withCorroboration?: boolean }): Wired {
   const db: DatabaseSyncType = new DatabaseSync(path);
   trackClose(() => db.close());
 
-  const keys = makeKeyRegistry();
+  const sources = makeSourceRegistry();
   const anchors = makeAnchorRegistry();
   const repCapOf = (s: SourceId): Unit => repCapFor([...anchors.anchorsOf(s)]);
   // Pin the decay-on-read clock to the test's logical NOW: the fixture earns at the
@@ -215,29 +216,47 @@ function wire(path: string): Wired {
   const reputationPort: ReputationLedgerPort = {
     scoreOf: (s: SourceId): Unit => reputation.scoreOf(s),
   };
-  const stake = createStakeLedger();
-  const stakePort: StakeLedgerPort = { postedFor: (s) => stake.posted(s) };
+  // Staking is RETIRED (attribution replaces stake): a constant-zero port.
+  const stakePort: StakeLedgerPort = { postedFor: () => 0 };
 
   const identity = createSourceIdentityLayer({
-    keys,
+    sources,
     anchors,
     reputation: reputationPort,
     stake: stakePort,
   });
 
   const store = createSqliteStore({ db });
-  const systemSigner = generatePassport();
+  const systemSource = freshSource().sourceId;
   const ledger = createSqlitePendingLedger({ db, reputation });
-  const ratification: RatificationDeps = { ledger, systemSigner };
+  // Optional CORROBORATION-EVENT LEDGER, same shared handle (only when a test needs
+  // `ratify`'s corroboration-recording path — the other compound-op tests don't).
+  const corroboration =
+    opts?.withCorroboration === true ? createSqliteCorroborationLedger({ db }) : undefined;
+  const ratification: RatificationDeps = {
+    ledger,
+    systemSource,
+    ...(corroboration !== undefined ? { corroboration } : {}),
+  };
 
   const engine = createIntelligentDb(store, identity, null, reputation, ratification);
-  return { db, store, identity, reputation, ratification, engine, anchors, keys };
+  return {
+    db,
+    store,
+    identity,
+    reputation,
+    ratification,
+    engine,
+    anchors,
+    sources,
+    ...(corroboration !== undefined ? { corroboration } : {}),
+  };
 }
 
 /** Register a fresh KYC-anchored source and return its passport + stamp. */
-function newSource(w: Wired): { passport: KeyPair; sourceId: SourceId } {
-  const passport = generatePassport();
-  w.keys.register(passport);
+function newSource(w: Wired): { passport: SourceRef; sourceId: SourceId } {
+  const passport = freshSource();
+  w.sources.register(passport);
   w.anchors.bind(passport.sourceId, [kycAnchor()]);
   return { passport, sourceId: passport.sourceId };
 }
@@ -276,8 +295,8 @@ describe("atomic compound writes — a forced mid-op error rolls back fully (no 
     // incumbent's KYC anchor, so the engine-derived #R(winner) = 2 and the in-domain
     // corroboration count = 1. The corroborator AGREES, so it is NOT one of the two losers;
     // the RESOLVED demotion loop still demotes BOTH Tokyo + Paris (>= 2 iterations).
-    const corroborator = generatePassport();
-    w.keys.register(corroborator);
+    const corroborator = freshSource();
+    w.sources.register(corroborator);
     w.anchors.bind(corroborator.sourceId, [domainAnchor()]);
     w.engine.writeFact({
       entity: ENTITY,
@@ -452,6 +471,91 @@ describe("atomic compound writes — a forced mid-op error rolls back fully (no 
 
     expect(w.store.integrityCheck()).toBe(true);
   });
+
+  it("ratify: a reputation.ratify throwing mid-op leaves NO promotion, credit, or corroboration event", () => {
+    const path = freshPath("ratify-rollback");
+    const w = wire(path, { withCorroboration: true });
+
+    // The strand to be ratified: DERIVED + PROVISIONAL, so a successful ratify has a
+    // visible PROMOTION (DERIVED -> OBSERVED, PROVISIONAL -> LIVE) in addition to the
+    // provenance-root append. A second, already-LIVE strand shares its `content_hash`
+    // (the same VALUE fingerprint) so `#deriveAgreementSet` names it as a corroborator,
+    // giving the ratify a NAMED-corroborator, positive-delta earning path that MUST
+    // record a corroboration event.
+    const targetId = asStrandId("strand:ratify-target");
+    const corroboratorId = asStrandId("strand:ratify-corroborator");
+    const sharedHash = "hash:shared-ratify-value" as Strand["content_hash"];
+
+    const target: Strand = {
+      ...makeStrand(targetId, ENTITY, ATTR, null, "class:derived"),
+      origin: FactOrigin.DERIVED,
+      fact_state: FactState.PROVISIONAL,
+      content_hash: sharedHash,
+    };
+    const corroborator: Strand = {
+      ...makeStrand(corroboratorId, ENTITY, ATTR, null, "class:corrob"),
+      content_hash: sharedHash,
+    };
+    w.store.putStrand(target);
+    w.store.putStrand(corroborator);
+
+    // The external witness whose reputation earns credit from this ratify.
+    const witness = newSource(w);
+    const externalStamp = w.identity.stampFor(witness.sourceId);
+
+    const before = {
+      target: w.store.getStrand(targetId)!,
+      repWitness: w.reputation.stateOf(witness.sourceId),
+      corroborationEvents: w.corroboration!.all().length,
+    };
+    expect(before.target.origin).toBe(FactOrigin.DERIVED);
+    expect(before.target.fact_state).toBe(FactState.PROVISIONAL);
+    expect(before.target.provenance.length).toBe(1);
+    expect(before.target.external_reobservation_count).toBe(0);
+
+    // Force a mid-op crash BETWEEN the strand-promotion write and the reputation
+    // credit it earns (ratify's `putStrand` runs first; `reputation.ratify` runs
+    // second — exactly the seam the bug report names).
+    const realRatify = w.reputation.ratify.bind(w.reputation);
+    w.reputation.ratify = (): never => {
+      throw new Error("INJECTED mid-ratify crash in reputation.ratify");
+    };
+
+    expect(() =>
+      w.engine.ratify({ strandId: targetId, externalStamp }),
+    ).toThrow(/INJECTED/);
+
+    w.reputation.ratify = realRatify;
+
+    // NOTHING committed: the strand promotion (and its provenance append) rolled back
+    // along with the reputation credit and the corroboration event.
+    const afterTarget = w.store.getStrand(targetId)!;
+    expect(afterTarget.origin).toBe(FactOrigin.DERIVED);
+    expect(afterTarget.fact_state).toBe(FactState.PROVISIONAL);
+    expect(afterTarget.provenance.length).toBe(1);
+    expect(afterTarget.external_reobservation_count).toBe(0);
+
+    expect(w.reputation.stateOf(witness.sourceId)).toEqual(before.repWitness);
+    expect(w.corroboration!.all().length).toBe(before.corroborationEvents);
+
+    expect(w.store.integrityCheck()).toBe(true);
+
+    // A clean re-run genuinely succeeds afterward: the strand promotes, the witness
+    // earns credit, and (because a corroborator with the same value fingerprint is
+    // LIVE) exactly one corroboration event is recorded.
+    w.engine.ratify({ strandId: targetId, externalStamp });
+
+    const redoTarget = w.store.getStrand(targetId)!;
+    expect(redoTarget.origin).toBe(FactOrigin.OBSERVED);
+    expect(redoTarget.fact_state).toBe(FactState.LIVE);
+    expect(redoTarget.provenance.length).toBe(2);
+    expect(redoTarget.external_reobservation_count).toBe(1);
+
+    expect(w.reputation.scoreOf(witness.sourceId)).toBeGreaterThan(before.repWitness?.alpha ?? 0);
+    expect(w.corroboration!.all().length).toBe(before.corroborationEvents + 1);
+
+    expect(w.store.integrityCheck()).toBe(true);
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -459,7 +563,7 @@ describe("atomic compound writes — a forced mid-op error rolls back fully (no 
 // ---------------------------------------------------------------------------
 
 describe("crash recovery — a committed compound op is fully present after an unclean reopen", () => {
-  it("approve(): demotions + OUTRANKS edges + reputation + signed APPROVAL all survive WAL recovery", () => {
+  it("approve(): demotions + OUTRANKS edges + reputation + the APPROVAL record all survive WAL recovery", () => {
     const path = freshPath("approve-crash");
 
     // --- session 1: drive a full DEFERRED -> approve compound op, then SIMULATE A
@@ -468,7 +572,7 @@ describe("crash recovery — a committed compound op is fully present after an u
     const loserId = asStrandId("strand:loser");
     const csid = "cset:berlin#capital_of" as Parameters<IntelligentDb["approve"]>[0];
 
-    let approverPassport: KeyPair;
+    let approverPassport: SourceRef;
     {
       const w = wire(path);
       const winnerSrc = newSource(w);
@@ -482,7 +586,7 @@ describe("crash recovery — a committed compound op is fully present after an u
         makeStrand(loserId, ENTITY, ATTR, loserSrc.sourceId, "class:loser"),
       );
 
-      // Queue the dispute as a signed PENDING record.
+      // Queue the dispute as a PENDING record on the checksum chain.
       w.ratification.ledger.appendPending(
         {
           contradictionSetId: csid,
@@ -491,17 +595,17 @@ describe("crash recovery — a committed compound op is fully present after an u
           reason: "INDEPENDENT_DISPUTE",
           createdAt: NOW,
         },
-        w.ratification.systemSigner,
+        w.ratification.systemSource,
       );
 
       // A DISTINCT external approver resolves it (compound: APPROVAL append + demote +
       // OUTRANKS + reputation, all in ONE txn over the shared handle).
-      approverPassport = generatePassport();
-      w.keys.register(approverPassport);
+      approverPassport = freshSource();
+      w.sources.register(approverPassport);
       // RC-5: the approver needs a priced anchor (no anchor → no voice) that is
       // disjoint from the members' KYC anchors (DOMAIN ⊥ VERIFIED_HUMAN ⇒ independent).
       w.anchors.bind(approverPassport.sourceId, [domainAnchor()]);
-      const resolved = w.engine.approve(csid, winnerId, approverPassport, NOW);
+      const resolved = w.engine.approve(csid, winnerId, approverPassport.sourceId, NOW);
       expect(resolved.demotions.length).toBe(1);
       expect(resolved.outranksEdges.length).toBe(1);
       expect(w.ratification.ledger.verifyChain()).toEqual({
@@ -534,7 +638,7 @@ describe("crash recovery — a committed compound op is fully present after an u
     expect(outranks[0]!.from).toBe(winnerId);
     expect(outranks[0]!.to).toBe(loserId);
 
-    // The signed APPROVAL record survived AND the chain re-verifies (signer key was
+    // The APPROVAL record survived AND the chain re-verifies (the record was
     // persisted in the SAME committed txn — no desync between audit + state).
     // The doorbell sequence (PENDING/APPROVAL) survived; the A1 latent MUTATION effect
     // leaves are additive (filter them out to recover the doorbell sequence).
@@ -585,7 +689,7 @@ describe("crash recovery — a committed compound op is fully present after an u
     // recall seeded at `a` still lights `b` and `c` because the walk derives the
     // same-entity siblings from the (durable) entity index on the fly.
     const identity2 = createSourceIdentityLayer({
-      keys: makeKeyRegistry(),
+      sources: makeSourceRegistry(),
       anchors: makeAnchorRegistry(),
       reputation: { scoreOf: () => 0 as Unit },
       stake: { postedFor: () => 0 },
@@ -634,13 +738,13 @@ describe("corruption detection — never silently served as correct", () => {
           reason: "INDEPENDENT_DISPUTE",
           createdAt: NOW,
         },
-        w.ratification.systemSigner,
+        w.ratification.systemSource,
       );
-      const approver = generatePassport();
-      w.keys.register(approver);
+      const approver = freshSource();
+      w.sources.register(approver);
       // RC-5: priced, member-disjoint anchor (DOMAIN ⊥ the members' KYC anchors).
       w.anchors.bind(approver.sourceId, [domainAnchor()]);
-      w.engine.approve(csid, winnerId, approver, NOW);
+      w.engine.approve(csid, winnerId, approver.sourceId, NOW);
       // Clean close so the WAL is checkpointed into the main file we then tamper.
       w.db.close();
     }
@@ -670,6 +774,167 @@ describe("corruption detection — never silently served as correct", () => {
     // catches a content tamper. Both layers exist precisely because they catch
     // different damage; neither silently serves the tampered chain as correct.
     expect(store2.integrityCheck()).toBe(true);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// 4. TXN-DEPTH POISONING — commit-after-inner-rollback throws; the store is NOT
+//    poisoned afterward (BEGIN is still really issued for later compound ops)
+// ---------------------------------------------------------------------------
+//
+// THE BUG BEING PINNED: an inner handle's rollback() collapses #txnDepth to 0 and
+// issues ROLLBACK; the old outer commit() then decremented depth to -1 (no COMMIT,
+// reporting success on rolled-back work), and every subsequent beginTxn() saw
+// depth !== 0 and never issued BEGIN again — so every later withTxn-wrapped
+// compound op (adjudicate, approve, disown, writeFact, ratify) ran as N
+// autocommitted writes with ZERO atomicity. The fix makes the stale outer commit
+// THROW, and the next outermost beginTxn() opens a real transaction again.
+
+describe("txn depth — commit after inner rollback throws and never poisons the store", () => {
+  it("outer commit after an inner rollback throws; the write is absent; later compound ops still roll back atomically and then commit durably", () => {
+    const path = freshPath("txn-poison");
+    const w = wire(path);
+
+    // --- (a) outer beginTxn → inner beginTxn → putStrand → inner rollback →
+    //     outer commit THROWS, and the strand is ABSENT (really rolled back). ---
+    const orphanId = asStrandId("strand:txn-orphan");
+    const outer = w.store.beginTxn();
+    const inner = w.store.beginTxn();
+    w.store.putStrand(makeStrand(orphanId, ENTITY, ATTR, null, "class:orphan"));
+    inner.rollback();
+    expect(() => outer.commit()).toThrow(
+      /commit after inner rollback: this unit of work was already rolled back/,
+    );
+    expect(w.store.getStrand(orphanId)).toBeNull();
+
+    // --- (b) the store is NOT poisoned: a subsequent compound op with a forced
+    //     mid-op throw STILL fully rolls back — proving beginTxn really issued a
+    //     BEGIN (the pre-fix poisoned store would autocommit the first demotion
+    //     and leave it standing). Same fixture as the adjudicate-rollback test:
+    //     a high-rep incumbent + an anchor-disjoint corroborator + two fresh
+    //     losers, and a putStrand that throws on the 2nd demotion write. ---
+    const incumbent = newSource(w);
+    for (let i = 0; i < 30; i++) w.reputation.ratify(incumbent.sourceId, NOW);
+    const winnerId = w.engine.writeFact({
+      entity: ENTITY,
+      attribute: ATTR,
+      payload: { capitalOf: "Germany" },
+      stamp: w.identity.stampFor(incumbent.sourceId),
+    });
+    const corroborator = freshSource();
+    w.sources.register(corroborator);
+    w.anchors.bind(corroborator.sourceId, [domainAnchor()]);
+    w.engine.writeFact({
+      entity: ENTITY,
+      attribute: ATTR,
+      payload: { capitalOf: "Germany" },
+      stamp: w.identity.stampFor(corroborator.sourceId),
+    });
+    const loserA = newSource(w);
+    const loserB = newSource(w);
+    const loserAId = w.engine.writeFact({
+      entity: ENTITY,
+      attribute: ATTR,
+      payload: { capitalOf: "Tokyo" },
+      stamp: w.identity.stampFor(loserA.sourceId),
+    });
+    const loserBId = w.engine.writeFact({
+      entity: ENTITY,
+      attribute: ATTR,
+      payload: { capitalOf: "Paris" },
+      stamp: w.identity.stampFor(loserB.sourceId),
+    });
+
+    const realPut = w.store.putStrand.bind(w.store);
+    let demoteWrites = 0;
+    w.store.putStrand = (s: Strand): void => {
+      if (s.fact_state === FactState.DEMOTED) {
+        demoteWrites++;
+        if (demoteWrites === 2) {
+          throw new Error("INJECTED mid-adjudication crash on the 2nd loser");
+        }
+      }
+      realPut(s);
+    };
+    expect(() => w.engine.adjudicate(ATTR)).toThrow(/INJECTED/);
+    w.store.putStrand = realPut;
+
+    // FULL rollback — the un-poisoned proof: even the FIRST loser's demotion
+    // (written before the throw) is gone, because it rode a real transaction.
+    expect(w.store.getStrand(loserAId)!.fact_state).toBe(FactState.LIVE);
+    expect(w.store.getStrand(loserBId)!.fact_state).toBe(FactState.LIVE);
+    expect(
+      [...w.store.allEdges()].filter((e) => e.edgeType === EdgeType.OUTRANKS).length,
+    ).toBe(0);
+    expect(w.store.integrityCheck()).toBe(true);
+
+    // --- (c) a CLEAN compound op afterward genuinely commits… ---
+    const redo = w.engine.adjudicate(ATTR);
+    expect(redo.kind).toBe("RESOLVED");
+    if (redo.kind === "RESOLVED") expect(redo.demotions.length).toBe(2);
+    expect(w.store.getStrand(loserAId)!.fact_state).toBe(FactState.DEMOTED);
+    expect(w.store.getStrand(loserBId)!.fact_state).toBe(FactState.DEMOTED);
+
+    // …and SURVIVES an unclean reopen (WAL recovery) — the commit was real.
+    const db2: DatabaseSyncType = new DatabaseSync(path);
+    trackClose(() => db2.close());
+    const store2 = createSqliteStore({ db: db2 });
+    expect(store2.getStrand(loserAId)!.fact_state).toBe(FactState.DEMOTED);
+    expect(store2.getStrand(loserBId)!.fact_state).toBe(FactState.DEMOTED);
+    expect(store2.getStrand(winnerId)!.fact_state).toBe(FactState.LIVE);
+    expect(store2.getStrand(orphanId)).toBeNull(); // the rolled-back write never landed
+    expect(store2.integrityCheck()).toBe(true);
+  });
+
+  it("a stale outer commit landing after a fresh unit of work throws the distinct no-open-transaction message", () => {
+    const path = freshPath("txn-stale-commit");
+    const w = wire(path);
+
+    // An inner rollback collapses the outer unit of work…
+    const outer = w.store.beginTxn();
+    const inner = w.store.beginTxn();
+    inner.rollback();
+
+    // …then a FRESH outermost unit of work opens (clearing the aborted flag),
+    // writes, and commits cleanly — the store recovered exactly as designed.
+    const survivorId = asStrandId("strand:txn-survivor");
+    const fresh = w.store.beginTxn();
+    w.store.putStrand(makeStrand(survivorId, ENTITY, ATTR, null, "class:survivor"));
+    fresh.commit();
+    expect(w.store.getStrand(survivorId)).not.toBeNull();
+
+    // The STALE outer handle finally commits: nothing is open and its own unit of
+    // work is long gone — loud, with the message distinct from the aborted case.
+    expect(() => outer.commit()).toThrow(/commit with no open transaction/);
+    expect(w.store.integrityCheck()).toBe(true);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// 5. OPEN-TIME GUARDS — journal-mode verification + the network-path refusal
+// ---------------------------------------------------------------------------
+
+describe("open-time guards — WAL verified on open; UNC paths refused by default", () => {
+  it("journal-mode verification passes on a temp-file db (WAL took) and on :memory: (memory mode is legitimate)", () => {
+    const path = freshPath("wal-verify");
+    const fileStore = createSqliteStore(path); // throws if journal_mode were silently downgraded
+    trackClose(() => fileStore.close());
+    expect(fileStore.integrityCheck()).toBe(true);
+
+    // The in-memory test substrate reports journal_mode "memory" — deliberately
+    // accepted (non-durable BY DESIGN), so the guard must not break it.
+    const memStore = createSqliteStore(":memory:");
+    trackClose(() => memStore.close());
+    expect(memStore.integrityCheck()).toBe(true);
+  });
+
+  it("a UNC-shaped path is rejected without allowNetworkPath (both \\\\ and // spellings)", () => {
+    expect(() => createSqliteStore("\\\\server\\share\\memory.db")).toThrow(
+      /network \(UNC\) path.*allowNetworkPath/s,
+    );
+    expect(() => createSqliteStore("//server/share/memory.db")).toThrow(
+      /network \(UNC\) path.*allowNetworkPath/s,
+    );
   });
 });
 

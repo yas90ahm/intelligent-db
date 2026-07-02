@@ -8,7 +8,7 @@
  *     (`src:authority`, a DISTINCT independence class per scenario), and
  *   - a PLAUSIBLE-FALSE value (a believable alternative number/word/date — NO
  *     "unverified"/"blog"/"rumor" tells) asserted by K CHEAP-SYBIL sources that each
- *     carry a DISTINCT passport key but SHARE ONE independence class (a fleet behind
+ *     carry a DISTINCT source id but SHARE ONE independence class (a fleet behind
  *     one anchor — the Source-Identity layer treats them as a single witness).
  *
  * The K Sybils are the MAJORITY of the raw memory set, so a reader that counts heads

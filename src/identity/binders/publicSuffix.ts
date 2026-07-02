@@ -40,19 +40,31 @@
  * registrable names (`evil1.com`, `evil2.com`, … each a real $/yr domain) from
  * one wallet, and each is a legitimately-independent DOMAIN class under PSL.
  * That is the "identity is priced, not prevented" residual and is CORRECTLY
- * STILL OPEN; the NS-operator fleet cap (`deriveOperatorClass`) is the partial
- * mitigation (same DNS operator collapses a fleet), not PSL.
+ * STILL OPEN; the operator fleet cap (the trust registry's config-injected
+ * `operatorOf` hook — same operator collapses a fleet) is the partial
+ * mitigation, not PSL.
  *
  * ZERO RUNTIME DEPENDENCIES: the PSL data is embedded static source; no npm
  * package, no network fetch, no filesystem read. The class table / PSL is one
  * swappable trust-policy data root (like a CA set), exactly as the design wants.
  *
  * STACK NOTE: ESM + NodeNext (relative imports carry `.js`); `verbatimModuleSyntax`
- * (the {@link ETldResolver} import is type-only and erases at compile time, so the
- * value↔type cycle with `binding.ts` is purely compile-time and has no runtime edge).
+ * (type-only imports use `import type`). ZERO imports beyond the module's own
+ * embedded data — this file is pure string logic.
  */
 
-import type { ETldResolver } from "../binding.js";
+/**
+ * Injected eTLD+1 (registrable-domain) resolver seam. The suffix policy is
+ * pluggable: tests may inject a deterministic resolver; prod uses the PSL-backed
+ * {@link pslResolver} below (or a fuller list, as a pure data swap). This
+ * interface HOME is here (pure string logic) — it is consumed by the crypto-free
+ * trust registry (identity/trustRegistry.ts) for the publisher / verified-tenant-
+ * domain independence axes.
+ */
+export interface ETldResolver {
+  /** The registrable domain (eTLD+1) of `domain`, lowercased. */
+  registrableDomain(domain: string): string;
+}
 
 // ---------------------------------------------------------------------------
 // The embedded, curated PSL subset (newline-delimited, Mozilla PSL file format)
@@ -310,8 +322,9 @@ export function registrableDomain(domain: string): string {
 
 /**
  * The production {@link ETldResolver}: a PSL-backed registrable-domain resolver,
- * suitable as the DEFAULT for `createDomainBinder`. Stateless and pure (the rule
- * set is parsed once at module load), so a single shared instance is safe.
+ * the DEFAULT for the trust registry's publisher / verified-tenant-domain axes.
+ * Stateless and pure (the rule set is parsed once at module load), so a single
+ * shared instance is safe.
  */
 export const pslResolver: ETldResolver = {
   registrableDomain,

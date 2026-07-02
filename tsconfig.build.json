@@ -1,0 +1,20 @@
+{
+  // Build-only tsconfig: what `npm run build` emits to dist/ (and what `npm pack`
+  // therefore ships). Excludes the test suite, the benchmark harnesses, and the
+  // shared test fixtures — none of them are library surface, and together they
+  // were ~61% of the compiled output. `npm run typecheck` still uses the root
+  // tsconfig.json and checks the FULL tree; this file only narrows emission.
+  //
+  // src/examples stays IN the build deliberately: auditSinks.ts is documented
+  // reference material (its .test.ts sibling is excluded by the *.test.ts glob),
+  // and demo.js is the `npm run demo` entry point.
+  "extends": "./tsconfig.json",
+  "exclude": [
+    "src/__bench__",
+    "src/__tests__",
+    "src/testSupport",
+    "src/**/*.test.ts",
+    "dist",
+    "node_modules"
+  ]
+}

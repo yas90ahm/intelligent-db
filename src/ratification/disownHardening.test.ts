@@ -21,6 +21,7 @@
  */
 
 import { describe, it, expect } from "vitest";
+import { freshSource } from "../testSupport/identityFixtures.js";
 
 import {
   downstreamDisownSweep,
@@ -33,7 +34,6 @@ import {
   reconcileLedger,
   assertRatifyEmitsEvent,
   OffLedgerReputationError,
-  generatePassport,
   EdgeType,
   FactState,
   FactOrigin,
@@ -196,6 +196,44 @@ describe("HARDENING 1 — weak-influence review queue", () => {
     });
     expect(second.reviewQueued).toEqual([]);
   });
+
+  it("TRANSITIVE: a multi-hop A→c1→b1 uncited-influence relay queues BOTH hops for review", () => {
+    // Regression for the "Proxy-Consulted Weak-Influence Launder": routing the
+    // disclosure through an intermediate proxy (b1 consulted c1, c1 consulted the
+    // tainted seed) must NOT dodge the review queue.
+    const store: StrandStore = createMemoryStore();
+    const ledger = ledgerWithCap();
+    const weak = createWeakInfluenceLedger();
+    const fraud = "src:fraud" as SourceId;
+
+    const seed = makeStrand({ idRaw: "s:seed", roots: [{ classRaw: "class:A", sourceIdRaw: fraud }] });
+    const c1 = makeStrand({ idRaw: "s:c1", roots: [{ classRaw: "class:C", sourceIdRaw: "src:proxy" }] });
+    const b1 = makeStrand({ idRaw: "s:b1", roots: [{ classRaw: "class:B", sourceIdRaw: "src:launderer" }] });
+    store.putStrand(seed);
+    store.putStrand(c1);
+    store.putStrand(b1);
+    // c1 consulted the tainted seed (one hop); b1 consulted only c1 (two hops from seed).
+    weak.record({ strandId: c1.id, consultedStrandId: seed.id, context: "c1 read A", at: NOW });
+    weak.record({ strandId: b1.id, consultedStrandId: c1.id, context: "b1 read c1", at: NOW });
+
+    const res = downstreamDisownSweep(fraud, [seed.id], store, ledger, NOW, undefined, undefined, {
+      weakInfluence: weak,
+    });
+
+    const queued = res.reviewQueued.map((r) => String(r.strandId));
+    // Both the one-hop proxy AND the two-hop launderer are queued for HUMAN review.
+    expect(queued).toContain(String(c1.id));
+    expect(queued).toContain(String(b1.id));
+    // Still never an auto-demotion — uncited influence is unprovable at every hop.
+    expect(res.demotedDownstream).not.toContain(c1.id);
+    expect(res.demotedDownstream).not.toContain(b1.id);
+    expect(store.getStrand(b1.id)!.fact_state).toBe(FactState.LIVE);
+    // Idempotent: a re-sweep of the same source queues nothing more.
+    const again = downstreamDisownSweep(fraud, [seed.id], store, ledger, NOW, undefined, undefined, {
+      weakInfluence: weak,
+    });
+    expect(again.reviewQueued).toEqual([]);
+  });
 });
 
 // ===========================================================================
@@ -290,7 +328,7 @@ describe("HARDENING 3 — adjudication re-opening on margin collapse", () => {
     const ledger = ledgerWithCap();
     const adj = createAdjudicationProvenanceLedger();
     const pending = createPendingLedger();
-    const systemSigner = generatePassport();
+    const systemSource = freshSource().sourceId;
     const fraud = "src:fraud" as SourceId;
 
     const seed = makeStrand({ idRaw: "s:seed", roots: [{ classRaw: "class:A", sourceIdRaw: fraud }] });
@@ -312,7 +350,7 @@ describe("HARDENING 3 — adjudication re-opening on margin collapse", () => {
     const res = downstreamDisownSweep(fraud, [seed.id], store, ledger, NOW, undefined, undefined, {
       adjudicationProvenance: adj,
       pending,
-      systemSigner,
+      systemSource,
       decisiveMargin: 0.3,
     });
 
@@ -329,7 +367,7 @@ describe("HARDENING 3 — adjudication re-opening on margin collapse", () => {
     const ledger = ledgerWithCap();
     const adj = createAdjudicationProvenanceLedger();
     const pending = createPendingLedger();
-    const systemSigner = generatePassport();
+    const systemSource = freshSource().sourceId;
     const fraud = "src:fraud" as SourceId;
 
     const seed = makeStrand({ idRaw: "s:seed", roots: [{ classRaw: "class:A", sourceIdRaw: fraud }] });
@@ -353,7 +391,7 @@ describe("HARDENING 3 — adjudication re-opening on margin collapse", () => {
     const res = downstreamDisownSweep(fraud, [seed.id], store, ledger, NOW, undefined, undefined, {
       adjudicationProvenance: adj,
       pending,
-      systemSigner,
+      systemSource,
       decisiveMargin: 0.3,
     });
 
@@ -366,7 +404,7 @@ describe("HARDENING 3 — adjudication re-opening on margin collapse", () => {
     const ledger = ledgerWithCap();
     const adj = createAdjudicationProvenanceLedger();
     const pending = createPendingLedger();
-    const systemSigner = generatePassport();
+    const systemSource = freshSource().sourceId;
     const fraud = "src:fraud" as SourceId;
 
     const seed = makeStrand({ idRaw: "s:seed", roots: [{ classRaw: "class:A", sourceIdRaw: fraud }] });
@@ -382,7 +420,7 @@ describe("HARDENING 3 — adjudication re-opening on margin collapse", () => {
       at: NOW,
     });
 
-    const deps = { adjudicationProvenance: adj, pending, systemSigner, decisiveMargin: 0.3 };
+    const deps = { adjudicationProvenance: adj, pending, systemSource, decisiveMargin: 0.3 };
     const first = downstreamDisownSweep(fraud, [seed.id], store, ledger, NOW, undefined, undefined, deps);
     expect(first.reopenedDisputes).toContain(CSID);
 

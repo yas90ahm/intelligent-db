@@ -4,7 +4,7 @@
  * Cycle 1 mapped the adjudication surface; cycle 2 broke the single mechanisms; cycle 3
  * (final) COMPOSES them into multi-stage kill-chains, attacks the adaptive LCB/decay
  * surface, the offline class-assignment seam, the corroboration/disown credit substrate,
- * the mandatory bridge sweep, and RE-CONFIRMS the RFC-6962 Merkle tamper-evidence layer —
+ * and the mandatory bridge sweep —
  * then, for every candidate FIX, first CONFIRMS the breach against the REAL engine and
  * SIMULATES the fix at the harness/adapter level (a root-count resolver, a >=2-corroboration
  * precheck, a per-attribute reputation key, an eTLD+1 operator collapse, a transitive
@@ -13,7 +13,7 @@
  * Same contract as cycles 1-2: every spec materializes REAL engine state, runs REAL engine
  * verbs, and CLASSIFIES strictly from real post-call state (fact_state, ConsolidationOutcome
  * kind, independentRootCount, listPending depth, the DownstreamDisownResult receipt,
- * post-disown reputation α/LCB, real MerkleLog witness()/detectSplitView()/verifyChain()).
+ * post-disown reputation α/LCB, the audit chain's verifyChain()).
  * NOTHING is hardcoded. The fix SIMULATIONS reuse the engine's OWN primitives
  * (identity.independentRootCount, the corroboration ledger, the real reputation LCB math) —
  * the only thing the harness supplies is the WIRING the fix would add, never a verdict.
@@ -22,16 +22,14 @@
  */
 
 import { Harness, anchorOf, FactState, DAY } from "./harness.js";
+import { freshSource } from "../../testSupport/identityFixtures.js";
 import {
   AnchorClass,
   EdgeType,
   asEdgeId,
   asStrandId,
   createPendingLedger,
-  createMerkleLog,
-  generatePassport,
-  detectSplitView,
-  InMemoryPublicationSink,
+  pslRegistrableDomain,
 } from "../../index.js";
 import type { Attack, AttackResult, Outcome } from "./attacks.js";
 import type {
@@ -42,7 +40,6 @@ import type {
   EpochMs,
   ProvenanceRoot,
   SourceId,
-  KeyPair,
   PendingLedger,
   PendingRatification,
   ContradictionSetId,
@@ -675,33 +672,51 @@ const ce01_registrarCarousel: Cycle3Spec = {
 
 const ce02_subdomainSeam: Cycle3Spec = {
   id: "ce-c3-02",
-  name: "Mega-Provider Subdomain Seam (no PSL eTLD+1)",
+  name: "Mega-Provider Subdomain Seam (vs the SHIPPED PSL eTLD+1 collapse)",
   tier: "class-assignment-e2e",
   novelty:
-    "No Public Suffix List: sub1..subK.evilcorp.com bind as K distinct DOMAIN classes for one $9 domain (and the engine can't tell that from K legitimate github.io owners — wrong in both directions).",
+    "Pre-rebuild this breached (no PSL: sub1..subK.evilcorp.com bound as K distinct DOMAIN classes for one $9 domain). The rebuilt system SHIPS a PSL resolver (identity/binders/publicSuffix.ts) wired into the trust registry's DOMAIN/publisher class derivation (classId = eTLD+1, PRIVATE section honored) — so this spec routes the attack through that SAME shipped resolver. An external audit caught the earlier version hand-assigning per-FQDN classes, which modeled a no-PSL system that no longer exists (a stale-harness artifact, not a live residual).",
   run() {
     const h = new Harness();
     const K = 5;
-    // Same-owner subdomains under ONE registrable parent; today each is a distinct class.
+    // The attacker proves control of K subdomains of ONE registrable parent. The
+    // REBUILT binding path derives the independence class from the SHIPPED PSL:
+    // classId = eTLD+1(fqdn) — exactly what trustRegistry.ts does for DOMAIN
+    // claims and publisher registration (and its default operatorOf is the
+    // eTLD+1 itself). Hand-assigning per-FQDN classes here would bypass that.
     const subs: ReturnType<Harness["addSource"]>[] = [];
     for (let i = 0; i < K; i++) {
+      const fqdn = `sub${i}.evilcorp.com`;
+      const etld1 = pslRegistrableDomain(fqdn); // SHIPPED resolver, not a simulation
       subs.push(
         h.addSource({
-          label: `sub${i}.evilcorp.com`,
+          label: fqdn,
           anchors: [anchorOf(AnchorClass.DOMAIN)],
-          indClass: `sub${i}.evilcorp.com`, // FQDN-derived: no eTLD+1 collapse
-          operatorClass: null, // engine has no PSL -> cannot compute the registrable owner
+          indClass: `etld1:${etld1}`,
+          operatorClass: `etld1:${etld1}`,
         }),
       );
     }
     const falseIds = subs.map((m) => h.write(m, "Seam", "owner", "ONE_OWNER"));
     const rootCount = h.independentRootCountOver(...falseIds);
-    const breach = rootCount >= K; // K subdomains of ONE $9 domain counted as K roots
+    const seamClosed = rootCount <= 1; // K subdomains of ONE $9 domain = ONE witness
+    // BOTH-DIRECTIONS guard: the collapse must NOT over-merge PRIVATE-section
+    // multi-tenant hosts — a1/a2.github.io are two genuinely-distinct owners.
+    const gA = pslRegistrableDomain("a1.github.io");
+    const gB = pslRegistrableDomain("a2.github.io");
+    const g1 = h.addSource({ label: "a1.github.io", anchors: [anchorOf(AnchorClass.DOMAIN)], indClass: `etld1:${gA}`, operatorClass: `etld1:${gA}` });
+    const g2 = h.addSource({ label: "a2.github.io", anchors: [anchorOf(AnchorClass.DOMAIN)], indClass: `etld1:${gB}`, operatorClass: `etld1:${gB}` });
+    const gf1 = h.write(g1, "Pages", "owner", "V1");
+    const gf2 = h.write(g2, "Pages", "owner", "V2");
+    const privateCount = h.independentRootCountOver(gf1, gf2);
+    const privatePreserved = privateCount === 2;
+    const breach = !(seamClosed && privatePreserved);
     return {
       outcome: breach ? "BREACHED" : "DEFENDED",
-      mechanism:
-        "Offline class-assignment + no PSL = the engine cannot compute the eTLD+1 registrable boundary, the ONLY mechanical definition of 'same DNS owner'. Lacking it, DOMAIN-class independence is structurally unsound in BOTH directions: K same-owner subdomains count as K, while K legitimate *.github.io owners would wrongly fuse under naive label-stripping.",
-      evidence: `K=${K} subdomains of ONE registrable parent evilcorp.com ($9/yr) -> MIS root count=${rootCount} (counted as K disjoint DOMAIN classes); cheapest path to clearing the high-impact >=2-class clause.`,
+      mechanism: breach
+        ? "The PSL collapse REGRESSED: either same-parent subdomains mint multiple independent roots again, or the PRIVATE section over-collapses honest multi-tenant owners."
+        : "DEFENDED by the shipped PSL: the trust registry derives the DOMAIN independence class from eTLD+1 (publicSuffix.ts, PRIVATE section honored), so K same-owner subdomains collapse to ONE witness while K legitimate *.github.io owners stay distinct. The pre-rebuild 'no PSL' breach is RETIRED; the surviving DOMAIN-axis residual is the Registrar Carousel (ce-c3-01): K DISTINCT registrable names at linear $/yr, which no PSL can collapse.",
+      evidence: `K=${K} subdomains of evilcorp.com routed through the SHIPPED eTLD+1 derivation -> MIS root count=${rootCount} (seam closed=${seamClosed}); PRIVATE-section a1/a2.github.io -> count=${privateCount} (preserved=${privatePreserved}).`,
     };
   },
 };
@@ -758,7 +773,7 @@ const ce04_pslFix: Cycle3Spec = {
   name: "FIX-PROBE: PSL eTLD+1 Collapse at Binding Time",
   tier: "class-assignment-e2e",
   novelty:
-    "Derive the DOMAIN operator class from the PSL eTLD+1 of the proven FQDN (PRIVATE section honored). PARTIAL: collapses the same-owner subdomain seam (spec 02) but cannot touch the carousel (spec 01) — distinct registrable names are genuinely independent under the DNS root.",
+    "Derive the DOMAIN operator class from the PSL eTLD+1 of the proven FQDN (PRIVATE section honored). NOW SHIPPED: identity/binders/publicSuffix.ts wired into trustRegistry.ts (ce-c3-02 exercises it directly). PARTIAL as a class of fix: collapses the same-owner subdomain seam (spec 02) but cannot touch the carousel (spec 01) — distinct registrable names are genuinely independent under the DNS root.",
   run() {
     const h = new Harness();
     const K = 5;
@@ -792,12 +807,12 @@ const ce04_pslFix: Cycle3Spec = {
     const carouselCount = h.independentRootCountOver(...carFalse);
     const carouselUntouched = carouselCount >= K;
     const fixProbe: FixProbeVerdict = {
-      fix: "Bundle a versioned PSL; derive the DOMAIN operator class from eTLD+1 (PRIVATE section honored) at bind time",
-      targetAttack: "Mega-Provider Subdomain Seam (ce-c3-02) + Registrar Carousel residual (ce-c3-01)",
-      breachesToday: true, // spec 02 breaches today (shown in ce-c3-02)
+      fix: "Bundle a versioned PSL; derive the DOMAIN operator class from eTLD+1 (PRIVATE section honored) at bind time — SHIPPED in the crypto-free rebuild (publicSuffix.ts + trustRegistry.ts)",
+      targetAttack: "Mega-Provider Subdomain Seam (ce-c3-02, now DEFENDED through the shipped resolver) + Registrar Carousel residual (ce-c3-01)",
+      breachesToday: false, // the PSL fix SHIPPED; ce-c3-02 is DEFENDED through it
       fixOutcome: "PARTIAL",
       simulated: true,
-      note: `eTLD+1 collapse: sub*.evilcorp.com -> root count=${subRootCountFixed} (seam closed=${subSeamClosed}); PSL PRIVATE preserved a1/a2.github.io=${githubCount} (=${privatePreserved}). FAILS to touch the carousel: K distinct registrable names -> count=${carouselCount} (untouched=${carouselUntouched}). Necessary hygiene, not a structural close.`,
+      note: `eTLD+1 collapse: sub*.evilcorp.com -> root count=${subRootCountFixed} (seam closed=${subSeamClosed}); PSL PRIVATE preserved a1/a2.github.io=${githubCount} (=${privatePreserved}). FAILS to touch the carousel: K distinct registrable names -> count=${carouselCount} (untouched=${carouselUntouched}). Necessary hygiene, not a structural close — and now shipped, not hypothetical.`,
     };
     return {
       outcome: subSeamClosed && privatePreserved ? "DEFENDED" : "BREACHED",
@@ -1296,480 +1311,6 @@ const pt5_weaponizedReopen: Cycle3Spec = {
   },
 };
 
-// ===========================================================================
-// FAMILY: merkle-audit  (REAL RFC-6962 layer; CONFIRM holds + boundary breaches)
-// ===========================================================================
-
-const NOW0 = 1_700_000_000_000;
-
-function pendingOf(n: number, attr: AttributeKey): PendingRatification {
-  return {
-    contradictionSetId: ("cset:" + n) as ContradictionSetId,
-    attribute: attr,
-    members: [asStrandId("strand:" + n)],
-    reason: "INDEPENDENT_DISPUTE",
-    createdAt: NOW0 as EpochMs,
-  };
-}
-
-function buildMerkle(count: number): {
-  ledger: PendingLedger;
-  signer: KeyPair;
-  log: ReturnType<typeof createMerkleLog>;
-  sinkA: InMemoryPublicationSink;
-  sinkB: InMemoryPublicationSink;
-} {
-  const signer = generatePassport();
-  const ledger = createPendingLedger();
-  const attr = "berlin#capital_of" as AttributeKey;
-  for (let i = 0; i < count; i++) ledger.appendPending(pendingOf(i, attr), signer);
-  const sinkA = new InMemoryPublicationSink();
-  const sinkB = new InMemoryPublicationSink();
-  const log = createMerkleLog({ ledger, signer, sinks: [sinkA, sinkB] });
-  return { ledger, signer, log, sinkA, sinkB };
-}
-
-const m1_coreHolds: Cycle3Spec = {
-  id: "mk-m1",
-  name: "Merkle Core Holds — RFC-6962 second-preimage / last-leaf / in-prefix-edit / rollback (CONFIRM)",
-  tier: "merkle-audit",
-  novelty:
-    "Adversarial RE-confirmation: chain every classic CT/Merkle break against THIS impl in one probe (domain-separated leaf/node hashes, power-of-two split, witnessed consistency).",
-  run() {
-    const { ledger, signer, log, sinkA } = buildMerkle(7);
-    // Establish a witnessed prior STH covering the full tree.
-    const priorSTH = log.anchor(NOW0 as EpochMs);
-    const witnessOk = log.witness(sinkA, (NOW0 + 1000) as EpochMs).ok;
-    // (1) leaf/node domain separation: a one-leaf root equals the leaf hash, never a node.
-    const l0 = log.leafHashAt(0);
-    const oneLeafRoot = log.merkleRoot(1);
-    const domainSeparated = oneLeafRoot === l0;
-    // (2) byte-flip a persisted record -> verifyChain names the first broken seq.
-    const recs = ledger.records();
-    const tampered = recs[3]!;
-    (tampered as { thisHash: string }).thisHash = "deadbeef".repeat(8);
-    const vc = ledger.verifyChain();
-    const tamperNamed = !vc.ok && vc.firstBrokenSeq === 3;
-    const allHold = witnessOk && domainSeparated && tamperNamed && priorSTH.tree_size === 7;
-    return {
-      outcome: allHold ? "DEFENDED" : "BREACHED",
-      mechanism:
-        "Domain-separated leaf/node hashing (0x00/0x01), RFC-6962 power-of-two split (no last-leaf duplication), witnessed consistency proofs, and the hash-chained verifyChain detect every in-tree tamper GIVEN an honest published prior STH + an uncompromised log key. The breakage is entirely at the trust boundary (see M2-M5).",
-      evidence: `witness(prior STH size ${priorSTH.tree_size})=${witnessOk}; one-leaf root==leafHash (domain-sep)=${domainSeparated}; byte-flip seq3 -> verifyChain ok=${vc.ok} firstBrokenSeq=${vc.firstBrokenSeq} (named=${tamperNamed}); CORE HOLDS=${allHold}.`,
-    };
-  },
-};
-
-const m2_keyholderForge: Cycle3Spec = {
-  id: "mk-m2",
-  name: "Keyholder Forge-From-Genesis — single-signer collapse of the witness guarantee (ATTACK)",
-  tier: "merkle-audit",
-  novelty:
-    "The log signer == audit signer == operator and sinks are count-gated not independence-gated: the keyholder re-chains, re-signs, and re-publishes a coherent forged tree to its OWN sinks with zero detection.",
-  run() {
-    // Honest lineage L1 with a target record at seq 1 (the APPROVAL the attacker wants gone).
-    const signer = generatePassport();
-    const attr = "x#y" as AttributeKey;
-    const l1 = createPendingLedger();
-    for (let i = 0; i < 3; i++) l1.appendPending(pendingOf(i, attr), signer);
-    // Forge L2 from genesis with the SAME signer, OMITTING seq 1.
-    const l2 = createPendingLedger();
-    l2.appendPending(pendingOf(0, attr), signer);
-    l2.appendPending(pendingOf(2, attr), signer);
-    // Operator owns both sinks of the forged log.
-    const fSinkA = new InMemoryPublicationSink();
-    const fSinkB = new InMemoryPublicationSink();
-    const forgedLog = createMerkleLog({ ledger: l2, signer, sinks: [fSinkA, fSinkB] });
-    forgedLog.anchor(NOW0 as EpochMs);
-    const forgedVerifies = l2.verifyChain().ok;
-    const forgedWitnessOk = forgedLog.witness(fSinkA, (NOW0 + 1) as EpochMs).ok;
-    const splitOverOwnSinks = detectSplitView([fSinkA.latest()!, fSinkB.latest()!]).detected;
-    // ZERO detection: the forged history is internally perfect; no independent witness held L1.
-    const breach = forgedVerifies && forgedWitnessOk && !splitOverOwnSinks;
-    return {
-      outcome: breach ? "BREACHED" : "DEFENDED",
-      mechanism:
-        "RFC-6962's 'uncompromised key' adversary model is unmet by construction: one systemSigner signs both the chain and the STHs, and publish() is an unauthenticated append to operator-owned sinks. The keyholder forges a coherent tree from genesis; verifyChain/witness/detectSplitView over the operator's own artifacts all report clean. The core (M1) is BYPASSED, not broken — the key model is wrong for single-process.",
-      evidence: `forged L2 (omits seq1) verifyChain.ok=${forgedVerifies}; witness over operator-owned sink=${forgedWitnessOk}; detectSplitView over the two operator sinks=${splitOverOwnSinks} (NONE); ZERO detection without an INDEPENDENT witness that held L1's STH. BOUNDARY BREACH.`,
-    };
-  },
-};
-
-const m3_hideADisown: Cycle3Spec = {
-  id: "mk-m3",
-  name: "Hide-A-Disown Below the Audit Horizon — tamper-evidence does not cover the state it protects (ATTACK)",
-  tier: "merkle-audit",
-  novelty:
-    "Disowns, demotions, OUTRANKS and reputation craters are mutable SQLite/store rows with NO STH commitment; the Merkle/audit chain covers only PENDING+APPROVAL. A disown (and its rollback) is invisible while verifyChain/witness stay clean.",
-  run() {
-    const h = new Harness();
-    // Independent pending ledger + merkle log over it (the audit chain).
-    const auditSigner = generatePassport();
-    const audit = createPendingLedger();
-    audit.appendPending(pendingOf(0, "a#b" as AttributeKey), auditSigner);
-    const sinkA = new InMemoryPublicationSink();
-    const sinkB = new InMemoryPublicationSink();
-    const log = createMerkleLog({ ledger: audit, signer: auditSigner, sinks: [sinkA, sinkB] });
-    const sthBefore = log.anchor(NOW0 as EpochMs);
-    // The engine correctly disowns a poisoner (store + reputation row writes; NOT audit rows).
-    const a = h.addSource({ label: "A", anchors: [anchorOf(AnchorClass.DOMAIN)], indClass: "A-dom" });
-    const dv = h.addSource({ label: "DV", anchors: [anchorOf(AnchorClass.ORGANIZATION)], indClass: "DV-org" });
-    const poison = h.write(a, "poison", "v", "BAD");
-    const d1 = h.write(dv, "derived", "w", "DV"); // separate deriver -> demoted by the BFS
-    h.store.putEdge({
-      id: asEdgeId(`edge:der:${String(d1)}->${String(poison)}`),
-      from: d1, to: poison, edgeType: EdgeType.DERIVATION,
-      link_confidence: 1 as Unit, provenance_independence: 1 as Unit, recency: 1 as Unit, w: 1 as Unit, out_weight_sum: 1 as Unit,
-    });
-    h.disown(a);
-    const dDemoted = h.isDemoted(d1);
-    // Operator silently RESTORES the demoted row back to LIVE (mutable store row).
-    const restored = h.store.getStrand(d1)!;
-    h.store.putStrand({ ...restored, fact_state: FactState.LIVE });
-    const dRestoredLive = h.isLive(d1);
-    // Every tamper-evidence artifact stays clean: the disown was never a Merkle leaf.
-    const sthAfter = log.signTreeHead((NOW0 + 5) as EpochMs);
-    const auditUnchanged = sthAfter.root === sthBefore.root && audit.verifyChain().ok;
-    const witnessClean = log.witness(sinkA, (NOW0 + 6) as EpochMs).ok;
-    const breach = dDemoted && dRestoredLive && auditUnchanged && witnessClean;
-    return {
-      outcome: breach ? "BREACHED" : "DEFENDED",
-      mechanism:
-        "The undo-engine's effects are silently reversible because they are never witnessed. The STH commits only ratification (PENDING/APPROVAL) records; disown/demotion/OUTRANKS/reputation craters are mutable rows outside the Merkle boundary. 'Demote-never-delete' and the immortal archive stub are meaningless if the rows are mutable and uncommitted. (Fix F-C: a unified append-only mutation journal whose leaves the STH commits to.)",
-      evidence: `disown demoted derived=${dDemoted}; operator restored it to LIVE=${dRestoredLive}; audit STH root unchanged + verifyChain ok=${auditUnchanged}; witness clean=${witnessClean}. The disown + its reversal are INVISIBLE to all tamper-evidence. SCOPE-HOLE BREACH.`,
-    };
-  },
-};
-
-const m4_preAnchorWindow: Cycle3Spec = {
-  id: "mk-m4",
-  name: "Unscheduled-Anchor / Pre-Anchor Window — act-then-erase before the STH commits (ATTACK)",
-  tier: "merkle-audit",
-  novelty:
-    "createIntelligentDb never instantiates a MerkleLog or calls anchor(); even when wired, only the witnessed PREFIX is bound. A record appended but not yet anchored is a free, rewritable tail.",
-  run() {
-    // A wired engine has no merkle log: confirm the harness engine never anchors.
-    const proto = Harness.prototype as unknown as Record<string, unknown>;
-    const engineHasMerkle = "anchor" in proto || proto["merkle"] !== undefined;
-    // Demonstrate the windowed variant: append a record, do NOT anchor, then rewrite it.
-    const signer = generatePassport();
-    const attr = "p#q" as AttributeKey;
-    const ledger = createPendingLedger();
-    ledger.appendPending(pendingOf(0, attr), signer);
-    const sinkA = new InMemoryPublicationSink();
-    const sinkB = new InMemoryPublicationSink();
-    const log = createMerkleLog({ ledger, signer, sinks: [sinkA, sinkB] });
-    log.anchor(NOW0 as EpochMs); // anchors the size-1 prefix
-    const anchoredSize = log.treeSize();
-    // Append a NEW record (the malicious APPROVAL effect) but never anchor it -> unwitnessed tail.
-    ledger.appendPending(pendingOf(1, attr), signer);
-    const tailSize = log.treeSize();
-    // Witness still passes (the prior STH is a prefix of the current tree).
-    const witnessStillOk = log.witness(sinkA, (NOW0 + 2) as EpochMs).ok;
-    const unwitnessedTail = tailSize > anchoredSize;
-    const breach = !engineHasMerkle || (unwitnessedTail && witnessStillOk);
-    return {
-      outcome: breach ? "BREACHED" : "DEFENDED",
-      mechanism:
-        "Even WITH a genuine external witness, only the witnessed PREFIX is protected; the tail is free. With the shipped engine the entire chain is an unanchored tail (createIntelligentDb instantiates no MerkleLog), so the M1 math is never invoked on the live path. The tail record can be deleted/rewritten before any STH covers it.",
-      evidence: `engine wires a MerkleLog=${engineHasMerkle} (false => whole chain is an unanchored tail); anchored prefix size=${anchoredSize}, live tail size=${tailSize} (unwitnessed tail=${unwitnessedTail}); witness over the prefix STH still ok=${witnessStillOk} (the tail is invisible to it). WINDOWED + UN-WIRED BREACH.`,
-    };
-  },
-};
-
-const m5_splitViewNoCollector: Cycle3Spec = {
-  id: "mk-m5",
-  name: "Split-View With No Collector — non-repudiable equivocation nobody assembles (ATTACK)",
-  tier: "merkle-audit",
-  novelty:
-    "detectSplitView is sound (SAME_SIZE_DIFFERENT_ROOT is non-repudiable) but is a passive function NO wired path ever calls across sinks; two self-consistent lineages each witness() OK in isolation.",
-  run() {
-    const signer = generatePassport();
-    const attr = "s#t" as AttributeKey;
-    // Lineage A (honest): records 0,1,2.
-    const la = createPendingLedger();
-    for (let i = 0; i < 3; i++) la.appendPending(pendingOf(i, attr), signer);
-    const sinkA1 = new InMemoryPublicationSink();
-    const sinkA2 = new InMemoryPublicationSink();
-    const logA = createMerkleLog({ ledger: la, signer, sinks: [sinkA1, sinkA2] });
-    const sthA = logA.anchor(NOW0 as EpochMs);
-    // Lineage B (forged): records 0,2',2'' — same size 3, divergent root.
-    const lb = createPendingLedger();
-    lb.appendPending(pendingOf(0, attr), signer);
-    lb.appendPending(pendingOf(98, attr), signer);
-    lb.appendPending(pendingOf(99, attr), signer);
-    const sinkB1 = new InMemoryPublicationSink();
-    const sinkB2 = new InMemoryPublicationSink();
-    const logB = createMerkleLog({ ledger: lb, signer, sinks: [sinkB1, sinkB2] });
-    const sthB = logB.anchor(NOW0 as EpochMs);
-    // Each lineage witnesses OK against its OWN sink in isolation.
-    const aWitnessOk = logA.witness(sinkA1, (NOW0 + 1) as EpochMs).ok;
-    const bWitnessOk = logB.witness(sinkB1, (NOW0 + 1) as EpochMs).ok;
-    // The non-repudiable proof EXISTS — but only if a third party assembles both STHs.
-    const split = detectSplitView([sthA, sthB]);
-    const sameSizeDiffRoot = split.detected && split.reason === "SAME_SIZE_DIFFERENT_ROOT";
-    // No wired engine/caller assembles cross-sink STHs -> equivocation is invisible in practice.
-    const breach = aWitnessOk && bWitnessOk && sameSizeDiffRoot;
-    return {
-      outcome: breach ? "BREACHED" : "DEFENDED",
-      mechanism:
-        "Both views verify in isolation; the equivocation is invisible until/unless a cross-sink auditor is built and scheduled. The split-view primitive is SOUND (the manual detectSplitView call flags SAME_SIZE_DIFFERENT_ROOT) but no wired path produces the proof. Bonus footgun: the NON_MONOTONIC arm assumes publication order; an auditor that sorts by tree_size disables it. (Fix F-D: a scheduled cross-sink auditor over >=2 independent sinks.)",
-      evidence: `lineage A witness ok (own sink)=${aWitnessOk}; lineage B witness ok (own sink)=${bWitnessOk}; manual detectSplitView([sthA,sthB]) detected=${split.detected} reason=${split.reason}. The proof exists but NO wired caller assembles it -> unrealized detection. BREACH.`,
-    };
-  },
-};
-
-const m6_fixProbe: Cycle3Spec = {
-  id: "mk-m6",
-  name: "FIX-PROBE: anchor the right thing, externally, continuously, and compare it",
-  tier: "merkle-audit",
-  novelty:
-    "F-A external log key + genuine witness (CLOSES M2/M5), F-B auto-anchor wiring (CLOSES M4 at N=1), F-C extend the commitment to cover strand/reputation mutations (CLOSES M3), F-D scheduled cross-sink auditor (CLOSES M5).",
-  run() {
-    // Simulate F-A/F-D: with an INDEPENDENT witness holding L1's prior STH, the M2 forge is
-    // caught — the operator cannot serve a consistency proof from the held STH to a tree that
-    // omits a leaf. And a cross-sink auditor over divergent STHs flags the split.
-    const signer = generatePassport();
-    const attr = "f#x" as AttributeKey;
-    const l1 = createPendingLedger();
-    for (let i = 0; i < 3; i++) l1.appendPending(pendingOf(i, attr), signer);
-    const indepSink = new InMemoryPublicationSink(); // a GENUINELY independent witness
-    const opSink = new InMemoryPublicationSink();
-    const log = createMerkleLog({ ledger: l1, signer, sinks: [indepSink, opSink] });
-    const heldSTH = log.anchor(NOW0 as EpochMs); // the independent witness now HOLDS this STH (size 3)
-    // The operator forges a SHORTER tree (omits a leaf) and asks the witness to accept it.
-    const l2 = createPendingLedger();
-    l2.appendPending(pendingOf(0, attr), signer);
-    l2.appendPending(pendingOf(2, attr), signer);
-    const forgedLog = createMerkleLog({ ledger: l2, signer, sinks: [opSink, new InMemoryPublicationSink()] });
-    // F-A: witness the forged tree against the INDEPENDENT sink's prior STH (size 3 -> size 2 = rollback).
-    const caught = forgedLog.witness(indepSink, (NOW0 + 10) as EpochMs);
-    const m2Caught = !caught.ok && caught.reason === "ROLLBACK_OR_DELETION";
-    // F-D: cross-sink auditor flags divergent STHs of equal size.
-    const sthForged = forgedLog.signTreeHeadAt(2, (NOW0 + 11) as EpochMs);
-    const splitFlagged = detectSplitView([heldSTH, log.signTreeHead((NOW0 + 12) as EpochMs)]).detected === false; // honest sinks agree
-    const fixProbe: FixProbeVerdict = {
-      fix: "F-A external HSM log key + >=1 genuinely-independent witness; F-B auto-anchor per mutation; F-C journal strand/reputation mutations into the commitment; F-D scheduled cross-sink auditor",
-      targetAttack: "M2 forge-from-genesis / M3 hide-a-disown / M4 pre-anchor / M5 split-view",
-      breachesToday: true,
-      fixOutcome: "PARTIAL",
-      simulated: true,
-      note: `With an INDEPENDENT witness holding the prior STH (size ${heldSTH.tree_size}), the operator's forged SHORTER tree is caught: witness=${JSON.stringify(caught.reason)} (M2/M5 CLOSE for the ratification chain). F-B closes M4 only at anchor-per-mutation; F-C (journal the mutable strand/reputation rows into the commitment) is what CLOSES M3 — the headline scope hole. The crypto CORE needs no fix; the boundary needs an OPERATIONAL program (external witness + journaling), an irreducible trust-root cost like TLS/CAs.`,
-    };
-    return {
-      outcome: m2Caught ? "DEFENDED" : "BREACHED",
-      mechanism: fixProbe.note,
-      evidence: `F-A: forged shorter tree witnessed against independent prior STH(size ${heldSTH.tree_size}) -> ${JSON.stringify(caught.reason)} (M2 caught=${m2Caught}); honest sinks agree (no false split)=${splitFlagged}; forged STH size=${sthForged.tree_size}. Boundary closes with external witness + journaling (operational).`,
-      fixProbe,
-    };
-  },
-};
-
-const mkCoverage_creditLedgers: Cycle3Spec = {
-  id: "mk-coverage",
-  name: "Tamper-Evidence Coverage Boundary: credit-reversal ledgers sit OUTSIDE the Merkle/STH layer (CONFIRM+finding)",
-  tier: "merkle-audit",
-  novelty:
-    "The Merkle proof is SOUND for the pending/approval audit chain; the corroboration/adjudication-provenance/weak-influence credit ledgers are plain append-only with no prevHash chain, no Ed25519 sig, no Merkle leaf — a missed/misattributed reversal is invisible to the STH.",
-  run() {
-    const h = new Harness();
-    // Build the audit chain + STH (the layer holds, per M1).
-    const signer = generatePassport();
-    const audit = createPendingLedger();
-    audit.appendPending(pendingOf(0, "c#d" as AttributeKey), signer);
-    const sinkA = new InMemoryPublicationSink();
-    const sinkB = new InMemoryPublicationSink();
-    const log = createMerkleLog({ ledger: audit, signer, sinks: [sinkA, sinkB] });
-    const sthBefore = log.anchor(NOW0 as EpochMs);
-    // Perform a PT2/PT4-style MISSED corroboration reversal entirely in the credit ledger.
-    const a = h.addSource({ label: "A", anchors: [anchorOf(AnchorClass.DOMAIN)], indClass: "A-dom" });
-    const decoyKey = h.addSource({ label: "D", anchors: [anchorOf(AnchorClass.ORGANIZATION)], indClass: "D-org" });
-    const b = h.addSource({ label: "B", anchors: [anchorOf(AnchorClass.EMAIL_OAUTH)], indClass: "B-email" });
-    const a1 = h.write(a, "hq", "city", "V");
-    const decoy = h.write(decoyKey, "hq", "city", "V");
-    const b1 = h.write(b, "hq", "city", "V");
-    h.engine.ratify({ strandId: b1, externalStamp: h.identity.stampFor(b.sourceId) });
-    const res = h.disown(a); // misattributed -> reverses nothing on B
-    // The Merkle/STH artifacts are UNCHANGED by the credit fraud (it was never a leaf).
-    const sthAfter = log.signTreeHead((NOW0 + 5) as EpochMs);
-    const auditUnchanged = sthAfter.root === sthBefore.root && audit.verifyChain().ok;
-    const witnessOk = log.witness(sinkA, (NOW0 + 6) as EpochMs).ok;
-    // The layer HOLDS for what it covers (rollback detection still works).
-    audit.appendPending(pendingOf(1, "c#d" as AttributeKey), signer);
-    const witnessAfterAppend = log.witness(sinkA, (NOW0 + 7) as EpochMs).ok; // append is a valid extension
-    const coverageGap = res.reversedCorroborationEventIds.length === 0 && auditUnchanged && witnessOk;
-    return {
-      outcome: coverageGap ? "DEFENDED" : "BREACHED",
-      mechanism:
-        "Cryptographic SOUNDNESS (the proof holds) is distinct from COVERAGE (is the data under the proof?). The Merkle layer is sound for the human-facing ratification chain (rollback/split-view detected) but the credit-reversal substrate PT2/PT3/PT4 attack is OUTSIDE the tamper-evidence boundary: a silently-skipped or relabeled reversal leaves verifyChain + the STH unchanged. The only guard is reconcile's sum-check, which PT4 defeats. (Fix: Merkle-anchor the three credit ledgers.)",
-      evidence: `Merkle layer HOLDS: STH root unchanged by credit fraud + verifyChain ok=${auditUnchanged}, witness ok=${witnessOk}, valid-append still witnessed=${witnessAfterAppend}. COVERAGE GAP CONFIRMED: PT4 misattributed reversal reversed=${JSON.stringify(res.reversedCorroborationEventIds)} (none) yet ALL tamper-evidence reports clean. Sound detector of TAMPERING, not of a correctly-logged illegitimate credit state.`,
-    };
-  },
-};
-
-// ===========================================================================
-// FAMILY-SPECIFIC MERKLE CONFIRMs (one per design family — the layer HOLDS)
-// ===========================================================================
-
-const cc06_splitViewKeyRotation: Cycle3Spec = {
-  id: "cc-c3-06",
-  name: "Merkle Audit: Split-View Equivocation under Log-Key Rotation (CONFIRM)",
-  tier: "merkle-audit",
-  novelty:
-    "Can rotating the log signing key mid-stream launder a forked history past the witnesses? RFC-6962 consistency is over the LEAF/NODE hash structure, NOT the signing key — rotation cannot manufacture an extension proof.",
-  run() {
-    const lOld = generatePassport();
-    const lNew = generatePassport(); // the ROTATED key
-    const attr = "kr#x" as AttributeKey;
-    // Honest tree T1 (size 3) signed by L_old; an independent witness holds its STH.
-    const ledger = createPendingLedger();
-    for (let i = 0; i < 3; i++) ledger.appendPending(pendingOf(i, attr), lOld);
-    const indepSink = new InMemoryPublicationSink();
-    const opSink = new InMemoryPublicationSink();
-    const logOld = createMerkleLog({ ledger, signer: lOld, sinks: [indepSink, opSink] });
-    const heldSTH = logOld.anchor(NOW0 as EpochMs); // witness holds STH(T1, size 3)
-    // Fork T2 under the ROTATED key, omitting/reordering the inconvenient leaf (size 2).
-    const l2 = createPendingLedger();
-    l2.appendPending(pendingOf(0, attr), lNew);
-    l2.appendPending(pendingOf(2, attr), lNew);
-    const logNew = createMerkleLog({ ledger: l2, signer: lNew, sinks: [opSink, new InMemoryPublicationSink()] });
-    const t2STH = logNew.anchor((NOW0 + 1) as EpochMs);
-    // Witness T2 against the INDEPENDENT sink's prior STH(T1): DETECTED regardless of key.
-    // (The live log re-verifies the prior STH against its CURRENT key, so a rotated tree
-    // fails with PRIOR_STH_BAD_SIG; a same-key omission fails ROLLBACK_OR_DELETION — both
-    // are ok:false. The forgery never passes; the key cannot manufacture an extension.)
-    const w = logNew.witness(indepSink, (NOW0 + 2) as EpochMs);
-    const caughtRegardlessOfKey = !w.ok; // detected by any reason; the forgery does not pass
-    // Cross-compare the two STHs published under the rotated key: the divergence (a smaller
-    // tree after a larger one) is non-repudiable equivocation, key-rotation notwithstanding.
-    const split = detectSplitView([heldSTH, t2STH]);
-    const equivocationFlagged = split.detected;
-    const t2DiffersFromHeld = t2STH.root !== heldSTH.root;
-    const holds = caughtRegardlessOfKey && t2DiffersFromHeld && equivocationFlagged;
-    return {
-      outcome: holds ? "DEFENDED" : "BREACHED",
-      mechanism:
-        "RFC-6962 consistency is defined over the append-only leaf/node hash structure, not over the signing key: any prior STH a witness accepted (under L_old) that the live tree T2 cannot produce a valid consistency proof to EXTEND is reported ROLLBACK_OR_DELETION, irrespective of whether T2 is signed by L_old or L_new. The signature authenticates WHO published an STH; it does not bind history. RESIDUAL: detection is null without >=2 genuinely-independent LIVE witnesses — operational, not a Merkle break.",
-      evidence: `held STH(T1 size ${heldSTH.tree_size}, L_old); forked T2(size ${t2STH.tree_size}, ROTATED L_new) witnessed against independent prior STH -> ok=${w.ok} reason=${JSON.stringify(w.reason)} (forgery rejected regardless of key=${caughtRegardlessOfKey}); detectSplitView([T1,T2])=${split.detected} reason=${JSON.stringify(split.reason)}; T2 root != held root=${t2DiffersFromHeld}. LAYER HOLDS.`,
-    };
-  },
-};
-
-const al06_merkleUnderFlood: Cycle3Spec = {
-  id: "al-c3-06",
-  name: "RFC-6962 audit holds under adaptive mass-DEFER / split-view pressure (CONFIRM)",
-  tier: "merkle-audit",
-  novelty:
-    "Can the c3-01 mass-DEFER flood HIDE pending records, ROLL BACK a flip, or present a SPLIT VIEW? Volume changes tree SIZE (proofs stay O(log n)), not integrity.",
-  run() {
-    const signer = generatePassport();
-    const attr = "fl#x" as AttributeKey;
-    const ledger = createPendingLedger();
-    const FLOOD = 4096; // a large mass-DEFER flood of PENDING leaves
-    for (let i = 0; i < FLOOD; i++) ledger.appendPending(pendingOf(i, attr), signer);
-    const sinkA = new InMemoryPublicationSink();
-    const sinkB = new InMemoryPublicationSink();
-    const log = createMerkleLog({ ledger, signer, sinks: [sinkA, sinkB] });
-    const priorSTH = log.anchor(NOW0 as EpochMs); // witness holds STH(size FLOOD)
-    // Surgically DELETE one inconvenient leaf under the flood (rewrite the record body).
-    const recs = ledger.records();
-    (recs[1234] as { thisHash: string }).thisHash = "00".repeat(32);
-    const vc = ledger.verifyChain();
-    const deletionNamedUnderFlood = !vc.ok && vc.firstBrokenSeq === 1234;
-    // Proof size stays logarithmic in the flood.
-    const incl = log.inclusionProofAt(1000, FLOOD);
-    const proofLogarithmic = incl.path.length <= Math.ceil(Math.log2(FLOOD)) + 1;
-    const holds = deletionNamedUnderFlood && proofLogarithmic && priorSTH.tree_size === FLOOD;
-    return {
-      outcome: holds ? "DEFENDED" : "BREACHED",
-      mechanism:
-        "The mass-DEFER attack lives ABOVE the Merkle layer (it abuses the human horn's throughput, not the log's integrity). The Merkle guarantee is DETECTION-given-an-honest-published-anchor and is independent of dispute semantics: deleting any leaf breaks a consistency/inclusion proof, a rollback is an STH the live tree cannot extend, and split-view needs two same-size divergent STHs. The flood only grows the tree (proofs stay O(log n)).",
-      evidence: `flood size=${FLOOD}; byte-flip leaf 1234 -> verifyChain ok=${vc.ok} firstBrokenSeq=${vc.firstBrokenSeq} (named under flood=${deletionNamedUnderFlood}); inclusion proof path length=${incl.path.length} <= log2(${FLOOD})+1 (logarithmic=${proofLogarithmic}). LAYER HOLDS; the DoS is on the queue (al-c3-01), not the audit.`,
-    };
-  },
-};
-
-const ce06_merkleUnderClassForgery: Cycle3Spec = {
-  id: "ce-c3-06",
-  name: "Merkle Audit Under Class Forgery (CONFIRM)",
-  tier: "merkle-audit",
-  novelty:
-    "Can manufactured/forged independence classes break, rollback, or split-view the audit chain? The Merkle guarantees are ORTHOGONAL to class correctness — a forged-class adjudication is faithfully, immutably recorded and cannot be excised.",
-  run() {
-    const signer = generatePassport();
-    const attr = "cf#x" as AttributeKey;
-    const ledger = createPendingLedger();
-    // A forged-class dispute is deferred and recorded as a normal PENDING leaf.
-    for (let i = 0; i < 4; i++) ledger.appendPending(pendingOf(i, attr), signer);
-    const sinkA = new InMemoryPublicationSink();
-    const sinkB = new InMemoryPublicationSink();
-    const log = createMerkleLog({ ledger, signer, sinks: [sinkA, sinkB] });
-    const priorSTH = log.anchor(NOW0 as EpochMs);
-    // Attempt to EXCISE the leaf recording the forged-class resolution -> non-extension.
-    const recs = ledger.records();
-    (recs[2] as { thisHash: string }).thisHash = "11".repeat(32);
-    const vc = ledger.verifyChain();
-    const forgeryRecordedAndNamed = !vc.ok && vc.firstBrokenSeq === 2;
-    // Split-view of the forged history: two same-size divergent STHs are non-repudiable.
-    const sthA = log.signTreeHeadAt(4, (NOW0 + 1) as EpochMs);
-    const forged = createPendingLedger();
-    for (let i = 0; i < 4; i++) forged.appendPending(pendingOf(i + 100, attr), signer);
-    const logForged = createMerkleLog({ ledger: forged, signer, sinks: [new InMemoryPublicationSink(), new InMemoryPublicationSink()] });
-    const sthForged = logForged.signTreeHeadAt(4, (NOW0 + 1) as EpochMs);
-    const split = detectSplitView([sthA, sthForged]);
-    const splitDetected = split.detected && split.reason === "SAME_SIZE_DIFFERENT_ROOT";
-    const holds = forgeryRecordedAndNamed && splitDetected && priorSTH.tree_size === 4;
-    return {
-      outcome: holds ? "DEFENDED" : "BREACHED",
-      mechanism:
-        "The Merkle layer correctly proves WHAT WAS RECORDED AND IN WHAT ORDER; it makes no claim about whether the recorded classes are real — and it does not need to. Class forgery is fully AUDITABLE after the fact: every fraudulent resolution is permanently attributable, cannot be excised (witness non-extension), and cannot be shown divergently (split-view detection). The defense against the forged class ITSELF is fp-1/al-c3-05, not the audit.",
-      evidence: `forged-class leaf excision -> verifyChain ok=${vc.ok} firstBrokenSeq=${vc.firstBrokenSeq} (recorded+named=${forgeryRecordedAndNamed}); split-view over divergent same-size STHs detected=${split.detected} reason=${split.reason}. LAYER HOLDS (auditable, not preventable).`,
-    };
-  },
-};
-
-const fp6_historyRewriteConfirm: Cycle3Spec = {
-  id: "fp-6",
-  name: "FIX-PROBE/CONFIRM: RFC-6962 tamper-evidence holds vs rollback / deletion / split-view",
-  tier: "merkle-audit",
-  novelty:
-    "Attack the EVIDENCE, not the scoring: byte-flip a record, truncate/rollback the tree, or sign two divergent STHs. The shipped layer detects all three GIVEN honest publication to >=2 independent sinks.",
-  run() {
-    const { ledger, signer, log, sinkA } = buildMerkle(8);
-    const priorSTH = log.anchor(NOW0 as EpochMs); // sinkA now holds the SAME-key STH(size 8)
-    // (a) byte-flip a persisted record -> verifyChain names the first broken seq.
-    const recs = ledger.records();
-    (recs[5] as { thisHash: string }).thisHash = "ab".repeat(32);
-    const vc = ledger.verifyChain();
-    const byteFlipNamed = !vc.ok && vc.firstBrokenSeq === 5;
-    // (b) rollback: a SMALLER tree under the SAME signer, witnessed against the held STH(8).
-    const small = createPendingLedger();
-    small.appendPending(pendingOf(0, "z#z" as AttributeKey), signer);
-    const smallLog = createMerkleLog({ ledger: small, signer, sinks: [sinkA, new InMemoryPublicationSink()] });
-    const w = smallLog.witness(sinkA, (NOW0 + 3) as EpochMs);
-    const rollbackCaught = !w.ok && w.reason === "ROLLBACK_OR_DELETION";
-    // (c) split-view: two same-size STHs over different roots.
-    const sthA = log.signTreeHeadAt(8, (NOW0 + 4) as EpochMs);
-    const other = buildMerkle(8);
-    const sthOther = other.log.signTreeHeadAt(8, (NOW0 + 4) as EpochMs);
-    const split = detectSplitView([sthA, sthOther]).detected;
-    const holds = byteFlipNamed && rollbackCaught && split && priorSTH.tree_size === 8;
-    const fixProbe: FixProbeVerdict = {
-      fix: "(audit) RFC-6962 Merkle tamper-evidence — confirm-only; the single precondition is honest publication to >=2 INDEPENDENT witness sinks",
-      targetAttack: "History-Rewrite / Split-View equivocation on the signed audit chain",
-      breachesToday: false,
-      fixOutcome: "CLOSES",
-      simulated: true,
-      note: `No code change needed — the layer HOLDS: byte-flip named at seq=${vc.firstBrokenSeq} (${byteFlipNamed}); rollback witnessed -> ${JSON.stringify(w.reason)} (${rollbackCaught}); split-view detected=${split}. createMerkleLog already rejects <2 sinks. The ONLY residual is OPERATIONAL (already in the GAP LIST): the guarantee is null without live, genuinely-independent third-party witness logs — a deployment requirement, not a math gap.`,
-    };
-    return {
-      outcome: holds ? "DEFENDED" : "BREACHED",
-      mechanism: fixProbe.note,
-      evidence: `byte-flip seq5 named=${byteFlipNamed} (firstBrokenSeq=${vc.firstBrokenSeq}); rollback caught=${rollbackCaught} (${JSON.stringify(w.reason)}); split-view detected=${split}. CONFIRMED HOLDS (detection given an honest published anchor to >=2 independent witnesses).`,
-      fixProbe,
-    };
-  },
-};
 
 // ===========================================================================
 // THE CYCLE-3 SUITE
@@ -1782,42 +1323,30 @@ export const CYCLE3_SPECS: readonly Cycle3Spec[] = [
   cc03_transientBondHarvest,
   cc04_multiHopClawbackFix,
   cc05_bridgeIdentityGateFix,
-  cc06_splitViewKeyRotation,
   // adaptive-lcb
   al01_straddleDeferDoS,
   al02_amortizedGlobalFlip,
   al03_dormancyDecayWindow,
   al04_incumbencyMarginFix,
   al05_attrScopedRootsFix,
-  al06_merkleUnderFlood,
   // class-assignment-e2e
   ce01_registrarCarousel,
   ce02_subdomainSeam,
   ce03_nullSourceLaundromat,
   ce04_pslFix,
   ce05_rootsOperatorGraphFix,
-  ce06_merkleUnderClassForgery,
   // fix-probes (adjudication gate)
   fp1_rootsNotClasses,
   fp2_universalCorrobFloor,
   fp3_perAttributeReputation,
   fp4_deferAll1v1,
   fp5_bridgeIdentityGate,
-  fp6_historyRewriteConfirm,
   // provenance-tipping
   pt1_contributorPadding,
   pt2_taintedClosureGap,
   pt3_multiHopLaundering,
   pt4_misattributedCorroborator,
   pt5_weaponizedReopen,
-  // merkle-audit
-  m1_coreHolds,
-  m2_keyholderForge,
-  m3_hideADisown,
-  m4_preAnchorWindow,
-  m5_splitViewNoCollector,
-  m6_fixProbe,
-  mkCoverage_creditLedgers,
 ];
 
 /** Adapt a Cycle3Spec to the cycle-1/2 Attack shape (for any shared runner). */

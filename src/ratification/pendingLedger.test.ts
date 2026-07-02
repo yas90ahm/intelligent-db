@@ -3,28 +3,29 @@
  *
  * Backs the PendingRatification horn (CLAUDE.md). The invariants pinned here:
  *
- *  1. APPEND + CHAIN + SIGN: a PENDING then an APPROVAL verifyChain().ok === true.
+ *  1. APPEND + CHAIN: a PENDING then an APPROVAL verifyChain().ok === true.
  *  2. TAMPER DETECTION: flip a byte in record k => ok === false, firstBrokenSeq === k
- *     (across payload, prevHash, sig, and signerSourceId tampering).
+ *     (across payload, thisHash, prevHash, and signerSourceId tampering).
  *  3. NO AUTO-RESOLVE: a DEFERRED multi-class dispute leaves every member LIVE;
  *     adjudicate records a PENDING but demotes nothing. Only approve() resolves.
  *  4. SELF-APPROVAL REJECTED: an approver who authored a member => approve throws,
  *     and NO APPROVAL record is appended (the second-admin / distinct gate).
  *  5. APPROVAL OUTCOME: winner stays LIVE; losers DEMOTED + outranked_by set (never
- *     deleted); reputation moves (winner up / losers down); a signed APPROVAL is
+ *     deleted); reputation moves (winner up / losers down); an APPROVAL record is
  *     present and the chain still verifies.
- *  6. FORGED SIGNATURE REJECTED: a record whose signer key is unknown to the ledger
- *     (or whose sig is replaced by another key's) => verifyChain false at that seq.
+ *  6. ATTRIBUTION IS COMMITTED: `signerSourceId` is ASSERTED attribution, but it is
+ *     inside the checksum preimage — rewriting WHO authored a record at rest breaks
+ *     the chain at that seq (silent re-attribution is detectable).
  *
  * Most paths run through the public barrel; a couple reach into the records()
  * array to perform the byte-flip the "money artifact" exists to catch.
  */
 
 import { describe, it, expect } from "vitest";
+import { freshSource } from "../testSupport/identityFixtures.js";
 
 import {
   createPendingLedger,
-  generatePassport,
   createReputationLedger,
   asEpochMs,
   asStrandId,
@@ -126,10 +127,10 @@ function ctxOver(byId: Map<StrandId, Strand>): ApproveContext {
   };
 }
 
-describe("VAULT — append-only, hash-chained, Ed25519-signed ledger", () => {
+describe("VAULT — append-only, hash-chained ledger (tamper-evident checksum chain)", () => {
   it("INVARIANT 1: a PENDING then an APPROVAL verifies (ok=true)", () => {
-    const sys = generatePassport();
-    const approver = generatePassport();
+    const sys = freshSource();
+    const approver = freshSource();
     const ledger = createPendingLedger();
 
     const a = asStrandId("strand:a");
@@ -139,10 +140,10 @@ describe("VAULT — append-only, hash-chained, Ed25519-signed ledger", () => {
       [b, memberStrand("strand:b", "src:b" as SourceId, { v: "Atlantis" })],
     ]);
 
-    ledger.appendPending(pendingOf([a, b]), sys);
+    ledger.appendPending(pendingOf([a, b]), sys.sourceId);
     expect(ledger.verifyChain()).toEqual({ ok: true, firstBrokenSeq: null });
 
-    ledger.approve(CSID, a, approver, NOW, ctxOver(byId));
+    ledger.approve(CSID, a, approver.sourceId, NOW, ctxOver(byId));
     expect(ledger.verifyChain()).toEqual({ ok: true, firstBrokenSeq: null });
 
     // Two records: PENDING (seq 0) then APPROVAL (seq 1), chained.
@@ -152,15 +153,15 @@ describe("VAULT — append-only, hash-chained, Ed25519-signed ledger", () => {
   });
 
   it("INVARIANT 2a: flipping a PAYLOAD byte breaks the chain at that seq", () => {
-    const sys = generatePassport();
+    const sys = freshSource();
     const ledger = createPendingLedger();
     const a = asStrandId("strand:a");
     const b = asStrandId("strand:b");
-    ledger.appendPending(pendingOf([a, b]), sys);
+    ledger.appendPending(pendingOf([a, b]), sys.sourceId);
     // Append a second pending so the break is at seq 0 with a downstream record too.
     ledger.appendPending(
       { ...pendingOf([a, b]), contradictionSetId: "cset:other" as ContradictionSetId },
-      sys,
+      sys.sourceId,
     );
 
     expect(ledger.verifyChain().ok).toBe(true);
@@ -174,19 +175,19 @@ describe("VAULT — append-only, hash-chained, Ed25519-signed ledger", () => {
     expect(v.firstBrokenSeq).toBe(0);
   });
 
-  it("INVARIANT 2b: flipping a SIG byte breaks the chain at that seq", () => {
-    const sys = generatePassport();
+  it("INVARIANT 2b: flipping a THISHASH byte breaks the chain at that seq", () => {
+    const sys = freshSource();
     const ledger = createPendingLedger();
     const a = asStrandId("strand:a");
-    ledger.appendPending(pendingOf([a]), sys);
+    ledger.appendPending(pendingOf([a]), sys.sourceId);
     ledger.appendPending(
       { ...pendingOf([a]), contradictionSetId: "cset:two" as ContradictionSetId },
-      sys,
+      sys.sourceId,
     );
 
-    // Corrupt record 1's signature (flip first base64url char to a different one).
-    const rec1 = ledger.records()[1]! as { sig: string };
-    rec1.sig = (rec1.sig[0] === "A" ? "B" : "A") + rec1.sig.slice(1);
+    // Corrupt record 1's stored checksum (flip the first hex char to a different one).
+    const rec1 = ledger.records()[1]! as { thisHash: string };
+    rec1.thisHash = (rec1.thisHash[0] === "0" ? "1" : "0") + rec1.thisHash.slice(1);
 
     const v = ledger.verifyChain();
     expect(v.ok).toBe(false);
@@ -194,13 +195,13 @@ describe("VAULT — append-only, hash-chained, Ed25519-signed ledger", () => {
   });
 
   it("INVARIANT 2c: flipping prevHash (re-linking) breaks the chain", () => {
-    const sys = generatePassport();
+    const sys = freshSource();
     const ledger = createPendingLedger();
     const a = asStrandId("strand:a");
-    ledger.appendPending(pendingOf([a]), sys);
+    ledger.appendPending(pendingOf([a]), sys.sourceId);
     ledger.appendPending(
       { ...pendingOf([a]), contradictionSetId: "cset:two" as ContradictionSetId },
-      sys,
+      sys.sourceId,
     );
 
     const rec1 = ledger.records()[1]! as { prevHash: string };
@@ -211,13 +212,14 @@ describe("VAULT — append-only, hash-chained, Ed25519-signed ledger", () => {
     expect(v.firstBrokenSeq).toBe(1);
   });
 
-  it("INVARIANT 6: a record claiming an UNKNOWN signer is rejected (no provenance)", () => {
-    const sys = generatePassport();
+  it("INVARIANT 6: rewriting a record's ASSERTED attribution (signerSourceId) breaks the chain at that seq", () => {
+    const sys = freshSource();
     const ledger = createPendingLedger();
     const a = asStrandId("strand:a");
-    ledger.appendPending(pendingOf([a]), sys);
+    ledger.appendPending(pendingOf([a]), sys.sourceId);
 
-    // Rewrite the signerSourceId to a source the ledger never registered a key for.
+    // Re-attribute the record to a different source AT REST: the signerSourceId is
+    // part of the checksum preimage, so silent re-attribution is a detectable tamper.
     const rec0 = ledger.records()[0]! as { signerSourceId: SourceId };
     rec0.signerSourceId = "src:ghost" as SourceId;
 
@@ -231,8 +233,8 @@ describe("DOORBELL — second-admin PENDING -> approve flow", () => {
   it("INVARIANT 4: self-approval (approver authored a member) is REJECTED, no APPROVAL appended", () => {
     // The approver IS the author of member a. The distinct-approver gate must throw,
     // and the chain must still hold exactly the one PENDING record.
-    const approver = generatePassport();
-    const sys = generatePassport();
+    const approver = freshSource();
+    const sys = freshSource();
     const ledger = createPendingLedger();
 
     const a = asStrandId("strand:a");
@@ -243,8 +245,8 @@ describe("DOORBELL — second-admin PENDING -> approve flow", () => {
       [b, memberStrand("strand:b", "src:b" as SourceId, { v: "Atlantis" })],
     ]);
 
-    ledger.appendPending(pendingOf([a, b]), sys);
-    expect(() => ledger.approve(CSID, b, approver, NOW, ctxOver(byId))).toThrow(
+    ledger.appendPending(pendingOf([a, b]), sys.sourceId);
+    expect(() => ledger.approve(CSID, b, approver.sourceId, NOW, ctxOver(byId))).toThrow(
       /self-approval/i,
     );
 
@@ -254,8 +256,8 @@ describe("DOORBELL — second-admin PENDING -> approve flow", () => {
   });
 
   it("INVARIANT 5: an external approval demotes losers, keeps winner LIVE, moves reputation", () => {
-    const sys = generatePassport();
-    const approver = generatePassport(); // distinct from src:a / src:b
+    const sys = freshSource();
+    const approver = freshSource(); // distinct from src:a / src:b
     // A reputation ledger with a generous cap so ratify/contradict visibly move.
     const reputation = createReputationLedger(() => 0.9, undefined, () => NOW);
     const ledger = createPendingLedger({ reputation });
@@ -276,9 +278,9 @@ describe("DOORBELL — second-admin PENDING -> approve flow", () => {
     expect(reputation.scoreOf(srcA)).toBe(0);
     expect(reputation.scoreOf(srcB)).toBe(0);
 
-    ledger.appendPending(pendingOf([a, b]), sys);
+    ledger.appendPending(pendingOf([a, b]), sys.sourceId);
 
-    const resolved = ledger.approve(CSID, a, approver, NOW, ctxOver(byId));
+    const resolved = ledger.approve(CSID, a, approver.sourceId, NOW, ctxOver(byId));
 
     // Winner a stays LIVE; loser b DEMOTED + outranked_by set (never deleted).
     expect(resolved.winner).toBe(a);
@@ -293,7 +295,7 @@ describe("DOORBELL — second-admin PENDING -> approve flow", () => {
     expect(reputation.scoreOf(srcA)).toBeGreaterThan(0);
     expect(reputation.stateOf(srcB)?.contradictedCount).toBe(1);
 
-    // A signed APPROVAL receipt is present and the whole chain verifies.
+    // An APPROVAL receipt is present and the whole chain verifies.
     const recs = ledger.records();
     expect(recs.map((r) => r.kind)).toEqual(["PENDING", "APPROVAL"]);
     expect((recs[1]!.payload as ApprovalPayload).winner).toBe(a);
@@ -305,8 +307,8 @@ describe("DOORBELL — second-admin PENDING -> approve flow", () => {
   });
 
   it("rejects approving a non-member winner and a double-approve", () => {
-    const sys = generatePassport();
-    const approver = generatePassport();
+    const sys = freshSource();
+    const approver = freshSource();
     const ledger = createPendingLedger();
     const a = asStrandId("strand:a");
     const b = asStrandId("strand:b");
@@ -314,26 +316,26 @@ describe("DOORBELL — second-admin PENDING -> approve flow", () => {
       [a, memberStrand("strand:a", "src:a" as SourceId, { v: "A" })],
       [b, memberStrand("strand:b", "src:b" as SourceId, { v: "B" })],
     ]);
-    ledger.appendPending(pendingOf([a, b]), sys);
+    ledger.appendPending(pendingOf([a, b]), sys.sourceId);
 
     // Non-member winner.
     expect(() =>
-      ledger.approve(CSID, asStrandId("strand:ghost"), approver, NOW, ctxOver(byId)),
+      ledger.approve(CSID, asStrandId("strand:ghost"), approver.sourceId, NOW, ctxOver(byId)),
     ).toThrow(/not a member/i);
 
     // First valid approve resolves; a second must throw (already resolved).
-    ledger.approve(CSID, a, approver, NOW, ctxOver(byId));
-    expect(() => ledger.approve(CSID, a, approver, NOW, ctxOver(byId))).toThrow(
+    ledger.approve(CSID, a, approver.sourceId, NOW, ctxOver(byId));
+    expect(() => ledger.approve(CSID, a, approver.sourceId, NOW, ctxOver(byId))).toThrow(
       /no open dispute/i,
     );
   });
 
   it("CONTENT-BLINDNESS: a content-blind ledger records a contentHash, not bodies, and still verifies", () => {
-    const sys = generatePassport();
+    const sys = freshSource();
     const ledger = createPendingLedger({ contentBlind: true });
     const a = asStrandId("strand:a");
     const b = asStrandId("strand:b");
-    ledger.appendPending(pendingOf([a, b]), sys);
+    ledger.appendPending(pendingOf([a, b]), sys.sourceId);
 
     const p = ledger.records()[0]!.payload as PendingPayload;
     expect(p.contentHash).toBeDefined();

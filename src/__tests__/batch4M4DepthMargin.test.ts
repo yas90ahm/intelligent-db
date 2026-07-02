@@ -15,6 +15,7 @@
  */
 
 import { describe, it, expect } from "vitest";
+import { freshSource } from "../testSupport/identityFixtures.js";
 
 import {
   createIntelligentDb,
@@ -22,8 +23,6 @@ import {
   createPendingLedger,
   createReputationLedger,
   createSourceIdentityLayer,
-  createStakeLedger,
-  generatePassport,
   independenceBetween,
   AnchorClass,
   FactOrigin,
@@ -40,8 +39,8 @@ import type {
   ContentHash,
   EntityId,
   IntelligentDb,
-  KeyRegistryPort,
-  Passport,
+  SourceRegistryPort,
+  SourceRef,
   PendingLedger,
   ProvenanceRoot,
   RatificationDeps,
@@ -57,10 +56,10 @@ const NOW = asEpochMs(1_700_000_000_000);
 const ENTITY = "entity:berlin" as EntityId;
 const ATTR = "berlin#capital_of" as AttributeKey;
 
-function makeKeyRegistry(): KeyRegistryPort {
+function makeSourceRegistry(): SourceRegistryPort {
   const known = new Set<SourceId>();
   return {
-    register(p: Passport): void {
+    register(p: SourceRef): void {
       known.add(p.sourceId);
     },
     sourceIdOf(s: SourceId): SourceId | null {
@@ -118,17 +117,17 @@ function makeEngine(): {
 } {
   const store = createMemoryStore();
   const reputation = createReputationLedger(() => 0.9 as Unit, undefined, () => NOW);
-  const stake = createStakeLedger();
-  const stakePort: StakeLedgerPort = { postedFor: (s) => stake.posted(s) };
+  // Staking is RETIRED (attribution replaces stake): a constant-zero port.
+  const stakePort: StakeLedgerPort = { postedFor: () => 0 };
   const repPort: ReputationLedgerPort = { scoreOf: (s) => reputation.scoreOf(s) };
   const identity = createSourceIdentityLayer({
-    keys: makeKeyRegistry(),
+    sources: makeSourceRegistry(),
     anchors: makeAnchorRegistry(),
     reputation: repPort,
     stake: stakePort,
   });
   const ledger = createPendingLedger({ reputation });
-  const ratification: RatificationDeps = { ledger, systemSigner: generatePassport() };
+  const ratification: RatificationDeps = { ledger, systemSource: freshSource().sourceId };
   const db = createIntelligentDb(store, identity, null, reputation, ratification);
   return { store, identity, reputation, ledger, db };
 }
@@ -179,12 +178,12 @@ describe("BATCH 4 (a) — M4: equal-depth winner vs runner-up DEFERS (not strict
   it("two depth-2 claims with a decisive earned reputation gap still DEFER on the depth-margin", () => {
     const eng = makeEngine();
     // Berlin (incumbent value): two anchor-disjoint actors ⇒ depth 2.
-    eng.identity.register({ ...generatePassport(), sourceId: W1 } as Passport, [bindingOf(AnchorClass.DOMAIN, 0.35)]);
-    eng.identity.register({ ...generatePassport(), sourceId: W2 } as Passport, [bindingOf(AnchorClass.PHONE_SIM, 0.2)]);
+    eng.identity.register({ ...freshSource(), sourceId: W1 } as SourceRef, [bindingOf(AnchorClass.DOMAIN, 0.35)]);
+    eng.identity.register({ ...freshSource(), sourceId: W2 } as SourceRef, [bindingOf(AnchorClass.PHONE_SIM, 0.2)]);
     // Tokyo (challenger value): two anchor-disjoint actors ⇒ depth 2 — and the HIGHER
     // reputation (the magnitude-only lever M4 must NOT honor over equal depth).
-    eng.identity.register({ ...generatePassport(), sourceId: C1 } as Passport, [bindingOf(AnchorClass.HARDWARE_ATTESTATION, 0.45)]);
-    eng.identity.register({ ...generatePassport(), sourceId: C2 } as Passport, [bindingOf(AnchorClass.VERIFIED_HUMAN, 0.7)]);
+    eng.identity.register({ ...freshSource(), sourceId: C1 } as SourceRef, [bindingOf(AnchorClass.HARDWARE_ATTESTATION, 0.45)]);
+    eng.identity.register({ ...freshSource(), sourceId: C2 } as SourceRef, [bindingOf(AnchorClass.VERIFIED_HUMAN, 0.7)]);
     // Earn ONLY the PRIMARY challenger source a decisive, earned reputation (the
     // co-asserter stays rep-0 so the top-vs-runner DECISIVE gap is real and the dispute
     // WOULD auto-resolve pre-M4 — isolating the depth-margin as the SOLE defer cause).
@@ -208,12 +207,12 @@ describe("BATCH 4 (b) — M4 GUARD: a strictly DEEPER true challenger RESOLVES (
   it("a depth-3 challenger with decisive reputation overturns a depth-2 incumbent", () => {
     const eng = makeEngine();
     // Tokyo (deeper challenger value): THREE anchor-disjoint actors ⇒ depth 3.
-    eng.identity.register({ ...generatePassport(), sourceId: C1 } as Passport, [bindingOf(AnchorClass.HARDWARE_ATTESTATION, 0.45)]);
-    eng.identity.register({ ...generatePassport(), sourceId: C2 } as Passport, [bindingOf(AnchorClass.VERIFIED_HUMAN, 0.7)]);
-    eng.identity.register({ ...generatePassport(), sourceId: W3 } as Passport, [bindingOf(AnchorClass.DOMAIN, 0.35)]);
+    eng.identity.register({ ...freshSource(), sourceId: C1 } as SourceRef, [bindingOf(AnchorClass.HARDWARE_ATTESTATION, 0.45)]);
+    eng.identity.register({ ...freshSource(), sourceId: C2 } as SourceRef, [bindingOf(AnchorClass.VERIFIED_HUMAN, 0.7)]);
+    eng.identity.register({ ...freshSource(), sourceId: W3 } as SourceRef, [bindingOf(AnchorClass.DOMAIN, 0.35)]);
     // Berlin (shallow incumbent value): two anchor-disjoint actors ⇒ depth 2.
-    eng.identity.register({ ...generatePassport(), sourceId: W1 } as Passport, [bindingOf(AnchorClass.PHONE_SIM, 0.2)]);
-    eng.identity.register({ ...generatePassport(), sourceId: W2 } as Passport, [bindingOf(AnchorClass.ORGANIZATION, 0.75)]);
+    eng.identity.register({ ...freshSource(), sourceId: W1 } as SourceRef, [bindingOf(AnchorClass.PHONE_SIM, 0.2)]);
+    eng.identity.register({ ...freshSource(), sourceId: W2 } as SourceRef, [bindingOf(AnchorClass.ORGANIZATION, 0.75)]);
     // Only the PRIMARY challenger source earns the decisive reputation (the depth-3
     // comes from DISJOINT ANCHORS, not reputation — depth is anchor-keyed, not magnitude).
     for (let i = 0; i < 8; i++) eng.reputation.ratify(C1, NOW, 1);
@@ -249,8 +248,8 @@ describe("BATCH 4 — M3 anti-grief: per-source-pair scar rate-limit (single-cla
     // One independence class (echo dispute, the SAFE in-graph path): a high-rep winner
     // outranks a rep-0 loser by EXTERNAL signal — losers are demoted + their source
     // contradicted. The FIRST adjudicated contradiction SCARS; a stacked re-run does NOT.
-    eng.identity.register({ ...generatePassport(), sourceId: W1 } as Passport, [bindingOf(AnchorClass.DOMAIN, 0.35)]);
-    eng.identity.register({ ...generatePassport(), sourceId: C1 } as Passport, [bindingOf(AnchorClass.DOMAIN, 0.35)]);
+    eng.identity.register({ ...freshSource(), sourceId: W1 } as SourceRef, [bindingOf(AnchorClass.DOMAIN, 0.35)]);
+    eng.identity.register({ ...freshSource(), sourceId: C1 } as SourceRef, [bindingOf(AnchorClass.DOMAIN, 0.35)]);
     for (let i = 0; i < 8; i++) eng.reputation.ratify(W1, NOW, 1); // the winner earns trust
 
     fileStrand(eng.store, "strand:win", "Berlin", [rootOf("win", SAME, W1)]);

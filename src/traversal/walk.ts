@@ -47,6 +47,7 @@
 
 import {
   EdgeType,
+  ReasonCode,
   asEpochMs,
   type Activation,
   type Edge,
@@ -243,6 +244,17 @@ export interface WalkResult {
   readonly lit: LitStrand[];
   /** The halt stamp explaining how/why the traversal stopped. */
   readonly halt: HaltStamp;
+  /**
+   * Seed ids that did NOT resolve in the store (dangling cue entry points),
+   * in seed order. ALWAYS present (empty when every seed resolved): a caller
+   * must be able to tell "the cue touched the web" from "my ids were stale"
+   * without inspecting optionality. When NO seed resolves (and at least one was
+   * supplied) the walk returns {@link import('../core/types.js').ReasonCode.NO_SEEDS_RESOLVED}
+   * with `degraded: true` instead of running a vacuous bridge sweep.
+   */
+  readonly unresolvedSeeds: readonly StrandId[];
+  /** How many supplied seeds resolved in the store. ALWAYS present. */
+  readonly seedsResolved: number;
 }
 
 // ===========================================================================
@@ -426,14 +438,46 @@ export function activationWalk(
   };
 
   // 1) SEED. Energize each resolvable seed strand and push it onto the frontier.
+  //    Unresolvable ids are COLLECTED, never silently dropped: an all-dangling cue
+  //    must return an honest NO_SEEDS_RESOLVED stamp (below), not a healthy-looking
+  //    empty answer.
+  const unresolvedSeeds: StrandId[] = [];
+  let seedsResolved = 0;
   for (const seed of seeds) {
     const s = store.getStrand(seed.strandId);
-    if (s === null) continue;
+    if (s === null) {
+      unresolvedSeeds.push(seed.strandId);
+      continue;
+    }
+    seedsResolved += 1;
     frontier.push({
       strandId: seed.strandId,
       energy: seed.energy,
       orderingKey: orderingKeyFor(s),
     });
+  }
+
+  // HONEST HALT for a cue that never touched the web: seeds were supplied but NONE
+  // resolved. Running on would execute the pop loop zero times and then drive the
+  // bridge sweep against a FABRICATED context, returning BRIDGE_SWEEP_CLEAR /
+  // popCount 0 / degraded false — indistinguishable from a genuine healthy empty
+  // answer (a silent stop wearing a success stamp, which halting's "never a silent
+  // stop" contract forbids). So: skip the pop loop AND the sweep entirely and stamp
+  // NO_SEEDS_RESOLVED, degraded. The seeds.length === 0 path is DIFFERENT — an
+  // empty cue is the caller's legitimate no-op — and is deliberately unchanged.
+  if (seedsResolved === 0 && seeds.length > 0) {
+    return {
+      lit: [],
+      halt: {
+        reason: ReasonCode.NO_SEEDS_RESOLVED,
+        popCount: 0,
+        bridgesCrossed: 0,
+        bridgeSeedsDownweighted: 0,
+        degraded: true,
+      },
+      unresolvedSeeds,
+      seedsResolved: 0,
+    };
   }
 
   // 2) EXPAND. Best-first pop loop; EVERY stop decision is delegated to `halting`.
@@ -591,7 +635,7 @@ export function activationWalk(
   const halt: HaltStamp = halting.finalStamp();
   const lit: LitStrand[] = [];
   for (const [strandId, activation] of litMap) lit.push({ strandId, activation });
-  return { lit, halt };
+  return { lit, halt, unresolvedSeeds, seedsResolved };
 }
 
 /**

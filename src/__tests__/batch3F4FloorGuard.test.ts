@@ -19,6 +19,7 @@
  */
 
 import { describe, it, expect } from "vitest";
+import { freshSource } from "../testSupport/identityFixtures.js";
 
 import {
   createIntelligentDb,
@@ -26,8 +27,6 @@ import {
   createPendingLedger,
   createReputationLedger,
   createSourceIdentityLayer,
-  createStakeLedger,
-  generatePassport,
   independenceBetween,
   AnchorClass,
   FactOrigin,
@@ -44,8 +43,8 @@ import type {
   ContentHash,
   EntityId,
   IntelligentDb,
-  KeyRegistryPort,
-  Passport,
+  SourceRegistryPort,
+  SourceRef,
   PendingLedger,
   ProvenanceRoot,
   RatificationDeps,
@@ -67,10 +66,10 @@ const CHAL = "src:chal" as SourceId;
 
 // --- minimal pillar ports (mirrors batch3F4HornRateLimit.test.ts) -----------
 
-function makeKeyRegistry(): KeyRegistryPort {
+function makeSourceRegistry(): SourceRegistryPort {
   const known = new Set<SourceId>();
   return {
-    register(p: Passport): void {
+    register(p: SourceRef): void {
       known.add(p.sourceId);
     },
     sourceIdOf(s: SourceId): SourceId | null {
@@ -133,17 +132,17 @@ function makeEngine(): {
   const store = createMemoryStore();
   // FIXED clock — decay-on-read is Δt = 0 (per the known flaky-helper guidance).
   const reputation = createReputationLedger(() => 0.9 as Unit, undefined, () => NOW);
-  const stake = createStakeLedger();
-  const stakePort: StakeLedgerPort = { postedFor: (s) => stake.posted(s) };
+  // Staking is RETIRED (attribution replaces stake): a constant-zero port.
+  const stakePort: StakeLedgerPort = { postedFor: () => 0 };
   const repPort: ReputationLedgerPort = { scoreOf: (s) => reputation.scoreOf(s) };
   const identity = createSourceIdentityLayer({
-    keys: makeKeyRegistry(),
+    sources: makeSourceRegistry(),
     anchors: makeAnchorRegistry(),
     reputation: repPort,
     stake: stakePort,
   });
   const ledger = createPendingLedger({ reputation });
-  const ratification: RatificationDeps = { ledger, systemSigner: generatePassport() };
+  const ratification: RatificationDeps = { ledger, systemSource: freshSource().sourceId };
   const db = createIntelligentDb(store, identity, null, reputation, ratification);
   return { store, identity, reputation, ledger, db };
 }
@@ -189,10 +188,10 @@ function fileStrand(
 describe("BATCH 3 (a) — F4a: single-source #R=1 multi-class DEFERS unconditionally", () => {
   it("a lone high-rep source vs a fresh challenger DEFERS for highImpact ∈ {false, true}", () => {
     const eng = makeEngine();
-    eng.identity.register({ ...generatePassport(), sourceId: WINNER } as Passport, [
+    eng.identity.register({ ...freshSource(), sourceId: WINNER } as SourceRef, [
       bindingOf(AnchorClass.DOMAIN, 0.35),
     ]);
-    eng.identity.register({ ...generatePassport(), sourceId: CHAL } as Passport, []);
+    eng.identity.register({ ...freshSource(), sourceId: CHAL } as SourceRef, []);
     // Earn the winner a DECISIVE, EARNED reputation so it WOULD auto-resolve pre-F4a —
     // isolating the >= 2-root floor as the SOLE cause of the defer.
     for (let i = 0; i < 6; i++) eng.reputation.ratify(WINNER, NOW, 1);
@@ -217,13 +216,13 @@ describe("BATCH 3 (a) — F4a: single-source #R=1 multi-class DEFERS uncondition
 describe("BATCH 3 (b) — §5.1 false-defer guard: >= 2 anchor-disjoint roots RESOLVES", () => {
   it("a winning value co-asserted by two genuinely anchor-disjoint roots is NOT over-deferred", () => {
     const eng = makeEngine();
-    eng.identity.register({ ...generatePassport(), sourceId: WINNER } as Passport, [
+    eng.identity.register({ ...freshSource(), sourceId: WINNER } as SourceRef, [
       bindingOf(AnchorClass.DOMAIN, 0.35),
     ]);
-    eng.identity.register({ ...generatePassport(), sourceId: CORROB } as Passport, [
+    eng.identity.register({ ...freshSource(), sourceId: CORROB } as SourceRef, [
       bindingOf(AnchorClass.PHONE_SIM, 0.2),
     ]);
-    eng.identity.register({ ...generatePassport(), sourceId: CHAL } as Passport, []);
+    eng.identity.register({ ...freshSource(), sourceId: CHAL } as SourceRef, []);
     for (let i = 0; i < 6; i++) eng.reputation.ratify(WINNER, NOW, 1);
 
     fileStrand(eng.store, "strand:win", "Berlin", [rootOf("win", "class:win", WINNER)]);
@@ -251,8 +250,8 @@ describe("BATCH 3 (c) — OD-2 §5.2: one source flooding N attributes collapses
     const eng = makeEngine();
     // Two FRESH (rep-0) sources — every dispute DEFERS at the F4a floor (each side is a
     // lone root, #R = 1), so each adjudicate would flood the horn UNBOUNDED without OD-2.
-    eng.identity.register({ ...generatePassport(), sourceId: WINNER } as Passport, []);
-    eng.identity.register({ ...generatePassport(), sourceId: CHAL } as Passport, []);
+    eng.identity.register({ ...freshSource(), sourceId: WINNER } as SourceRef, []);
+    eng.identity.register({ ...freshSource(), sourceId: CHAL } as SourceRef, []);
 
     const N = 80;
     for (let i = 0; i < N; i++) {
@@ -276,7 +275,7 @@ describe("BATCH 3 (c) — OD-2 §5.2: one source flooding N attributes collapses
 describe("BATCH 3 (d) — fp-4 scope: single-class echo resolves by tiebreak, never deferred", () => {
   it("a same-class flood (R=1 by construction) RESOLVES in-graph and is NOT a DEFER-DoS", () => {
     const eng = makeEngine();
-    eng.identity.register({ ...generatePassport(), sourceId: WINNER } as Passport, []);
+    eng.identity.register({ ...freshSource(), sourceId: WINNER } as SourceRef, []);
     // Three same-class echoes (one shared independence class), one value disagreeing — the
     // exact contradiction-bomb flood shape. The single-class path is the SAFE mechanical
     // tidy-up: with no external-signal winner the deterministic id tiebreak picks a survivor

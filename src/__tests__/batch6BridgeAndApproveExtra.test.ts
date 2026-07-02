@@ -19,13 +19,13 @@
  */
 
 import { describe, it, expect } from "vitest";
+import { freshSource } from "../testSupport/identityFixtures.js";
 
 import {
   createHaltingController,
   DEFAULT_WALK_CONFIG,
   createPendingLedger,
   createReputationLedger,
-  generatePassport,
   FactState,
   FactOrigin,
   Tier,
@@ -266,17 +266,17 @@ describe("RC-5 — approver independent of ONE author but CORRELATED with ANOTHE
 
   it("is REJECTED, naming the correlated author (the 'EVERY author' invariant)", () => {
     const { byId, a, b } = setup();
-    const sys = generatePassport();
-    const approver = generatePassport();
+    const sys = freshSource();
+    const approver = freshSource();
     const ledger = createPendingLedger();
-    ledger.appendPending(pendingOf([a, b]), sys);
+    ledger.appendPending(pendingOf([a, b]), sys.sourceId);
 
     // Independent of src:a (the winner's author) but CORRELATED with src:b (the loser's).
     expect(() =>
       ledger.approve(
         CSID,
         a,
-        approver,
+        approver.sourceId,
         NOW,
         ctxPerAuthor(byId, (author) => author !== ("src:b" as SourceId)),
       ),
@@ -289,16 +289,16 @@ describe("RC-5 — approver independent of ONE author but CORRELATED with ANOTHE
 
   it("RESOLVES once the approver is independent of BOTH authors (anti-over-fix)", () => {
     const { byId, a, b } = setup();
-    const sys = generatePassport();
-    const approver = generatePassport();
+    const sys = freshSource();
+    const approver = freshSource();
     const reputation = createReputationLedger(() => 0.9);
     const ledger = createPendingLedger({ reputation });
-    ledger.appendPending(pendingOf([a, b]), sys);
+    ledger.appendPending(pendingOf([a, b]), sys.sourceId);
 
     const resolved = ledger.approve(
       CSID,
       a,
-      approver,
+      approver.sourceId,
       NOW,
       ctxPerAuthor(byId, () => true), // independent of every author
     );

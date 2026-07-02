@@ -21,9 +21,9 @@
  * Status: production-grade single-process prototype. The hard algorithmic cores (the
  * activation-walk body, the two-phase halting gates, the tier-eviction permission
  * gates, contradiction adjudication, the disown sweep) are all IMPLEMENTED and
- * re-exported here, alongside the four ARCHITECTURE.md roadmap pillars (anchor
- * binding, Merkle tamper-evidence, Beta(α,β) trust with decay-on-read, undo-engine
- * hardening) and the durable SQLite backends. The engine's `disown` verb wires the
+ * re-exported here, alongside the crypto-free trust registry, the tamper-evident
+ * checksum audit chain, Beta(α,β) trust with decay-on-read, the undo-engine
+ * hardening, and the durable SQLite backends. The engine's `disown` verb wires the
  * full retroactive undo sweep. See CLAUDE.md for the design and the residual gaps.
  */
 
@@ -47,6 +47,9 @@ export {
   // defaults (runtime values)
   DEFAULT_WALK_CONFIG,
 } from "./core/types.js";
+
+// Canonical (key-order-independent) JSON — the content_hash serialization.
+export { canonicalJson } from "./core/canonicalJson.js";
 
 export type {
   // branded ids
@@ -172,29 +175,38 @@ export type {
 } from "./forgetting/consolidation.js";
 
 // ===========================================================================
-// identity — the external Source-Identity Layer (the four pillars)
+// identity — the external Source-Identity Layer (crypto-free trust registry)
 // ===========================================================================
 
-export { createSourceIdentityLayer, MAX_EXACT_ROOTS } from "./identity/index.js";
+export {
+  createSourceIdentityLayer,
+  MAX_EXACT_ROOTS,
+  ZERO_STAKE_PORT,
+} from "./identity/index.js";
 
 export type {
   SourceIdentityLayer,
   SourceIdentityLayerDeps,
-  KeyRegistryPort,
+  SourceRegistryPort,
   AnchorRegistryPort,
   ReputationLedgerPort,
   StakeLedgerPort,
-  Passport,
 } from "./identity/index.js";
 
-export {
-  generatePassport,
-  sourceIdFromPublicKey,
-  sign,
-  verify,
-} from "./identity/keys.js";
+// --- plain source identity (sameness) + the crypto-free trust registry ---
 
-export type { KeyPair } from "./identity/keys.js";
+export { sourceIdFor } from "./identity/sources.js";
+
+export type { SourceRef, SourceKind } from "./identity/sources.js";
+
+export { createTrustRegistry } from "./identity/trustRegistry.js";
+
+export type {
+  TrustRegistry,
+  TrustRegistryConfig,
+  SsoMemberInput,
+  SystemOfRecordInput,
+} from "./identity/trustRegistry.js";
 
 export {
   ANCHOR_TABLE,
@@ -211,50 +223,7 @@ export {
 
 export type { AnchorSpec } from "./identity/anchors.js";
 
-// --- anchor-binding pipeline: attestations + binders + the real registry ---
-
-export {
-  signAttestation,
-  verifyAttestation,
-  isRejection,
-  createDomainBinder,
-  createEmailBinder,
-  DEFAULT_CHALLENGE_TTL_MS,
-  DEFAULT_ATTESTATION_TTL_MS,
-} from "./identity/binding.js";
-
-export type {
-  AnchorAttestation,
-  Challenge,
-  Rejection,
-  AnchorBinder,
-  BindProof,
-  DomainProofChecker,
-  RegistrarLookup,
-  ETldResolver,
-  DomainBinderDeps,
-  EmailConfirmationPort,
-  EmailBinderDeps,
-} from "./identity/binding.js";
-
-// --- REAL DNS-01 prover (node:dns) behind an injected resolver seam ---
-
-export {
-  createDnsDomainProofChecker,
-  createNodeDnsResolver,
-  fakeResolver,
-  deriveOperatorClass,
-  bindDomainViaDns,
-  UNKNOWN_DNS_OPERATOR,
-  DEFAULT_CHALLENGE_PREFIX,
-  DEFAULT_ATTESTATION_TTL_MS as DNS_DEFAULT_ATTESTATION_TTL_MS,
-} from "./identity/binders/dnsDomainProver.js";
-
-export type {
-  DnsResolver,
-  DnsDomainProofCheckerOpts,
-  DnsDomainBindDeps,
-} from "./identity/binders/dnsDomainProver.js";
+// --- the eTLD+1 (public-suffix) resolver: the publisher/domain class axis ---
 
 export {
   registrableDomain as pslRegistrableDomain,
@@ -262,12 +231,7 @@ export {
   pslResolver,
 } from "./identity/binders/publicSuffix.js";
 
-export { createAnchorRegistry } from "./identity/anchorRegistry.js";
-
-export type {
-  AnchorRegistry,
-  AnchorRegistryDeps,
-} from "./identity/anchorRegistry.js";
+export type { ETldResolver } from "./identity/binders/publicSuffix.js";
 
 export {
   DEFAULT_REPUTATION_PARAMS,
@@ -292,19 +256,15 @@ export type {
   DisownSweepResult,
 } from "./identity/reputation.js";
 
-export {
-  FINANCIAL_STAKE_WEIGHT_MIN,
-  FINANCIAL_STAKE_WEIGHT_MAX,
-  STAKE_ANCHOR_CLASS,
-  createStakeLedger,
-  financialStakeWeight,
-  stakeMultiplier,
-} from "./identity/stake.js";
-
-export type { Stake, StakeLedger } from "./identity/stake.js";
+// STAKING IS RETIRED (attribution replaces stake: facts are permanently
+// attributed to named sources — that IS the deterrent). The FINANCIAL_STAKE
+// row above stays as INERT anchor-table data only; there is no stake ledger,
+// no producer, and no public staking surface. `StakeLedgerPort` +
+// `ZERO_STAKE_PORT` (exported from identity/index.js above) survive purely so
+// the stamp's `stake_posted: 0` shape stays stable.
 
 // ===========================================================================
-// ratification — the VAULT (append-only signed ledger) + DOORBELL (approve flow)
+// ratification — the VAULT (append-only checksum chain) + DOORBELL (approve flow)
 // ===========================================================================
 
 export {
@@ -324,6 +284,8 @@ export type {
   MutationPayload,
   MutationOp,
   ChainVerification,
+  ChainHead,
+  AppendSink,
   ResolvedDispute,
   ApproveContext,
   AppendPendingOptions,
@@ -335,6 +297,20 @@ export {
   hashSubjectId,
   mutationReceipt,
 } from "./ratification/mutationReceipt.js";
+
+// --- PHASE 4: the ENTERPRISE dispute-routing adapter (pure decision layer) ---
+
+export { createDisputeRouter } from "./ratification/disputeRouting.js";
+
+export type {
+  DisputeRouter,
+  DisputeRoutingConfig,
+  DisputeRoute,
+  DisputeRouteMatch,
+  DisputeRouteOptions,
+  RoutedDispute,
+  PendingSource,
+} from "./ratification/disputeRouting.js";
 
 export {
   downstreamDisownSweep,
@@ -394,51 +370,36 @@ export type {
   AlphaSnapshot,
 } from "./ratification/reconcile.js";
 
-// --- Merkle-anchored, externally-witnessed tamper-evidence (roadmap item 2) ---
-
-export {
-  createMerkleLog,
-  signTreeHead,
-  verifyTreeHead,
-  verifyInclusion,
-  verifyConsistency,
-  detectSplitView,
-  leafHashOf,
-  leafHashOfPreimage,
-  nodeHash,
-  EMPTY_TREE_ROOT,
-  InMemoryPublicationSink,
-  createSqlitePublicationSink,
-} from "./ratification/merkleLog.js";
-
-export type {
-  MerkleLog,
-  Hash,
-  STH,
-  InclusionProof,
-  PublicationSink,
-  SqlitePublicationSink,
-  WitnessResult,
-  WitnessReason,
-  SplitViewResult,
-} from "./ratification/merkleLog.js";
-
 // ===========================================================================
 // api — the top-level three-verb engine
 // ===========================================================================
 
-export { createIntelligentDb } from "./api.js";
+export { createIntelligentDb, DEFAULT_QUARANTINE_THRESHOLD } from "./api.js";
 
 export type {
   IntelligentDb,
   ConsolidationPort,
   RatificationDeps,
   AdjudicateOptions,
+  ApproveOptions,
   DisownOptions,
+  IngestPolicy,
+  CausalOrigin,
   WriteFactInput,
   RecallCue,
   RecallResult,
   RatifyInput,
+  // explain / beliefTimeline — the read-only belief dossier + time-travel shapes
+  EvidenceFidelity,
+  AuditCoverage,
+  ExplainRoot,
+  ExplainSource,
+  ExplainDemotion,
+  ExplainDispute,
+  ExplainCorroborationEvent,
+  ExplainReport,
+  BeliefEvent,
+  BeliefTimeline,
 } from "./api.js";
 
 // ===========================================================================
@@ -469,10 +430,14 @@ export { createAgentMemory, deriveEntity } from "./agent/agentMemory.js";
 export type {
   AgentMemory,
   AgentMemoryOptions,
+  ApproverIdentity,
   RememberInput,
+  RememberOrigin,
   RecallOutput,
   CitedFact,
-  SourceRef,
+  SourceSelector,
+  PendingQuestion,
+  PendingQuestionOption,
 } from "./agent/agentMemory.js";
 
 // ===========================================================================
@@ -487,6 +452,14 @@ export {
   JSONRPC_METHOD_NOT_FOUND,
   JSONRPC_INVALID_PARAMS,
   JSONRPC_INTERNAL_ERROR,
+  // Boundary input caps (named limits the handler enforces; see handler.ts).
+  REMEMBER_TEXT_MAX_CHARS,
+  ENTITY_ATTRIBUTE_MAX_CHARS,
+  RESOURCE_ID_MAX_CHARS,
+  RECALL_QUERY_MAX_CHARS,
+  RESOLVE_ID_MAX_CHARS,
+  // Display cap for the belief dossier's rendered claim payload.
+  EXPLAIN_PAYLOAD_MAX_RENDER_CHARS,
 } from "./mcp/handler.js";
 
 export type {
@@ -495,4 +468,10 @@ export type {
   McpError,
 } from "./mcp/handler.js";
 
-export { processLine as mcpProcessLine, main as mcpMain } from "./mcp/server.js";
+export {
+  processLine as mcpProcessLine,
+  main as mcpMain,
+  // The bounded stdin line splitter (unit-testable transport state machine).
+  BoundedLineSplitter,
+  MAX_LINE_BYTES,
+} from "./mcp/server.js";

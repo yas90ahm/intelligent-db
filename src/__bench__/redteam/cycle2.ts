@@ -378,7 +378,7 @@ const twoClassCostume: Attack = {
 const keyRotationWhitewash: Attack = {
   name: "Anchor-Preserving Key-Rotation Whitewash",
   tier: "whitewash-stake",
-  novelty: "A contradicted key re-mints a fresh passport, re-binds the SAME retained DOMAIN anchor, resets reputation to neutral 0 and dodges disown's sourceId-scoped taint-closure.",
+  novelty: "A contradicted source re-mints a fresh source id, re-binds the SAME retained DOMAIN anchor, resets reputation to neutral 0 and dodges disown's sourceId-scoped taint-closure.",
   run() {
     const h = new Harness();
     const a = h.addSource({ label: "A", anchors: [anchorOf(AnchorClass.DOMAIN)], indClass: "evil-dom" });
@@ -386,7 +386,7 @@ const keyRotationWhitewash: Attack = {
     // A is caught lying repeatedly: crater its LCB.
     for (let i = 0; i < 3; i++) h.reputation.contradict(a.sourceId, h.now(), 1);
     const aRepAfter = h.repOf(a);
-    // Rotate: NEW passport key A', re-bind the SAME DOMAIN anchor (free, already owned).
+    // Rotate: NEW source id A', re-bind the SAME DOMAIN anchor (free, already owned).
     const aPrime = h.addSource({ label: "A'", anchors: [anchorOf(AnchorClass.DOMAIN)], indClass: "evil-dom" });
     const aPrimeRep = h.repOf(aPrime); // fresh => 0, clean
     const cleanId = h.write(aPrime, "Topic", "claim", "FRESH_FROM_ROTATED_KEY");
@@ -395,7 +395,7 @@ const keyRotationWhitewash: Attack = {
     const aPrimeUntouched = h.isLive(cleanId) && h.repState(aPrime) === null;
     return {
       outcome: aPrimeRep <= 0.0001 && aPrimeUntouched ? "BREACHED" : "DEFENDED",
-      mechanism: "Reputation is ledgered PER PASSPORT KEY; the 4x contradiction scar binds to the key, but real-world scarcity binds to the ANCHOR. A new key under a retained anchor reads a clean LCB 0, and disown's sourceId-scoped taint-closure cannot follow the anchor across the key change. No anchor-level reputational lien exists.",
+      mechanism: "Reputation is ledgered PER SOURCE ID; the 4x contradiction scar binds to the source id, but real-world scarcity binds to the ANCHOR. A new source id under a retained anchor reads a clean LCB 0, and disown's sourceId-scoped taint-closure cannot follow the anchor across the identity change. No anchor-level reputational lien exists.",
       evidence: `A (dirty key) LCB after 3 contradictions=${f3(aRepAfter)}; A' (rotated key, SAME anchor) LCB=${f3(aPrimeRep)} (clean); disown(A) left A' untouched=${aPrimeUntouched}, fresh strand=${h.state(cleanId)}.`,
     };
   },
@@ -829,8 +829,8 @@ const windowForgery: Attack = {
     const graduated = String(wasDerived) === "DERIVED" && String(nowOrigin) === "OBSERVED";
     return {
       outcome: graduated ? "BREACHED" : "DEFENDED",
-      mechanism: "The graduation gate (derived->observed) validates the passport+anchor of the ratifying observation but has NO causal/content-origin check linking the observation back to the derivation it ratifies. The model fed its own derived conclusion to a source who echoed it back; the wall-with-a-window is satisfied by the letter (an external stamp exists) but violated in substance. Key-provenance independence != content-provenance independence.",
-      evidence: `D origin before ratify=${String(wasDerived)} -> after S ratifies=${String(nowOrigin)} (graduated=${graduated}); S only proved control of its key, never that its content was independent of D.`,
+      mechanism: "The graduation gate (derived->observed) validates the source registration+anchor of the ratifying observation but has NO causal/content-origin check linking the observation back to the derivation it ratifies. The model fed its own derived conclusion to a source who echoed it back; the wall-with-a-window is satisfied by the letter (an external stamp exists) but violated in substance. Source-identity independence != content-provenance independence.",
+      evidence: `D origin before ratify=${String(wasDerived)} -> after S ratifies=${String(nowOrigin)} (graduated=${graduated}); S only proved its sameness (one registered source id), never that its content was independent of D.`,
     };
   },
 };
@@ -893,7 +893,7 @@ const ouroborosChain: Attack = {
 const anchorRebindingTimeTravel: Attack = {
   name: "ANCHOR-REBINDING-TIME-TRAVEL (sequential rebinding)",
   tier: "derived-self-witness",
-  novelty: "One passport key visits two anchor classes SEQUENTIALLY across an anchor expiry/rebind, trying to evade the concurrent-only self-stack cap and look like two independent corroborators.",
+  novelty: "One source id visits two anchor classes SEQUENTIALLY across an anchor expiry/rebind, trying to evade the concurrent-only self-stack cap and look like two independent corroborators.",
   run() {
     const h = new Harness();
     const k = h.addSource({ label: "K", anchors: [anchorOf(AnchorClass.DOMAIN)], indClass: "K-c1" });
@@ -905,7 +905,7 @@ const anchorRebindingTimeTravel: Attack = {
     const count = h.independentRootCountOver(vId);
     return {
       outcome: count <= 1 ? "DEFENDED" : "BREACHED",
-      mechanism: "independent(a,b) consults the registry's independentSources(K,K) BEFORE class-disjointness; same passport key → echo → never independent regardless of class. Sequential rebinding presents two roots with one sourceId; the same-key collapse fires before the class-disjoint max-independent-set, so the count stays 1. The self-stack cap's concurrent-only reasoning is not the only line of defense — passport echo-collapse precedes it.",
+      mechanism: "independent(a,b) consults the registry's independentSources(K,K) BEFORE class-disjointness; same source id → echo → never independent regardless of class. Sequential rebinding presents two roots with one sourceId; the same-source collapse fires before the class-disjoint max-independent-set, so the count stays 1. The self-stack cap's concurrent-only reasoning is not the only line of defense — same-source echo-collapse precedes it.",
       evidence: `two sequential-class roots under one key K: independentRootCount=${count} (=1, same-key echo-collapse; sequential rebinding does NOT mint self-independence).`,
     };
   },
@@ -924,14 +924,14 @@ const ratificationBootstrap: Attack = {
     const trueId = h.write(honest, "Dispute", "v", "TRUE");
     const out = h.adjudicate("Dispute", "v"); // both fresh → DEFER (no decisive margin)
     const deferred = out.kind === "DEFERRED";
-    // K_approve: a DIFFERENT passport key sharing the SAME (evil) DOMAIN anchor as K_assert.
+    // K_approve: a DIFFERENT registered source sharing the SAME (evil) DOMAIN anchor as K_assert.
     const kApprove = h.addSource({ label: "Kapprove", anchors: [anchorOf(AnchorClass.DOMAIN)], indClass: "evil-anchor" });
     let approveSucceeded = false;
     let err = "";
     try {
       if (deferred) {
         const csid = h.engine.listPending()[0]!.contradictionSetId;
-        h.engine.approve(csid, falseId, kApprove.key, h.now());
+        h.engine.approve(csid, falseId, kApprove.key.sourceId, h.now());
         approveSucceeded = true;
       }
     } catch (e) {
@@ -940,7 +940,7 @@ const ratificationBootstrap: Attack = {
     const breached = approveSucceeded && h.isLive(falseId) && h.isDemoted(trueId);
     return {
       outcome: breached ? "BREACHED" : deferred ? "DEFENDED" : "N/A",
-      mechanism: "approve() checks (a) approver != AUTHOR of any disputed member and (b) approver passport verifies — NEITHER requires the approver to be ANCHOR-DISJOINT from the disputed members. A Sybil pair sharing one cheap anchor self-ratifies: the sibling key is a distinct author with a valid passport, so it clears both gates and promotes the lie with no genuine external witness. The cleanest invariant violation — promote without an INDEPENDENT external stamp.",
+      mechanism: "approve() checks (a) approver != AUTHOR of any disputed member and (b) approver is registered with >=1 priced anchor — NEITHER requires the approver to be ANCHOR-DISJOINT from the disputed members. A Sybil pair sharing one cheap anchor self-ratifies: the sibling source is a distinct, registered author, so it clears both gates and promotes the lie with no genuine external witness. The cleanest invariant violation — promote without an INDEPENDENT external stamp.",
       evidence: `dispute deferred=${deferred}; sibling-approve succeeded=${approveSucceeded}${err ? ` (err: ${err})` : ""}; false=${h.state(falseId)} true=${h.state(trueId)} (breached=${breached}). The missing check: approver must be independenceBetween>0 from every disputed member.`,
     };
   },

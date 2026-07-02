@@ -9,6 +9,7 @@
  */
 
 import { describe, it, expect } from "vitest";
+import { freshSource } from "../testSupport/identityFixtures.js";
 
 import {
   createAgentMemory,
@@ -16,7 +17,6 @@ import {
   createSourceIdentityLayer,
   createIntelligentDb,
   createLexicalCueResolver,
-  generatePassport,
   FactState,
   FactOrigin,
   Tier,
@@ -30,8 +30,8 @@ import type {
   SourceId,
   Unit,
   AnchorBinding,
-  Passport,
-  KeyRegistryPort,
+  SourceRef,
+  SourceRegistryPort,
   AnchorRegistryPort,
   ReputationLedgerPort,
   StakeLedgerPort,
@@ -43,10 +43,10 @@ describe("no provenance → no voice (facade recall never returns ungrounded)", 
     // an ungrounded strand the engine could never mint.
     const store = createMemoryStore();
 
-    const keys: KeyRegistryPort = (() => {
+    const sources: SourceRegistryPort = (() => {
       const known = new Set<SourceId>();
       return {
-        register: (p: Passport) => void known.add(p.sourceId),
+        register: (p: SourceRef) => void known.add(p.sourceId),
         sourceIdOf: (s: SourceId) => (known.has(s) ? s : null),
         has: (s: SourceId) => known.has(s),
       };
@@ -62,11 +62,11 @@ describe("no provenance → no voice (facade recall never returns ungrounded)", 
     })();
     const reputation: ReputationLedgerPort = { scoreOf: () => 0 as Unit };
     const stake: StakeLedgerPort = { postedFor: () => 0 };
-    const identity = createSourceIdentityLayer({ keys, anchors, reputation, stake });
+    const identity = createSourceIdentityLayer({ sources, anchors, reputation, stake });
     const engine = createIntelligentDb(store, identity);
     const resolver = createLexicalCueResolver(store);
 
-    const passport = generatePassport();
+    const passport = freshSource();
     identity.register(passport, []);
     const stamp = identity.stampFor(passport.sourceId);
 

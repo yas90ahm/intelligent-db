@@ -7,23 +7,44 @@
  * TypeScript — we do NOT import the Python project; we build the Tanaka-SHAPED
  * mechanism in our own stack:
  *
- *   (a) THE VAULT — an append-only, hash-chained, Ed25519-SIGNED ratification
- *       LEDGER. An immortal, tamper-evident record. Each record chains to the
- *       previous by `prevHash` (genesis = sha256("GENESIS")), carries its own
- *       `thisHash` over a CANONICAL serialization of its fields, and a detached
- *       Ed25519 `sig` over that hash by the signer's passport key. A standalone
+ *   (a) THE VAULT — an append-only, hash-chained ratification LEDGER: a
+ *       TAMPER-EVIDENT CHECKSUM CHAIN. Each record chains to the previous by
+ *       `prevHash` (genesis = sha256("GENESIS")) and carries its own `thisHash`
+ *       over a CANONICAL serialization of its fields. A standalone
  *       {@link PendingLedger.verifyChain} walks the chain, recomputes every hash,
- *       checks every signature, and names the FIRST broken seq — the "money
- *       artifact": flip any byte anywhere and verification reports `ok:false` and
- *       points at the break.
+ *       and names the FIRST broken seq — the "money artifact": flip any byte
+ *       anywhere and verification reports `ok:false` and points at the break.
+ *
+ *       HONEST DISCLOSURE (read before trusting the chain): `signerSourceId` on a
+ *       record is ASSERTED attribution, and the chain's integrity rests on the
+ *       INTEGRITY OF THE WRITING PROCESS and on WHERE the chain is stored. An
+ *       actor with live write access to the process or its storage can rewrite
+ *       history wholesale — recompute every checksum — and `verifyChain` will
+ *       still report `ok:true`. The checksum chain detects ACCIDENTAL corruption
+ *       and OUT-OF-BAND tampering with a copy at rest; it does not, by itself,
+ *       detect an insider with the pen. Deployments that want insider-tamper
+ *       evidence have two composable options, both plain data, both consuming
+ *       infrastructure the deployment already owns:
+ *         - CHECKPOINTS ({@link PendingLedger.chainHead} — `{seq, headHash}`)
+ *           shipped to ACCESS-SEGREGATED external storage on a schedule; a later
+ *           head that cannot extend a checkpointed one exposes the rewrite.
+ *           Detection granularity = checkpoint frequency.
+ *         - REAL-TIME SHIPPING (an {@link AppendSink} passed at construction):
+ *           every record is handed to the sink AS IT IS WRITTEN, so the external
+ *           copy (an append-only file under a different OS account, the
+ *           deployment's SIEM/audit stack, WORM storage) holds the full history
+ *           the local writer cannot recall. A local rewrite then diverges from
+ *           the already-shipped copy at the first rewritten seq. As shipping
+ *           latency approaches zero, detection approaches prevention.
  *
  *   (b) THE DOORBELL — a SECOND-ADMIN PENDING -> approve flow. The web NEVER judges
  *       an independent dispute (the hard theorem, CLAUDE.md). An EXTERNAL approver
  *       — DISTINCT from every source that authored a disputed member — designates
- *       the winner, and the decision is recorded immutably as a signed APPROVAL
+ *       the winner, and the decision is recorded immutably as an APPROVAL
  *       receipt. Self-approval (the approver authored a member) is REJECTED: the
- *       second-admin / distinct gate. An unverifiable / forged signer is rejected
- *       ("no provenance -> no voice").
+ *       second-admin / distinct gate. An unregistered / anchorless approver is
+ *       rejected ("no provenance -> no voice" — registration in the identity
+ *       layer with at least one anchor IS the provenance).
  *
  * PURITY BOUNDARY: this module is STATEFUL INFRA (an append-only array behind a
  * swappable interface) and is deliberately separate from the PURE
@@ -34,9 +55,9 @@
  * engine owns the store writes. Consolidation stays pure.
  *
  * STACK NOTE: ESM + NodeNext (relative imports carry `.js`); `verbatimModuleSyntax`
- * (every type-only import uses `import type`); `node:crypto` only, no external deps.
- * Signatures and hashes are carried as base64url STRINGS so a record is plain,
- * serializable JSON with a stable canonical form (no Uint8Array in the record body).
+ * (every type-only import uses `import type`); `node:crypto` only (SHA-256 as a
+ * CHECKSUM), no external deps. Hashes are carried as hex STRINGS so a record is
+ * plain, serializable JSON with a stable canonical form.
  */
 
 import { createHash } from "node:crypto";
@@ -60,9 +81,6 @@ import type {
   Unit,
 } from "../core/types.js";
 
-import { sign, verify, sourceIdFromPublicKey } from "../identity/keys.js";
-import type { KeyPair, Passport } from "../identity/keys.js";
-
 import { demote } from "../forgetting/consolidation.js";
 import type {
   DemotionResult,
@@ -79,11 +97,11 @@ import type { ReputationLedger } from "../identity/reputation.js";
 export type LedgerRecordKind = "PENDING" | "APPROVAL" | "MUTATION";
 
 /**
- * A1 [Merkle MUTATION coverage] — the control-plane state transitions journaled as
+ * A1 [MUTATION audit coverage] — the control-plane state transitions journaled as
  * content-addressed MUTATION receipts. Each names the FACT of a trust mutation the
  * undo engine performed, so every effect (disown crater / demotion / reputation move /
- * credit reversal) earns a committed Merkle leaf — closing the "hide-a-disown" hole
- * (mk-m3) where a demotion had no leaf and could be hidden with `verifyChain` green.
+ * credit reversal) earns a committed chain record — closing the "hide-a-disown" hole
+ * where a demotion had no audit record and could be hidden with `verifyChain` green.
  */
 export type MutationOp =
   | "DISOWN_CRATER" // the disowned source's direct-seed reputation crater
@@ -163,18 +181,33 @@ export interface ApprovalPayload {
   readonly winner: StrandId;
   readonly approverSourceId: SourceId;
   readonly approvedAt: EpochMs;
+  /**
+   * PHASE 4 [owner-override] — present (and `true`) ONLY when this approval was
+   * resolved under {@link ApproveContext.allowAuthorApprover}: the PERSONAL-tier
+   * owner answered a dispute they may themselves have authored a side of. The
+   * flag is COMMITTED into the checksum (emit-only-when-present, exactly like
+   * {@link PendingPayload.contentHash}), so the immortal chain records — auditable
+   * forever — that this resolution was an owner override rather than a
+   * distinct-second-admin decision. Absent on every enterprise approval.
+   */
+  readonly ownerOverride?: boolean;
 }
 
 /**
- * One immutable record in the append-only, hash-chained, signed ledger.
+ * One immutable record in the append-only, hash-chained ledger (the tamper-evident
+ * CHECKSUM CHAIN).
  *
  * Tamper-evidence is structural: `thisHash` is sha256 over the CANONICAL
  * serialization of `{seq, prevHash, kind, payload, signerSourceId}` (everything
- * EXCEPT `thisHash`/`sig`), `prevHash` chains to the previous record's `thisHash`
- * (genesis = sha256("GENESIS")), and `sig` is a detached Ed25519 signature over the
- * UTF-8 bytes of `thisHash` by the signer's passport key. Flip any field and either
- * the recomputed `thisHash`, the chain link, or the signature check fails — and
+ * EXCEPT `thisHash`), and `prevHash` chains to the previous record's `thisHash`
+ * (genesis = sha256("GENESIS")). Flip any field of a record AT REST and either the
+ * recomputed `thisHash` or the chain link fails — and
  * {@link PendingLedger.verifyChain} names the first broken seq.
+ *
+ * `signerSourceId` is ASSERTED attribution: the id of the actor the writing
+ * process says authored the record. It is committed into the checksum (so it
+ * cannot be silently edited at rest) but NOT independently proven — see the module
+ * doc's honest disclosure about write-access integrity and chain checkpoints.
  */
 export interface LedgerRecord {
   /** 0-based position in the append-only chain. */
@@ -183,12 +216,10 @@ export interface LedgerRecord {
   readonly prevHash: string;
   readonly kind: LedgerRecordKind;
   readonly payload: PendingPayload | ApprovalPayload | MutationPayload;
-  /** The {@link SourceId} of the signer (derived from its passport public key). */
+  /** The {@link SourceId} of the record's author — ASSERTED attribution (see above). */
   readonly signerSourceId: SourceId;
   /** sha256 (hex) over canonical({seq,prevHash,kind,payload,signerSourceId}). */
   readonly thisHash: string;
-  /** Detached Ed25519 signature over utf8(thisHash), base64url. */
-  readonly sig: string;
 }
 
 // ---------------------------------------------------------------------------
@@ -232,7 +263,7 @@ export interface AppendPendingOptions {
  * The OD-2 horn rate-limit decision: scanning the currently-OPEN PENDING records, decide
  * whether the new pending is a DUPLICATE (same coalesce key already open) or a CAP HIT
  * (some disputing source already at its per-source cap). Either way return the EXISTING
- * matching OPEN record (a no-op: the chain is NOT advanced, no second signed leaf is
+ * matching OPEN record (a no-op: the chain is NOT advanced, no second record is
  * minted, callers reading the return get a stable record). Returns `null` when the
  * pending is genuinely new and must be appended.
  *
@@ -285,14 +316,58 @@ function hornRateLimitDecision(
 
 /**
  * The result of walking the whole chain. `ok` is true iff EVERY record's chain
- * link, recomputed hash, and signature verify; otherwise `firstBrokenSeq` names the
- * earliest seq at which the chain is inconsistent (a flipped byte, a re-ordered
- * record, a forged or unknown signer). This is the standalone audit artifact.
+ * link and recomputed hash verify; otherwise `firstBrokenSeq` names the earliest
+ * seq at which the chain is inconsistent (a flipped byte, a re-ordered record).
+ * This is the standalone audit artifact. Remember the scope: this proves the
+ * chain is internally consistent AS STORED — not that a writer with live access
+ * didn't rewrite it (see the module doc's disclosure + {@link ChainHead}).
  */
 export interface ChainVerification {
   readonly ok: boolean;
   readonly firstBrokenSeq: number | null;
 }
+
+/**
+ * A CHAIN CHECKPOINT — the cheap, plain-data artifact an operator exports to
+ * ACCESS-SEGREGATED external storage (object store, another team's bucket, a
+ * printout) to get insider-tamper evidence the in-process checksum chain cannot
+ * provide by itself. `headHash` is the `thisHash` of the record at `seq`; a later
+ * chain whose record at `seq` does not carry exactly this hash has been rewritten.
+ * For an EMPTY chain, `seq` is -1 and `headHash` is the genesis anchor
+ * (sha256("GENESIS")). No signing, no keys — just data to put somewhere the
+ * writing process cannot reach.
+ */
+export interface ChainHead {
+  /** The seq of the last record (-1 for an empty chain). */
+  readonly seq: number;
+  /** The `thisHash` of that record (the genesis anchor for an empty chain). */
+  readonly headHash: string;
+}
+
+/**
+ * REAL-TIME AUDIT SHIPPING SINK — the insider-tamper mitigation's second half
+ * (see the module doc's HONEST DISCLOSURE). When passed at ledger construction,
+ * the sink receives EVERY appended {@link LedgerRecord} (PENDING / APPROVAL /
+ * MUTATION), in chain order, as plain serializable data. The deployment pipes it
+ * wherever its trust actually lives: an append-only file under a different OS
+ * account, the company's SIEM, WORM object storage. No formats are invented here
+ * and nothing is signed — the guarantee comes from the ACCESS SEGREGATION of the
+ * destination, not from math this codebase owns.
+ *
+ * ORDERING CONTRACT (load-bearing, do not reorder): the sink is invoked BEFORE
+ * the record is written locally.
+ *   - Sink THROWS ⇒ the local write never happens (the append fails, and inside a
+ *     compound op the whole transaction rolls back). FAIL-CLOSED: a deployment
+ *     that wires a strict sink gets "no shipped receipt ⇒ no belief change".
+ *     A deployment that prefers availability over strict coupling wraps its own
+ *     try/catch inside the sink — the choice is the deployment's, not ours.
+ *   - Sink SUCCEEDS but the local write later fails/rolls back ⇒ the external
+ *     copy holds a receipt for a change that never committed. That is the SAFE
+ *     direction: a false alarm an auditor can resolve, never a committed belief
+ *     change with no external trace. The dangerous direction (local record with
+ *     no shipped receipt) is structurally impossible under this ordering.
+ */
+export type AppendSink = (record: LedgerRecord) => void;
 
 // ---------------------------------------------------------------------------
 // Resolution plan (emitted by approve; applied by the engine — purity boundary)
@@ -315,7 +390,7 @@ export interface ResolvedDispute {
   readonly outranksEdges: readonly Edge[];
   /** One demotion receipt per loser (the loser strand was mutated in place). */
   readonly demotions: readonly DemotionResult[];
-  /** The signed APPROVAL record appended to the immortal ledger for this decision. */
+  /** The APPROVAL record appended to the immortal ledger for this decision. */
   readonly record: LedgerRecord;
 }
 
@@ -339,9 +414,18 @@ export interface ApproveContext {
   authorsOf(memberId: StrandId): readonly SourceId[];
   /**
    * Resolve a disputed member id to its Strand so the loser can be {@link demote}d.
-   * Returns the live strand object the engine will persist after mutation.
+   * Returns the live strand object the engine will persist after mutation — or
+   * `null` when the id resolves to nothing (defensive-only in practice: strands
+   * are never deleted; reachable via external store tampering or a mismatched
+   * store/ledger pairing). A `null` loser is SKIPPED fail-closed — no OUTRANKS
+   * edge, no demotion, no contradict for that member — mirroring the disown
+   * sweep's "a dangling edge / missing strand skips that node, never aborts".
+   * Skipping (not throwing) matters: the APPROVAL record is already appended
+   * when losers resolve, so a mid-loop throw would strand the chain in a
+   * decided-but-unapplied half-state (or, transactionally, leave the dispute
+   * permanently un-resolvable — every retry re-throws on the same dangling id).
    */
-  memberStrand(memberId: StrandId): Strand;
+  memberStrand(memberId: StrandId): Strand | null;
   /**
    * Mint a fresh OUTRANKS edge id for a (winner, loser) pair. Injected so the
    * engine controls id generation (uuid in production); the ledger stays pure of
@@ -364,6 +448,32 @@ export interface ApproveContext {
    * ("no anchor → no independent voice").
    */
   approverHasAnchors(sourceId: SourceId): boolean;
+  /**
+   * PHASE 4 [owner-override] — the EXPLICIT, documented POLICY HOOK for the
+   * PERSONAL tier. Default `false`/absent (enterprise semantics UNCHANGED —
+   * fail-closed everywhere). When `true`, TWO gates — and ONLY these two — are
+   * bypassed:
+   *
+   *   (1) the DISTINCT-APPROVER gate (self-approval rejection), and
+   *   (2) the RC-5 anchor-independence-vs-every-member-author check.
+   *
+   * WHY this is not a weakening of the enterprise gate: in a mom-and-pop
+   * PERSONAL deployment the OWNER **is** the trust root — the auto-provisioned
+   * OWNER anchor is EXTERNAL_AUTHORITY-grade (independence weight 0.90, the
+   * rep_cap-0.98 "window in the wall-with-a-window" tier), and there IS no
+   * second admin to ring. The owner often authored one side of the dispute
+   * ("you told me X in March"); the owner overriding their OWN remembered claim
+   * is the personal tier's ground truth, not self-dealing. The engine sets this
+   * flag ONLY for the owner source (the facade's `resolvePending`); every other
+   * caller leaves it absent and gets the full second-admin gate.
+   *
+   * The gates that remain UNCONDITIONAL under this flag: dispute-open,
+   * winner-is-member, and registered-with-anchors ("no provenance → no voice" —
+   * even the owner must hold a priced anchor). The resulting APPROVAL record
+   * carries {@link ApprovalPayload.ownerOverride} `true`, so the audit chain
+   * names the override forever.
+   */
+  readonly allowAuthorApprover?: boolean;
 }
 
 // ---------------------------------------------------------------------------
@@ -371,16 +481,16 @@ export interface ApproveContext {
 // ---------------------------------------------------------------------------
 
 /**
- * The append-only ratification ledger: the VAULT (immutable signed record) plus the
- * DOORBELL (second-admin approve flow). The in-memory implementation ships here;
- * the interface is swappable for a durable backend (mirroring the Tanaka SQLite
- * receipt pattern) without touching callers.
+ * The append-only ratification ledger: the VAULT (immutable checksum-chained
+ * record) plus the DOORBELL (second-admin approve flow). The in-memory
+ * implementation ships here; the interface is swappable for a durable backend
+ * (mirroring the Tanaka SQLite receipt pattern) without touching callers.
  */
 export interface PendingLedger {
   /**
-   * THE DOORBELL (ring). Record a deferred independent dispute as a signed PENDING
-   * record, signed by the SYSTEM signer (the engine's own passport). Returns the
-   * appended record. This is the only way a dispute enters the queue.
+   * THE DOORBELL (ring). Record a deferred independent dispute as a PENDING
+   * record, attributed to the SYSTEM source (the engine's own {@link SourceId}).
+   * Returns the appended record. This is the only way a dispute enters the queue.
    *
    * OD-2 [horn rate-limiting]: when `opts` carries the engine-resolved disputing sources
    * + coalesce key, a DUPLICATE (same coalesce key already OPEN) or a CAP HIT (a source
@@ -390,7 +500,7 @@ export interface PendingLedger {
    */
   appendPending(
     pending: PendingRatification,
-    systemSigner: KeyPair,
+    systemSource: SourceId,
     opts?: AppendPendingOptions,
   ): LedgerRecord;
 
@@ -405,43 +515,52 @@ export interface PendingLedger {
    * THE DOORBELL (answer). An EXTERNAL approver designates `winnerStrandId` as the
    * winner of `contradictionSetId`. REQUIRES the approver to be DISTINCT from every
    * source that authored a disputed member (rejects self-approval — the second
-   * admin rule) and to present a VERIFIABLE passport (rejects forged provenance).
-   * On success: appends a signed APPROVAL record and RESOLVES the dispute — mints
+   * admin rule) and to be REGISTERED in the identity layer with at least one
+   * anchor (fail-closed: an unregistered / anchorless approver is rejected — "no
+   * provenance -> no voice"), plus RC-5 anchor-independence of every member author.
+   * On success: appends an APPROVAL record and RESOLVES the dispute — mints
    * OUTRANKS winner -> each other member, {@link demote}s the losers (DEMOTED +
    * outranked_by, never deleted), and drives reputation (winner ratified, losers
    * contradicted). Returns a {@link ResolvedDispute} PLAN the engine persists.
    *
    * @throws if the dispute is unknown / already resolved, the winner is not a
-   *         member, the approver's passport fails verification, or the approver
-   *         authored any member (self-approval).
+   *         member, the approver is unregistered/anchorless, not anchor-independent
+   *         of an author, or authored any member (self-approval).
    */
   approve(
     contradictionSetId: ContradictionSetId,
     winnerStrandId: StrandId,
-    approver: KeyPair,
+    approver: SourceId,
     now: EpochMs,
     ctx: ApproveContext,
   ): ResolvedDispute;
 
   /**
-   * A1 [Merkle MUTATION coverage] — journal ONE content-addressed MUTATION receipt,
-   * signed by the system signer. Appends a `MUTATION` record to the immortal chain (the
-   * previously-missing Merkle leaf for an undo-engine EFFECT). Does NOT participate in
-   * the doorbell: a MUTATION never appears in {@link listPending} and is inert to the
-   * OD-2 dedup/cap scan (those filter strictly on `kind === "PENDING"`). Idempotency /
-   * dedup is the CALLER's concern (the compound op emits exactly the transitions it
-   * performed). Returns the appended record.
+   * A1 [MUTATION audit coverage] — journal ONE content-addressed MUTATION receipt,
+   * attributed to the system source. Appends a `MUTATION` record to the immortal chain
+   * (the audit record for an undo-engine EFFECT). Does NOT participate in the doorbell:
+   * a MUTATION never appears in {@link listPending} and is inert to the OD-2 dedup/cap
+   * scan (those filter strictly on `kind === "PENDING"`). Idempotency / dedup is the
+   * CALLER's concern (the compound op emits exactly the transitions it performed).
+   * Returns the appended record.
    */
-  appendMutation(payload: MutationPayload, signer: KeyPair): LedgerRecord;
+  appendMutation(payload: MutationPayload, signer: SourceId): LedgerRecord;
 
   /**
    * THE MONEY ARTIFACT. Walk the whole chain: recompute each record's
-   * genesis-anchored `prevHash` link, recompute its `thisHash`, and verify its
-   * signature against the signer's registered public key. Returns `{ok:true,
-   * firstBrokenSeq:null}` for an intact chain, or `{ok:false, firstBrokenSeq:k}`
-   * naming the FIRST inconsistent record. Standalone and side-effect-free.
+   * genesis-anchored `prevHash` link and recompute its `thisHash`. Returns
+   * `{ok:true, firstBrokenSeq:null}` for an intact chain, or `{ok:false,
+   * firstBrokenSeq:k}` naming the FIRST inconsistent record. Standalone and
+   * side-effect-free. Scope: internal consistency AS STORED (see the module doc's
+   * disclosure — pair with {@link chainHead} checkpoints for insider-tamper evidence).
    */
   verifyChain(): ChainVerification;
+
+  /**
+   * The current CHAIN CHECKPOINT `{seq, headHash}` — plain data the operator ships
+   * to access-segregated external storage (see {@link ChainHead}). O(1), read-only.
+   */
+  chainHead(): ChainHead;
 
   /** Raw read of every record (audit / persistence). Order is chain order. */
   records(): readonly LedgerRecord[];
@@ -453,14 +572,9 @@ export interface PendingLedger {
 
 const GENESIS_PREV_HASH = sha256Hex("GENESIS");
 
-/** sha256 of a UTF-8 string, hex. */
+/** sha256 of a UTF-8 string, hex (a checksum, nothing more). */
 function sha256Hex(s: string): string {
   return createHash("sha256").update(s, "utf8").digest("hex");
-}
-
-/** UTF-8 bytes of a string as a Uint8Array (the message the signer signs). */
-function utf8(s: string): Uint8Array {
-  return new Uint8Array(Buffer.from(s, "utf8"));
 }
 
 /**
@@ -498,6 +612,10 @@ function canonicalApproval(p: ApprovalPayload): string {
     String(p.winner),
     String(p.approverSourceId),
     String(p.approvedAt),
+    // PHASE 4: emit-only-if-present (mirrors canonicalPending's contentHash) so
+    // every legacy approval hashes EXACTLY as before; an owner-override approval
+    // commits the override flag into its checksum (tamper-evident at rest).
+    p.ownerOverride === undefined ? "" : "oo:" + String(p.ownerOverride),
   ];
   return parts.join("");
 }
@@ -547,7 +665,7 @@ function canonicalPayload(
 
 /**
  * The exact preimage of `thisHash`: a canonical serialization of every record
- * field EXCEPT `thisHash` and `sig`. Recomputed verbatim in {@link verifyChain}.
+ * field EXCEPT `thisHash` itself. Recomputed verbatim in {@link verifyChain}.
  */
 function hashPreimage(
   seq: number,
@@ -567,10 +685,9 @@ function hashPreimage(
 
 /**
  * The CANONICAL preimage of a {@link LedgerRecord} -- the exact, hand-ordered string
- * the record's own `thisHash` already commits to (every field EXCEPT `thisHash`/`sig`).
- * Exported so the Merkle layer (`merkleLog.ts`) can hash leaves over the SAME bytes
- * the chain commits to, making a Merkle leaf BYTE-IDENTICAL to what `verifyChain`
- * already protects (one source of truth for "what a record IS"). Additive.
+ * the record's own `thisHash` already commits to (every field EXCEPT `thisHash`).
+ * Exported so external audit tooling can recompute a record's checksum over the SAME
+ * bytes the chain commits to (one source of truth for "what a record IS"). Additive.
  */
 export function recordPreimage(rec: LedgerRecord): string {
   return hashPreimage(rec.seq, rec.prevHash, rec.kind, rec.payload, rec.signerSourceId);
@@ -607,29 +724,96 @@ function buildPendingPayload(
   return payload;
 }
 
+/**
+ * THE APPROVER GATES, shared verbatim by both ledger impls (one source of truth so
+ * the in-memory and SQLite doorbells can never drift):
+ *
+ *   4)  DISTINCT-APPROVER GATE (the second-admin rule): the approver must NOT have
+ *       authored ANY disputed member. Self-approval is forbidden — an EXTERNAL,
+ *       distinct admin judges; the web never does.
+ *   4b) PROVENANCE + RC-5 ANCHOR-DISJOINTNESS GATE ("no provenance → no voice"):
+ *       the approver must be REGISTERED with ≥1 priced anchor AND be
+ *       MIS-independent of EVERY author of EVERY disputed member — a distinct
+ *       source ID is not enough (an attacker can mint distinct ids for free; only
+ *       a priced, anchor-disjoint actor is the external second lock). Fail-closed.
+ *
+ * PHASE 4 [owner-override]: when {@link ApproveContext.allowAuthorApprover} is
+ * `true` (the PERSONAL tier's owner — see the hook's doc for WHY this is the
+ * tier's ground truth, not a weakening), gates (4) and the RC-5 independence loop
+ * of (4b) are bypassed. The registered-with-anchors precondition of (4b) remains
+ * UNCONDITIONAL — even the owner shows a priced anchor at the door — as do the
+ * dispute-open and winner-is-member gates enforced by the callers.
+ */
+function enforceApproverGates(
+  members: readonly StrandId[],
+  approverSourceId: SourceId,
+  ctx: ApproveContext,
+): void {
+  const ownerOverride = ctx.allowAuthorApprover === true;
+
+  // 4) DISTINCT-APPROVER GATE — bypassed ONLY under the explicit owner-override.
+  if (!ownerOverride) {
+    for (const memberId of members) {
+      for (const author of ctx.authorsOf(memberId)) {
+        if (author === approverSourceId) {
+          throw new Error(
+            `approve: self-approval rejected — approver ${String(approverSourceId)} authored member ${String(memberId)}.`,
+          );
+        }
+      }
+    }
+  }
+
+  // 4b-i) REGISTERED-WITH-ANCHORS — UNCONDITIONAL (never bypassed; fail-closed:
+  //       an unregistered / anchorless id is rejected, owner-override or not).
+  if (!ctx.approverHasAnchors(approverSourceId)) {
+    throw new Error(
+      `approve: approver ${String(approverSourceId)} holds no priced anchor — no anchor, no independent voice.`,
+    );
+  }
+
+  // 4b-ii) RC-5 anchor-independence vs EVERY member author — bypassed ONLY under
+  //        the explicit owner-override (the owner may have authored a side).
+  if (!ownerOverride) {
+    for (const memberId of members) {
+      for (const author of ctx.authorsOf(memberId)) {
+        if (!ctx.independentSources(approverSourceId, author)) {
+          throw new Error(
+            `approve: approver ${String(approverSourceId)} is not anchor-independent of member author ${String(author)}.`,
+          );
+        }
+      }
+    }
+  }
+}
+
 // ---------------------------------------------------------------------------
 // In-memory implementation
 // ---------------------------------------------------------------------------
 
 /**
- * In-memory {@link PendingLedger}: an append-only array of records plus a registry
- * of signer public keys (so {@link verifyChain} can re-verify every signature
- * standalone). Mirrors the Tanaka/SQLite receipt pattern behind a swappable
+ * In-memory {@link PendingLedger}: an append-only array of checksum-chained
+ * records. Mirrors the Tanaka/SQLite receipt pattern behind a swappable
  * interface; a durable backend can replace it without touching callers.
  */
 class InMemoryPendingLedger implements PendingLedger {
   /** The append-only chain. Never mutated in place after append. */
   private readonly chain: LedgerRecord[] = [];
-  /** SourceId -> SPKI public key PEM, registered on every append for verification. */
-  private readonly signerKeys = new Map<SourceId, string>();
   /** Whether the ledger records content hashes instead of plain pending bodies. */
   private readonly contentBlind: boolean;
   /** The reputation ledger driven on approval (winner up / losers down). */
   private readonly reputation: ReputationLedger | null;
+  /** Real-time shipping sink (insider-tamper mitigation); null when unwired. */
+  private readonly onAppend: AppendSink | null;
 
-  constructor(opts: { contentBlind: boolean; reputation: ReputationLedger | null }) {
+  constructor(opts: {
+    contentBlind: boolean;
+    reputation: ReputationLedger | null;
+    onAppend: AppendSink | null;
+  }) {
     this.contentBlind = opts.contentBlind;
     this.reputation = opts.reputation;
+    this.onAppend = opts.onAppend;
   }
 
   records(): readonly LedgerRecord[] {
@@ -638,7 +822,7 @@ class InMemoryPendingLedger implements PendingLedger {
 
   appendPending(
     pending: PendingRatification,
-    systemSigner: KeyPair,
+    systemSource: SourceId,
     opts?: AppendPendingOptions,
   ): LedgerRecord {
     const payload = buildPendingPayload(pending, this.contentBlind, opts);
@@ -651,10 +835,10 @@ class InMemoryPendingLedger implements PendingLedger {
       if (limited !== null) return limited;
     }
 
-    return this.append("PENDING", payload, systemSigner);
+    return this.append("PENDING", payload, systemSource);
   }
 
-  appendMutation(payload: MutationPayload, signer: KeyPair): LedgerRecord {
+  appendMutation(payload: MutationPayload, signer: SourceId): LedgerRecord {
     return this.append("MUTATION", payload, signer);
   }
 
@@ -681,7 +865,7 @@ class InMemoryPendingLedger implements PendingLedger {
   approve(
     contradictionSetId: ContradictionSetId,
     winnerStrandId: StrandId,
-    approver: KeyPair,
+    approver: SourceId,
     now: EpochMs,
     ctx: ApproveContext,
   ): ResolvedDispute {
@@ -701,62 +885,26 @@ class InMemoryPendingLedger implements PendingLedger {
       );
     }
 
-    // 3) PROVENANCE GATE ("no provenance -> no voice"): the approver must present a
-    //    VERIFIABLE passport. We prove control of the key by checking a signature
-    //    over the approver's own derived source id, and confirm the public key
-    //    actually derives the claimed source id (no forged signerSourceId).
-    const approverSourceId = sourceIdFromPublicKey(approver.publicKeyPem);
-    if (approverSourceId !== approver.sourceId) {
-      throw new Error(
-        "approve: approver passport is inconsistent (public key does not derive its sourceId).",
-      );
-    }
-    const proof = sign(approver.privateKeyPem, utf8(String(approverSourceId)));
-    if (!verify(approver.publicKeyPem, utf8(String(approverSourceId)), proof)) {
-      throw new Error("approve: approver signature did not verify (forged / no provenance).");
-    }
+    // 3) The approver IS its SourceId — attribution, not proof-of-key. The
+    //    PROVENANCE GATE ("no provenance -> no voice") is step 4b's registered-
+    //    with-anchors check, which fails CLOSED for an unregistered/anchorless id.
+    const approverSourceId = approver;
 
-    // 4) DISTINCT-APPROVER GATE (the second-admin rule): the approver must NOT have
-    //    authored ANY disputed member. Self-approval is forbidden — an EXTERNAL,
-    //    distinct admin judges; the web never does.
-    for (const memberId of members) {
-      for (const author of ctx.authorsOf(memberId)) {
-        if (author === approverSourceId) {
-          throw new Error(
-            `approve: self-approval rejected — approver ${String(approverSourceId)} authored member ${String(memberId)}.`,
-          );
-        }
-      }
-    }
-
-    // 4b) RC-5 — MIS ANCHOR-DISJOINTNESS GATE ("no anchor → no independent voice").
-    //     The approver must hold ≥1 priced anchor AND be MIS-independent of EVERY
-    //     author of EVERY disputed member — a distinct KEY is not enough (an
-    //     attacker can mint distinct keys for free; only a priced, anchor-disjoint
-    //     actor is the external second lock). Fail-closed; additive (only ADDS a
-    //     rejection path, never admits an approver the distinct-key gate rejected).
-    if (!ctx.approverHasAnchors(approverSourceId)) {
-      throw new Error(
-        `approve: approver ${String(approverSourceId)} holds no priced anchor — no anchor, no independent voice.`,
-      );
-    }
-    for (const memberId of members) {
-      for (const author of ctx.authorsOf(memberId)) {
-        if (!ctx.independentSources(approverSourceId, author)) {
-          throw new Error(
-            `approve: approver ${String(approverSourceId)} is not anchor-independent of member author ${String(author)}.`,
-          );
-        }
-      }
-    }
+    // 4 + 4b) THE APPROVER GATES (distinct-approver; registered-with-anchors;
+    //    RC-5 anchor-independence) — shared with the SQLite impl; honors the
+    //    PHASE-4 owner-override hook exactly as documented on the helper.
+    enforceApproverGates(members, approverSourceId, ctx);
 
     // 5) Record the immutable APPROVAL receipt FIRST (the decision is now permanent
     //    even if a later store write fails — the ledger is the source of truth).
+    //    An owner-override resolution is NAMED on the record (emit-only-when-true;
+    //    exactOptionalPropertyTypes: omit, never assign undefined).
     const approvalPayload: ApprovalPayload = {
       contradictionSetId,
       winner: winnerStrandId,
       approverSourceId,
       approvedAt: now,
+      ...(ctx.allowAuthorApprover === true ? { ownerOverride: true } : {}),
     };
     const record = this.append("APPROVAL", approvalPayload, approver);
 
@@ -768,6 +916,9 @@ class InMemoryPendingLedger implements PendingLedger {
     for (const memberId of members) {
       if (memberId === winnerStrandId) continue;
       const loser = ctx.memberStrand(memberId);
+      // DANGLING MEMBER ⇒ fail-closed SKIP (see the memberStrand doc): nothing
+      // exists to demote, so no edge / demotion / contradict — never an abort.
+      if (loser === null) continue;
       const edge: Edge = {
         id: ctx.mintEdgeId(winnerStrandId, memberId),
         from: winnerStrandId,
@@ -825,22 +976,16 @@ class InMemoryPendingLedger implements PendingLedger {
       );
       if (recomputed !== r.thisHash) return { ok: false, firstBrokenSeq: i };
 
-      // (d) signature: a known signer key must verify the sig over utf8(thisHash).
-      const pem = this.signerKeys.get(r.signerSourceId);
-      if (pem === undefined) return { ok: false, firstBrokenSeq: i };
-      let sigBytes: Uint8Array;
-      try {
-        sigBytes = new Uint8Array(Buffer.from(r.sig, "base64url"));
-      } catch {
-        return { ok: false, firstBrokenSeq: i };
-      }
-      if (!verify(pem, utf8(r.thisHash), sigBytes)) {
-        return { ok: false, firstBrokenSeq: i };
-      }
-
       expectedPrev = r.thisHash;
     }
     return { ok: true, firstBrokenSeq: null };
+  }
+
+  chainHead(): ChainHead {
+    const tail = this.chain.length === 0 ? null : this.chain[this.chain.length - 1]!;
+    return tail === null
+      ? { seq: -1, headHash: GENESIS_PREV_HASH }
+      : { seq: tail.seq, headHash: tail.thisHash };
   }
 
   // -- internals ------------------------------------------------------------
@@ -866,36 +1011,34 @@ class InMemoryPendingLedger implements PendingLedger {
   }
 
   /**
-   * Append one signed, hash-chained record. Registers the signer's public key (so
-   * verifyChain can re-verify standalone), computes the chain link + canonical
-   * hash, signs it, and pushes it. The single mutation point of the chain.
+   * Append one checksum-chained record. Computes the chain link + canonical hash
+   * and pushes it. The single mutation point of the chain. `signer` is the
+   * ASSERTED author id committed into the checksum.
    */
   private append(
     kind: LedgerRecordKind,
     payload: PendingPayload | ApprovalPayload | MutationPayload,
-    signer: KeyPair,
+    signer: SourceId,
   ): LedgerRecord {
-    // Register the signer's verifying key (idempotent on its sourceId).
-    const passport: Passport = { sourceId: signer.sourceId, publicKeyPem: signer.publicKeyPem };
-    this.signerKeys.set(passport.sourceId, passport.publicKeyPem);
-
     const seq = this.chain.length;
     const prevHash = seq === 0 ? GENESIS_PREV_HASH : this.chain[seq - 1]!.thisHash;
     const thisHash = sha256Hex(
-      hashPreimage(seq, prevHash, kind, payload, signer.sourceId),
+      hashPreimage(seq, prevHash, kind, payload, signer),
     );
-    const sigBytes = sign(signer.privateKeyPem, utf8(thisHash));
-    const sig = Buffer.from(sigBytes).toString("base64url");
 
     const record: LedgerRecord = {
       seq,
       prevHash,
       kind,
       payload,
-      signerSourceId: signer.sourceId,
+      signerSourceId: signer,
       thisHash,
-      sig,
     };
+    // SHIP BEFORE WRITE (see {@link AppendSink}'s ordering contract): a throwing
+    // sink aborts the append with the chain unchanged (fail-closed); a shipped
+    // record whose local write then fails is the safe, auditor-resolvable
+    // direction. Never reorder these two lines.
+    this.onAppend?.(record);
     this.chain.push(record);
     return record;
   }
@@ -915,13 +1058,21 @@ class InMemoryPendingLedger implements PendingLedger {
  *                          (winner's authors ratified, losers' authors contradicted);
  *                          MUST be the same instance backing the identity facade so
  *                          the next stamp reflects the change. Null => no rep drive.
+ * @param opts.onAppend     real-time audit shipping sink (see {@link AppendSink}):
+ *                          receives every appended record BEFORE the local write.
+ *                          Omit for a local-only chain (back-compatible default).
  */
 export function createPendingLedger(
-  opts: { contentBlind?: boolean; reputation?: ReputationLedger | null } = {},
+  opts: {
+    contentBlind?: boolean;
+    reputation?: ReputationLedger | null;
+    onAppend?: AppendSink;
+  } = {},
 ): PendingLedger {
   return new InMemoryPendingLedger({
     contentBlind: opts.contentBlind ?? false,
     reputation: opts.reputation ?? null,
+    onAppend: opts.onAppend ?? null,
   });
 }
 
@@ -956,48 +1107,46 @@ function pendingAsString(v: unknown): string {
 }
 
 /**
- * Durable, WAL-mode, SQLite-backed {@link PendingLedger}: the VAULT (immutable signed
- * record) + DOORBELL (second-admin approve flow) persisted to disk so the AUDIT TRAIL
- * survives a restart AND stays tamper-evident.
+ * Durable, WAL-mode, SQLite-backed {@link PendingLedger}: the VAULT (immutable
+ * checksum-chained record) + DOORBELL (second-admin approve flow) persisted to disk
+ * so the AUDIT TRAIL survives a restart AND stays tamper-evident at rest.
  *
- * Tables:
+ * Table:
  *  - `ratification_records(seq INTEGER PRIMARY KEY, json)` — `seq` IS the row key, so
  *    the chain ORDER is preserved by the primary key and cannot be re-ordered; the
  *    ledger assigns `seq` (no AUTOINCREMENT needed).
- *  - `signer_keys(source_id PRIMARY KEY, pubkey_pem)` — the registered verifying keys.
- *    This table is the #1 reopen trap: WITHOUT it, after a restart {@link verifyChain}
- *    has no pubkeys and reports a valid chain as broken at seq 0 ("unknown signer").
- *    It is written in the SAME `append` as the record it authorizes.
  *
  * Canonicalization + hashing reuse the module-private {@link hashPreimage} /
- * {@link sha256Hex} / {@link utf8} / {@link GENESIS_PREV_HASH} verbatim (co-located
- * here precisely so the persisted preimage is BYTE-IDENTICAL to the in-memory form),
- * which is what makes `verifyChain()` re-verify true after a reopen and STILL detect a
- * flipped byte in a persisted row (naming the first broken seq).
+ * {@link sha256Hex} / {@link GENESIS_PREV_HASH} verbatim (co-located here precisely
+ * so the persisted preimage is BYTE-IDENTICAL to the in-memory form), which is what
+ * makes `verifyChain()` re-verify true after a reopen and STILL detect a flipped
+ * byte in a persisted row (naming the first broken seq).
  */
 class SqlitePendingLedgerImpl implements SqlitePendingLedger {
   readonly #db: DatabaseSyncType;
   readonly #ownsDb: boolean;
   readonly #contentBlind: boolean;
   readonly #reputation: ReputationLedger | null;
+  /** Real-time shipping sink (insider-tamper mitigation); null when unwired. */
+  readonly #onAppend: AppendSink | null;
 
   readonly #insertRecord;
   readonly #allRecords;
   readonly #countRecords;
   readonly #lastRecord;
-  readonly #upsertKey;
-  readonly #getKey;
 
   constructor(opts: {
     db: DatabaseSyncType;
     ownsDb: boolean;
     contentBlind: boolean;
     reputation: ReputationLedger | null;
+    onAppend: AppendSink | null;
   }) {
     this.#db = opts.db;
     this.#ownsDb = opts.ownsDb;
     this.#contentBlind = opts.contentBlind;
     this.#reputation = opts.reputation;
+    this.#onAppend = opts.onAppend;
 
     if (opts.ownsDb) {
       this.#db.exec("PRAGMA journal_mode=WAL");
@@ -1007,12 +1156,6 @@ class SqlitePendingLedgerImpl implements SqlitePendingLedger {
       `CREATE TABLE IF NOT EXISTS ratification_records (
          seq  INTEGER PRIMARY KEY,
          json TEXT NOT NULL
-       )`,
-    );
-    this.#db.exec(
-      `CREATE TABLE IF NOT EXISTS signer_keys (
-         source_id  TEXT PRIMARY KEY,
-         pubkey_pem TEXT NOT NULL
        )`,
     );
 
@@ -1027,13 +1170,6 @@ class SqlitePendingLedgerImpl implements SqlitePendingLedger {
     );
     this.#lastRecord = this.#db.prepare(
       "SELECT json FROM ratification_records ORDER BY seq DESC LIMIT 1",
-    );
-    this.#upsertKey = this.#db.prepare(
-      `INSERT INTO signer_keys (source_id, pubkey_pem) VALUES (?, ?)
-       ON CONFLICT(source_id) DO UPDATE SET pubkey_pem = excluded.pubkey_pem`,
-    );
-    this.#getKey = this.#db.prepare(
-      "SELECT pubkey_pem FROM signer_keys WHERE source_id = ?",
     );
   }
 
@@ -1051,7 +1187,7 @@ class SqlitePendingLedgerImpl implements SqlitePendingLedger {
 
   appendPending(
     pending: PendingRatification,
-    systemSigner: KeyPair,
+    systemSource: SourceId,
     opts?: AppendPendingOptions,
   ): LedgerRecord {
     const payload = buildPendingPayload(pending, this.#contentBlind, opts);
@@ -1066,10 +1202,10 @@ class SqlitePendingLedgerImpl implements SqlitePendingLedger {
       if (limited !== null) return limited;
     }
 
-    return this.#append("PENDING", payload, systemSigner);
+    return this.#append("PENDING", payload, systemSource);
   }
 
-  appendMutation(payload: MutationPayload, signer: KeyPair): LedgerRecord {
+  appendMutation(payload: MutationPayload, signer: SourceId): LedgerRecord {
     return this.#append("MUTATION", payload, signer);
   }
 
@@ -1097,7 +1233,7 @@ class SqlitePendingLedgerImpl implements SqlitePendingLedger {
   approve(
     contradictionSetId: ContradictionSetId,
     winnerStrandId: StrandId,
-    approver: KeyPair,
+    approver: SourceId,
     now: EpochMs,
     ctx: ApproveContext,
   ): ResolvedDispute {
@@ -1115,50 +1251,20 @@ class SqlitePendingLedgerImpl implements SqlitePendingLedger {
       );
     }
 
-    const approverSourceId = sourceIdFromPublicKey(approver.publicKeyPem);
-    if (approverSourceId !== approver.sourceId) {
-      throw new Error(
-        "approve: approver passport is inconsistent (public key does not derive its sourceId).",
-      );
-    }
-    const proof = sign(approver.privateKeyPem, utf8(String(approverSourceId)));
-    if (!verify(approver.publicKeyPem, utf8(String(approverSourceId)), proof)) {
-      throw new Error("approve: approver signature did not verify (forged / no provenance).");
-    }
+    // The approver IS its SourceId (asserted attribution); the provenance gate is
+    // the registered-with-anchors check inside the shared gates (fail-closed).
+    const approverSourceId = approver;
 
-    for (const memberId of members) {
-      for (const author of ctx.authorsOf(memberId)) {
-        if (author === approverSourceId) {
-          throw new Error(
-            `approve: self-approval rejected — approver ${String(approverSourceId)} authored member ${String(memberId)}.`,
-          );
-        }
-      }
-    }
-
-    // 4b) RC-5 — MIS ANCHOR-DISJOINTNESS GATE (identical to the in-memory impl):
-    //     the approver must hold ≥1 priced anchor AND be MIS-independent of EVERY
-    //     author of EVERY disputed member. Fail-closed; additive.
-    if (!ctx.approverHasAnchors(approverSourceId)) {
-      throw new Error(
-        `approve: approver ${String(approverSourceId)} holds no priced anchor — no anchor, no independent voice.`,
-      );
-    }
-    for (const memberId of members) {
-      for (const author of ctx.authorsOf(memberId)) {
-        if (!ctx.independentSources(approverSourceId, author)) {
-          throw new Error(
-            `approve: approver ${String(approverSourceId)} is not anchor-independent of member author ${String(author)}.`,
-          );
-        }
-      }
-    }
+    // 4 + 4b) THE APPROVER GATES — the SAME shared helper the in-memory impl runs
+    //    (one source of truth; honors the PHASE-4 owner-override hook identically).
+    enforceApproverGates(members, approverSourceId, ctx);
 
     const approvalPayload: ApprovalPayload = {
       contradictionSetId,
       winner: winnerStrandId,
       approverSourceId,
       approvedAt: now,
+      ...(ctx.allowAuthorApprover === true ? { ownerOverride: true } : {}),
     };
     const record = this.#append("APPROVAL", approvalPayload, approver);
 
@@ -1167,6 +1273,10 @@ class SqlitePendingLedgerImpl implements SqlitePendingLedger {
     for (const memberId of members) {
       if (memberId === winnerStrandId) continue;
       const loser = ctx.memberStrand(memberId);
+      // DANGLING MEMBER ⇒ fail-closed SKIP (see the memberStrand doc) — the
+      // SAME rule as the in-memory impl (the shared-gates drift guard applies
+      // to resolution semantics too).
+      if (loser === null) continue;
       const edge: Edge = {
         id: ctx.mintEdgeId(winnerStrandId, memberId),
         from: winnerStrandId,
@@ -1210,22 +1320,16 @@ class SqlitePendingLedgerImpl implements SqlitePendingLedger {
       );
       if (recomputed !== r.thisHash) return { ok: false, firstBrokenSeq: i };
 
-      const keyRow = this.#getKey.get(r.signerSourceId as string);
-      if (keyRow === undefined) return { ok: false, firstBrokenSeq: i };
-      const pem = pendingAsString(keyRow.pubkey_pem);
-      let sigBytes: Uint8Array;
-      try {
-        sigBytes = new Uint8Array(Buffer.from(r.sig, "base64url"));
-      } catch {
-        return { ok: false, firstBrokenSeq: i };
-      }
-      if (!verify(pem, utf8(r.thisHash), sigBytes)) {
-        return { ok: false, firstBrokenSeq: i };
-      }
-
       expectedPrev = r.thisHash;
     }
     return { ok: true, firstBrokenSeq: null };
+  }
+
+  chainHead(): ChainHead {
+    const tail = this.#lastRecord.get();
+    if (tail === undefined) return { seq: -1, headHash: GENESIS_PREV_HASH };
+    const rec = this.#parse(pendingAsString((tail as { json: unknown }).json));
+    return { seq: rec.seq, headHash: rec.thisHash };
   }
 
   // -- internals ------------------------------------------------------------
@@ -1250,23 +1354,16 @@ class SqlitePendingLedgerImpl implements SqlitePendingLedger {
   }
 
   /**
-   * Append one signed, hash-chained record to DISK. Registers the signer's public
-   * key in `signer_keys` (so {@link verifyChain} re-verifies standalone after a
-   * reopen with empty process memory), computes the chain link from the persisted
-   * tail, signs the canonical hash, and inserts the record JSON. The single mutation
-   * point of the chain — exactly like the in-memory ledger's `append`.
+   * Append one checksum-chained record to DISK. Computes the chain link from the
+   * persisted tail and inserts the record JSON. The single mutation point of the
+   * chain — exactly like the in-memory ledger's `append`. `signer` is the ASSERTED
+   * author id committed into the checksum.
    */
   #append(
     kind: LedgerRecordKind,
     payload: PendingPayload | ApprovalPayload | MutationPayload,
-    signer: KeyPair,
+    signer: SourceId,
   ): LedgerRecord {
-    const passport: Passport = {
-      sourceId: signer.sourceId,
-      publicKeyPem: signer.publicKeyPem,
-    };
-    this.#upsertKey.run(passport.sourceId as string, passport.publicKeyPem);
-
     const seq = Number((this.#countRecords.get() as { n: number }).n);
     const tail = this.#lastRecord.get();
     const prevHash =
@@ -1274,20 +1371,23 @@ class SqlitePendingLedgerImpl implements SqlitePendingLedger {
         ? GENESIS_PREV_HASH
         : this.#parse(pendingAsString((tail as { json: unknown }).json)).thisHash;
     const thisHash = sha256Hex(
-      hashPreimage(seq, prevHash, kind, payload, signer.sourceId),
+      hashPreimage(seq, prevHash, kind, payload, signer),
     );
-    const sigBytes = sign(signer.privateKeyPem, utf8(thisHash));
-    const sig = Buffer.from(sigBytes).toString("base64url");
 
     const record: LedgerRecord = {
       seq,
       prevHash,
       kind,
       payload,
-      signerSourceId: signer.sourceId,
+      signerSourceId: signer,
       thisHash,
-      sig,
     };
+    // SHIP BEFORE WRITE (see {@link AppendSink}'s ordering contract): a throwing
+    // sink aborts the append with nothing inserted — and inside a compound op's
+    // shared-handle transaction, the whole op rolls back (fail-closed). A shipped
+    // record whose transaction then rolls back is the safe, auditor-resolvable
+    // direction. Never reorder these two lines.
+    this.#onAppend?.(record);
     this.#insertRecord.run(seq, JSON.stringify(record));
     return record;
   }
@@ -1299,7 +1399,7 @@ class SqlitePendingLedgerImpl implements SqlitePendingLedger {
 
 /**
  * Construct a DURABLE, SQLite-backed {@link PendingLedger} — a DROP-IN for
- * {@link createPendingLedger} whose hash-chained, signed AUDIT TRAIL survives a
+ * {@link createPendingLedger} whose checksum-chained AUDIT TRAIL survives a
  * restart and stays tamper-evident: after close + reopen, {@link verifyChain} returns
  * `ok:true` on an untampered chain and STILL detects a flipped byte in a persisted row
  * (naming the first broken seq).
@@ -1310,17 +1410,29 @@ class SqlitePendingLedgerImpl implements SqlitePendingLedger {
  */
 export function createSqlitePendingLedger(
   opts:
-    | { path: string; contentBlind?: boolean; reputation?: ReputationLedger | null }
-    | { db: DatabaseSyncType; contentBlind?: boolean; reputation?: ReputationLedger | null },
+    | {
+        path: string;
+        contentBlind?: boolean;
+        reputation?: ReputationLedger | null;
+        onAppend?: AppendSink;
+      }
+    | {
+        db: DatabaseSyncType;
+        contentBlind?: boolean;
+        reputation?: ReputationLedger | null;
+        onAppend?: AppendSink;
+      },
 ): SqlitePendingLedger {
   const contentBlind = opts.contentBlind ?? false;
   const reputation = opts.reputation ?? null;
+  const onAppend = opts.onAppend ?? null;
   if ("path" in opts) {
     return new SqlitePendingLedgerImpl({
       db: new DatabaseSync(opts.path),
       ownsDb: true,
       contentBlind,
       reputation,
+      onAppend,
     });
   }
   return new SqlitePendingLedgerImpl({
@@ -1328,5 +1440,6 @@ export function createSqlitePendingLedger(
     ownsDb: false,
     contentBlind,
     reputation,
+    onAppend,
   });
 }

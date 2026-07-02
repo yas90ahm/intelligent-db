@@ -25,6 +25,7 @@
  */
 
 import { describe, it, expect } from "vitest";
+import { freshSource } from "../testSupport/identityFixtures.js";
 
 import { rmSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -39,10 +40,8 @@ import {
   newReputationState,
   DEFAULT_REPUTATION_PARAMS,
   createSourceIdentityLayer,
-  createStakeLedger,
   createIntelligentDb,
   createMemoryStore,
-  generatePassport,
   repCapFor,
   independenceBetween,
   AnchorClass,
@@ -58,8 +57,8 @@ import type {
   AnchorBinding,
   IdentityStamp,
   EntityId,
-  Passport,
-  KeyRegistryPort,
+  SourceRef,
+  SourceRegistryPort,
   AnchorRegistryPort,
   ReputationLedger,
   ReputationState,
@@ -108,10 +107,10 @@ function makeAnchorRegistry(): AnchorRegistryPort {
   };
 }
 
-function makeKeyRegistry(): KeyRegistryPort {
+function makeSourceRegistry(): SourceRegistryPort {
   const known = new Set<SourceId>();
   return {
-    register(passport: Passport): void {
+    register(passport: SourceRef): void {
       known.add(passport.sourceId);
     },
     sourceIdOf(sourceId: SourceId): SourceId | null {
@@ -124,8 +123,8 @@ function makeKeyRegistry(): KeyRegistryPort {
 }
 
 function makeStakePort(): StakeLedgerPort {
-  const ledger = createStakeLedger();
-  return { postedFor: (s: SourceId) => ledger.posted(s) };
+  // Staking is RETIRED (attribution replaces stake): a constant-zero port.
+  return { postedFor: () => 0 };
 }
 
 /** A cap accessor backed by a real anchor registry: (s) => repCapFor(anchorsOf(s)). */
@@ -346,7 +345,7 @@ describe("live reputation pillar — wired live into the engine + stamp", () => 
     const anchors = makeAnchorRegistry();
     const ledger = createReputationLedger(repCapOver(anchors));
     const identity = createSourceIdentityLayer({
-      keys: makeKeyRegistry(),
+      sources: makeSourceRegistry(),
       anchors,
       reputation: { scoreOf: (s: SourceId) => ledger.scoreOf(s) },
       stake: makeStakePort(),
@@ -360,7 +359,7 @@ describe("live reputation pillar — wired live into the engine + stamp", () => 
     // Same ledger instance drives the engine's ratify verb AND the facade scoreOf.
     const db = createIntelligentDb(store, identity, null, ledger);
 
-    const passport = generatePassport();
+    const passport = freshSource();
     identity.register(passport, [domainAnchor()]);
     const stamp: IdentityStamp = identity.stampFor(passport.sourceId);
 
@@ -389,7 +388,7 @@ describe("live reputation pillar — wired live into the engine + stamp", () => 
     const store = createMemoryStore();
     const db = createIntelligentDb(store, identity); // no ledger passed
 
-    const passport = generatePassport();
+    const passport = freshSource();
     identity.register(passport, [domainAnchor()]);
     const stamp = identity.stampFor(passport.sourceId);
     const entity = "entity:x" as EntityId;

@@ -22,7 +22,6 @@ import {
   createSourceIdentityLayer,
   createReputationLedger,
   createPendingLedger,
-  generatePassport,
   asStrandId,
   EdgeType,
   FactState,
@@ -36,7 +35,7 @@ import type {
   EntityId,
   AttributeKey,
   StrandId,
-  KeyRegistryPort,
+  SourceRegistryPort,
   AnchorRegistryPort,
   ReputationLedgerPort,
   StakeLedgerPort,
@@ -47,6 +46,7 @@ import type {
 } from "../../index.js";
 
 import { makeStrand, makeEdge, NOW } from "../fixtures.js";
+import { freshSource } from "../../testSupport/identityFixtures.js";
 import { PRIMARY_WARMUP_RATIFIES } from "../trustWarmup.js";
 import type { Dataset, QueryRecord, ContradictionPair } from "./dataset.js";
 import { cosine } from "./embed.js";
@@ -64,7 +64,7 @@ import type { LocomoConversation } from "./locomo.js";
 // full anchor pipeline; rep caps are injected directly).
 // ---------------------------------------------------------------------------
 
-function makeKeyRegistry(): KeyRegistryPort {
+function makeSourceRegistry(): SourceRegistryPort {
   const known = new Set<SourceId>();
   return {
     register: (p) => void known.add(p.sourceId),
@@ -126,12 +126,12 @@ export function createIdRetriever(graph: SharedGraph, dataset: Dataset): IdRetri
   const reputationPort: ReputationLedgerPort = { scoreOf: (s) => reputation.scoreOf(s) };
   const stakePort: StakeLedgerPort = { postedFor: () => 0 as Unit };
   const identity = createSourceIdentityLayer({
-    keys: makeKeyRegistry(),
+    sources: makeSourceRegistry(),
     anchors: makeAnchorRegistry(),
     reputation: reputationPort,
     stake: stakePort,
   });
-  const ratification: RatificationDeps = { ledger: createPendingLedger(), systemSigner: generatePassport() };
+  const ratification: RatificationDeps = { ledger: createPendingLedger(), systemSource: freshSource().sourceId };
   const engine = createIntelligentDb(store, identity, null, reputation, ratification);
 
   // 4) Pre-earn the trusted (authority) sources to a decisive LCB.
@@ -346,12 +346,12 @@ export function createLocomoIdRetriever(conv: LocomoConversation): LocomoIdRetri
   const reputationPort: ReputationLedgerPort = { scoreOf: (s) => reputation.scoreOf(s) };
   const stakePort: StakeLedgerPort = { postedFor: () => 0 as Unit };
   const identity = createSourceIdentityLayer({
-    keys: makeKeyRegistry(),
+    sources: makeSourceRegistry(),
     anchors: makeAnchorRegistry(),
     reputation: reputationPort,
     stake: stakePort,
   });
-  const ratification: RatificationDeps = { ledger: createPendingLedger(), systemSigner: generatePassport() };
+  const ratification: RatificationDeps = { ledger: createPendingLedger(), systemSource: freshSource().sourceId };
   const engine = createIntelligentDb(store, identity, null, reputation, ratification);
 
   return {

@@ -22,7 +22,6 @@ import {
   createSourceIdentityLayer,
   createReputationLedger,
   createPendingLedger,
-  generatePassport,
   asStrandId,
   EdgeType,
   FactState,
@@ -35,7 +34,7 @@ import type {
   EpochMs,
   EntityId,
   AttributeKey,
-  KeyRegistryPort,
+  SourceRegistryPort,
   AnchorRegistryPort,
   ReputationLedger,
   ReputationLedgerPort,
@@ -45,6 +44,7 @@ import type {
 } from "../../index.js";
 
 import { makeStrand, makeEdge, NOW } from "../fixtures.js";
+import { freshSource } from "../../testSupport/identityFixtures.js";
 import { PRIMARY_WARMUP_RATIFIES } from "../trustWarmup.js";
 import { cosine } from "../retrieval/embed.js";
 import type { BenchItem } from "./datasets.js";
@@ -175,7 +175,7 @@ export function hybridArm(
 // substrate (Intelligent DB: activation walk + reputation + contradiction adjudication)
 // ---------------------------------------------------------------------------
 
-function makeKeyRegistry(): KeyRegistryPort {
+function makeSourceRegistry(): SourceRegistryPort {
   const known = new Set<SourceId>();
   return {
     register: (p) => void known.add(p.sourceId),
@@ -255,12 +255,12 @@ export function substrateArm(
   const reputationPort: ReputationLedgerPort = { scoreOf: (s) => reputation.scoreOf(s) };
   const stakePort: StakeLedgerPort = { postedFor: () => 0 as Unit };
   const identity = createSourceIdentityLayer({
-    keys: makeKeyRegistry(),
+    sources: makeSourceRegistry(),
     anchors: makeAnchorRegistry(),
     reputation: reputationPort,
     stake: stakePort,
   });
-  const ratification: RatificationDeps = { ledger: createPendingLedger(), systemSigner: generatePassport() };
+  const ratification: RatificationDeps = { ledger: createPendingLedger(), systemSource: freshSource().sourceId };
   const engine: IntelligentDb = createIntelligentDb(store, identity, null, reputation, ratification);
 
   // Pre-earn the trusted source(s) to a decisive LCB so adjudication resolves in their favor.

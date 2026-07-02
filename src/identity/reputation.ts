@@ -174,7 +174,7 @@ const MS_PER_DAY = 86_400_000;
 // ---------------------------------------------------------------------------
 
 /**
- * The reputation state for a single source (passport key) — a BETA(α,β) posterior
+ * The reputation state for a single source (one registered source id) — a BETA(α,β) posterior
  * over "how often this source's claims are independently corroborated".
  *
  * `alpha` (pseudo-corroborations + 1) and `beta` (asymmetric pseudo-contradictions
@@ -187,7 +187,7 @@ const MS_PER_DAY = 86_400_000;
  * contradiction-bomb abuses).
  */
 export interface ReputationState {
-  /** The source this state belongs to (its passport key). */
+  /** The source this state belongs to (its registered source id). */
   readonly sourceId: SourceId;
   /** Beta α: 1 + Σ(independence-weighted corroborations). Prior 1. */
   readonly alpha: number;

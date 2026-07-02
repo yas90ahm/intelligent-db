@@ -2,7 +2,7 @@
  * __bench__/fixtures.ts — SHARED, CHEAP bench fixtures (NO `bench()` here).
  *
  * The bench files import these builders to pre-seed webs, provenance root-sets,
- * identity layers, reputation ledgers and Merkle logs WITHOUT going through the
+ * * identity layers and reputation ledgers WITHOUT going through the
  * (expensive) engine for seed-only data. Seeding via `store.putStrand` /
  * `store.putEdge` + the `asStrandId` / `asEpochMs` constructors is FAR cheaper than
  * N × `writeFact`, so a 10k-strand web is built once in a `beforeAll`, not per
@@ -29,8 +29,9 @@ import {
   createSourceIdentityLayer,
   createReputationLedger,
   repCapFor,
-  generatePassport,
 } from "../index.js";
+
+import { freshSource } from "../testSupport/identityFixtures.js";
 
 import type {
   AnchorBinding,
@@ -49,7 +50,7 @@ import type {
   StrandStore,
   SourceIdentityLayer,
   ReputationLedger,
-  KeyRegistryPort,
+  SourceRegistryPort,
   AnchorRegistryPort,
   ReputationLedgerPort,
   StakeLedgerPort,
@@ -238,7 +239,7 @@ export function collapsedRoots(n: number): ProvenanceRoot[] {
 // ---------------------------------------------------------------------------
 
 /** A trivial in-memory key registry that accepts any registered source. */
-function makeKeyRegistry(): KeyRegistryPort {
+function makeSourceRegistry(): SourceRegistryPort {
   const known = new Set<SourceId>();
   return {
     register(p): void {
@@ -304,7 +305,7 @@ export function makeIdentity(
   const reputationPort: ReputationLedgerPort = { scoreOf: (s) => reputation.scoreOf(s) };
   const stakePort: StakeLedgerPort = { postedFor: () => 0 };
   const identity = createSourceIdentityLayer({
-    keys: makeKeyRegistry(),
+    sources: makeSourceRegistry(),
     anchors: anchorsRegistry,
     reputation: reputationPort,
     stake: stakePort,
@@ -334,5 +335,5 @@ export function costStamp(sourceId: SourceId, anchorCost: Unit): IdentityStamp {
   };
 }
 
-/** Mint a real ed25519 passport once (keys are expensive — never per iteration). */
-export { generatePassport };
+/** Mint a fresh, unique test source (crypto-free; see testSupport/identityFixtures). */
+export { freshSource };

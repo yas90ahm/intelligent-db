@@ -24,6 +24,7 @@
  */
 
 import { rmSync } from "node:fs";
+import { freshSource } from "../testSupport/identityFixtures.js";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -49,19 +50,17 @@ import { createSqliteStore, type SqliteStrandStore } from "./sqliteStore.js";
 import {
   createIntelligentDb,
   createSourceIdentityLayer,
-  createStakeLedger,
-  generatePassport,
   independenceBetween,
   AnchorClass,
 } from "../index.js";
 import type {
   AnchorBinding,
-  KeyRegistryPort,
+  SourceRegistryPort,
   AnchorRegistryPort,
   ReputationLedgerPort,
   StakeLedgerPort,
   SourceIdentityLayer,
-  Passport,
+  SourceRef,
   SourceId,
   Unit,
 } from "../index.js";
@@ -370,10 +369,10 @@ describe("SqliteStrandStore — persistence across a simulated restart", () => {
 
 // --- identity-layer wiring for the engine drop-in test (mirrors smoke.test.ts) ---
 
-function makeKeyRegistry(): KeyRegistryPort {
+function makeSourceRegistry(): SourceRegistryPort {
   const known = new Set<SourceId>();
   return {
-    register(p: Passport): void {
+    register(p: SourceRef): void {
       known.add(p.sourceId);
     },
     sourceIdOf(s: SourceId): SourceId | null {
@@ -409,11 +408,11 @@ function makeAnchorRegistry(): AnchorRegistryPort {
 }
 
 function makeIdentityLayer(): SourceIdentityLayer {
-  const stake = createStakeLedger();
-  const stakePort: StakeLedgerPort = { postedFor: (s) => stake.posted(s) };
+  // Staking is RETIRED (attribution replaces stake): a constant-zero port.
+  const stakePort: StakeLedgerPort = { postedFor: () => 0 };
   const reputation: ReputationLedgerPort = { scoreOf: () => 0 as Unit };
   return createSourceIdentityLayer({
-    keys: makeKeyRegistry(),
+    sources: makeSourceRegistry(),
     anchors: makeAnchorRegistry(),
     reputation,
     stake: stakePort,
@@ -433,7 +432,7 @@ describe("SqliteStrandStore — engine drop-in persists writeFact across a resta
     const identity = makeIdentityLayer();
     const db = createIntelligentDb(store, identity); // drop-in, store swapped UNCHANGED
 
-    const passport = generatePassport();
+    const passport = freshSource();
     identity.register(passport, [domainAnchor()]);
     const stamp = identity.stampFor(passport.sourceId);
 
@@ -470,7 +469,7 @@ describe("SqliteStrandStore — engine drop-in persists writeFact across a resta
     const identity = makeIdentityLayer();
     const db = createIntelligentDb(store, identity);
 
-    const passport = generatePassport();
+    const passport = freshSource();
     identity.register(passport, [domainAnchor()]);
     const stamp = identity.stampFor(passport.sourceId);
 

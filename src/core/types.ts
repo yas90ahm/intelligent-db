@@ -57,7 +57,8 @@ export type IndependenceClassId = Brand<string, "IndependenceClassId">;
  * registrar collapse toward one class rather than 10k".)
  */
 export type OperatorClassId = Brand<string, "OperatorClassId">;
-/** Identity of a source as witnessed by the Source-Identity Layer (its passport key). */
+/** Identity of a source as witnessed by the Source-Identity Layer (a deterministic
+ * checksum id over the external issuer+subject pair that already authenticated it). */
 export type SourceId = Brand<string, "SourceId">;
 /** Identity of a contradiction set: the cluster of co-equal disagreeing claims. */
 export type ContradictionSetId = Brand<string, "ContradictionSetId">;
@@ -161,10 +162,26 @@ export enum AnchorClass {
   HARDWARE_ATTESTATION = "HARDWARE_ATTESTATION",
   VERIFIED_HUMAN = "VERIFIED_HUMAN",
   ORGANIZATION = "ORGANIZATION",
-  /** Posted bond; weight scales with stake size, composes with any other row. */
+  /** Posted bond; weight scales with stake size, composes with any other row.
+   * RETIRED as a live pillar (attribution replaced stake); the row stays as
+   * inert policy data — no producer mints it. */
   FINANCIAL_STAKE = "FINANCIAL_STAKE",
   /** Notarized real-world event; the "window" that ratifies derived -> observed. */
   EXTERNAL_AUTHORITY = "EXTERNAL_AUTHORITY",
+  /** The deployment OWNER — the personal tier's ground truth (external-authority grade). */
+  OWNER = "OWNER",
+  /** A registry-configured authoritative system (Workday-for-HR etc.). */
+  SYSTEM_OF_RECORD = "SYSTEM_OF_RECORD",
+  /** An owner-admitted local file/document. */
+  LOCAL_DOCUMENT = "LOCAL_DOCUMENT",
+  /** Bare SSO tenant membership — deliberately email-grade: a fresh tenant is
+   * near-free to mint (a five-minute self-service action), so this row must never
+   * approach ORGANIZATION weight without a verified custom domain on the tenant. */
+  SSO_TENANT_MEMBER = "SSO_TENANT_MEMBER",
+  /** Fetched web content whose eTLD+1 has no track record ("some page said so"). */
+  PUBLISHER_UNVERIFIED = "PUBLISHER_UNVERIFIED",
+  /** A publisher with earned tenure — kept BELOW DOMAIN's ceiling deliberately. */
+  PUBLISHER_TRACKED = "PUBLISHER_TRACKED",
 }
 
 /**
@@ -183,6 +200,15 @@ export enum ReasonCode {
   BRIDGE_STARVED = "BRIDGE_STARVED",
   /** Hard backstop tripped: pop-cap or wall-clock. Answer is partial. */
   TRUNCATED = "TRUNCATED",
+  /**
+   * No seed strand resolved in the store: the cue never touched the web. Answer
+   * is empty and DEGRADED, not clear — without this stamp an all-dangling-seeds
+   * recall was indistinguishable from a genuinely healthy empty answer
+   * (BRIDGE_SWEEP_CLEAR / popCount 0 / degraded false): a silent stop wearing a
+   * success stamp. Distinct from an EMPTY cue (zero seeds supplied), which stays
+   * the caller's legitimate no-op.
+   */
+  NO_SEEDS_RESOLVED = "NO_SEEDS_RESOLVED",
 }
 
 // ---------------------------------------------------------------------------
@@ -199,10 +225,22 @@ export interface ProvenanceRoot {
   readonly rootId: ProvenanceRootId;
   /** Offline-assigned class; independence is judged across classes, not raw ids. */
   readonly independenceClass: IndependenceClassId;
-  /** The witnessing source (passport key) behind this root, if known to the layer. */
+  /** The witnessing source behind this root, if known to the layer. */
   readonly sourceId: SourceId | null;
   /** When this root was first established (witness time, not file time). */
   readonly establishedAt: EpochMs;
+  /**
+   * TRUE when this root's `independenceClass` was INHERITED from the fact's causal
+   * origin (an AGENT_RELAY copy of an upstream witness's class, or a per-resource
+   * TOOL_CALL/DOCUMENT class) rather than minted from the filing source's OWN
+   * identity. The class then BELONGS to the upstream witness/resource, not to
+   * `sourceId` — so a disown of `sourceId` must NOT taint it (tainting an
+   * inherited class would let a fraudster who merely RELAYED an honest source
+   * scar every honest source rooted in that class — a suppression vector).
+   * Absent (the default) on every root whose class is the source's own — the
+   * pre-relay-fix invariant `class == class:${sourceId}` made this implicit.
+   */
+  readonly inheritedClass?: true;
 }
 
 // ---------------------------------------------------------------------------
@@ -232,7 +270,7 @@ export interface AnchorBinding {
  *   { source_id, anchor_set, anchor_cost, reputation, stake_posted }.
  */
 export interface IdentityStamp {
-  /** Passport key: proves sameness. Same key => same source => never corroboration. */
+  /** Proves sameness: same issuer+subject => same source => never corroboration. */
   readonly source_id: SourceId;
   /** The source's anchor bindings; independence is disjointness over these. */
   readonly anchor_set: readonly AnchorBinding[];

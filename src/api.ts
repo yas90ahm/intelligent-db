@@ -53,6 +53,8 @@ import {
   asEdgeId,
 } from "./core/types.js";
 
+import { canonicalJson } from "./core/canonicalJson.js";
+
 import type {
   StrandId,
   EdgeId,
@@ -60,6 +62,7 @@ import type {
   AttributeKey,
   ContentHash,
   ContradictionSetId,
+  IndependenceClassId,
   SourceId,
   ProvenanceRootId,
   EpochMs,
@@ -81,7 +84,6 @@ import type { HaltingController } from "./traversal/halting.js";
 import { createHaltingController } from "./traversal/halting.js";
 import type { SourceIdentityLayer } from "./identity/index.js";
 import type { ReputationLedger, ReputationState } from "./identity/reputation.js";
-import type { KeyPair } from "./identity/keys.js";
 
 import {
   buildContradictionSet,
@@ -90,11 +92,13 @@ import {
 import type {
   ConsolidationOutcome,
   HighImpactContext,
+  PendingRatificationReason,
 } from "./forgetting/consolidation.js";
 
 import type {
   PendingLedger,
   PendingPayload,
+  ApprovalPayload,
   ResolvedDispute,
   ApproveContext,
   MutationPayload,
@@ -106,12 +110,6 @@ import {
   hashSubjectId,
   mutationReceipt,
 } from "./ratification/mutationReceipt.js";
-import type {
-  MerkleLog,
-  PublicationSink,
-  STH,
-} from "./ratification/merkleLog.js";
-import { createMerkleLog } from "./ratification/merkleLog.js";
 import type { CorroborationLedger } from "./ratification/corroboration.js";
 import type { AdjudicationProvenanceLedger } from "./ratification/adjudicationProvenance.js";
 import type { WeakInfluenceLedger } from "./ratification/weakInfluence.js";
@@ -163,6 +161,44 @@ export interface ConsolidationPort {
 // ---------------------------------------------------------------------------
 
 /**
+ * The CAUSAL ORIGIN of an observed fact — WHERE the observation actually came
+ * from, as distinct from WHO filed it (the {@link WriteFactInput.stamp}).
+ *
+ * This closes the RELAY-LAUNDERING hole: without it, the engine mints the new
+ * strand's independence class from the FILING agent's identity alone
+ * (`class:${source_id}`), so when agent A researches a fact, writes it, and then
+ * tells agent B in-context — and B writes the SAME fact under B's own stamp —
+ * the system mints TWO distinct independence classes for ONE relayed
+ * observation. That is manufactured corroboration with zero attacker: the
+ * engine's exact MIS count (`independentRootCount`), the high-impact gate, and
+ * the depth-floor all trust that class assignment. The causal origin lets the
+ * write path collapse the class AT WRITE TIME, so the existing Bron–Kerbosch
+ * count does the rest unmodified.
+ *
+ *  - `TOOL_CALL` / `DOCUMENT` — the observation came from an external resource.
+ *    `resourceId` MUST be the canonicalized UNDERLYING resource (normalized URL /
+ *    content hash), never an ephemeral invocation id; canonicalization is the
+ *    CALLER's job — this layer just hashes what it is given. The same resource
+ *    then collapses to ONE independence class no matter WHICH agent fetched it.
+ *  - `USER_STATEMENT` — the user said it directly to this agent: the filing
+ *    source genuinely IS the witness, so today's per-source class is correct.
+ *  - `AGENT_RELAY` — the filing agent learned it from strands already in the
+ *    web (`consultedStrandIds`). The write COPIES the consulted strands'
+ *    independence classes (one root per distinct upstream class) instead of
+ *    minting a fresh one, so the relay counts as the SAME witness — and mints a
+ *    DERIVATION edge per consulted strand so a later disown sweep taints it.
+ *    A class is copied ONLY from a witness making the SAME CLAIM (same
+ *    entity + attribute + payload — the ECHO GATE in `resolveCausalOrigin`):
+ *    a contradicting payload citing a rival's strand cannot inherit the
+ *    rival's class and launder itself into the single-class echo-dispute lane.
+ */
+export type CausalOrigin =
+  | { readonly kind: "TOOL_CALL"; readonly resourceId: string }
+  | { readonly kind: "DOCUMENT"; readonly resourceId: string }
+  | { readonly kind: "USER_STATEMENT" }
+  | { readonly kind: "AGENT_RELAY"; readonly consultedStrandIds: readonly StrandId[] };
+
+/**
  * Input to {@link IntelligentDb.writeFact}. Files a single OBSERVED fact.
  *
  * The `stamp` is mandatory: an observed fact with no identity stamp has no voice
@@ -179,6 +215,16 @@ export interface WriteFactInput {
   readonly payload: unknown;
   /** The Source-Identity Layer's stamp for the source behind this observation. */
   readonly stamp: IdentityStamp;
+  /**
+   * OPTIONAL {@link CausalOrigin}: where the observation actually came from, as
+   * distinct from who filed it. Omitted (or `USER_STATEMENT`) ⇒ today's behavior
+   * exactly — the independence class is minted from the filing stamp's source id.
+   * `TOOL_CALL`/`DOCUMENT` derive the class from the underlying resource so the
+   * same resource collapses to ONE class across agents; `AGENT_RELAY` copies the
+   * consulted strands' classes and mints DERIVATION citation edges, so a relayed
+   * fact can never masquerade as fresh independent corroboration.
+   */
+  readonly causalOrigin?: CausalOrigin;
 }
 
 /**
@@ -203,6 +249,15 @@ export interface RecallResult {
   readonly lit: readonly LitStrand[];
   /** The halt stamp: reason code + pop/bridge counts + degraded flag. */
   readonly halt: HaltStamp;
+  /**
+   * Seed ids the cue supplied that did NOT resolve in the store, forwarded from
+   * the walk verbatim. ALWAYS present (empty when every seed resolved). When ALL
+   * seeds fail to resolve, `halt.reason` is `ReasonCode.NO_SEEDS_RESOLVED` with
+   * `degraded: true` — never a healthy-looking BRIDGE_SWEEP_CLEAR.
+   */
+  readonly unresolvedSeeds: readonly StrandId[];
+  /** How many supplied seeds resolved in the store. ALWAYS present. */
+  readonly seedsResolved: number;
 }
 
 /**
@@ -225,6 +280,281 @@ export interface RatifyInput {
   // (#deriveAgreementSet — same entity + content_hash + LIVE) and records the event
   // with the EXACT applied delta, so a later disown can reverse precisely that credit.
   // The caller can no longer inject which strands "corroborated" the claim.
+}
+
+// ---------------------------------------------------------------------------
+// explain / beliefTimeline — READ-ONLY introspection shapes (the belief dossier
+// and the time-travel history). These features OBSERVE the graph + the wired
+// ledgers; they never influence the walk, never write, and never fabricate a
+// timestamp (the fail-honest religion made mechanical via EvidenceFidelity).
+// ---------------------------------------------------------------------------
+
+/**
+ * WHERE a reported timestamp / cause came from — the fidelity marker that makes
+ * "honest degradation" structural instead of aspirational:
+ *  - `RECEIPT`      — copied verbatim from a committed audit record (a MUTATION /
+ *                     APPROVAL / PENDING / corroboration event). Exact as recorded
+ *                     (note: `disown(opts.at)` is caller-supplied, so a receipt
+ *                     witnesses the RECORDED time, not wall-clock truth).
+ *  - `STRAND_FIELD` — read from a field the strand itself carries (`observedAt`,
+ *                     `fact_state`, `outranked_by`). True NOW; historical
+ *                     transitions to this state are not implied.
+ *  - `INFERRED`     — derived from indirect evidence (e.g. a provenance root whose
+ *                     `establishedAt > observedAt` implies a later ratify touched
+ *                     the strand) — real evidence, but NOT a recorded transition.
+ */
+export type EvidenceFidelity = "RECEIPT" | "STRAND_FIELD" | "INFERRED";
+
+/**
+ * What the report could even SEE: which optional ledgers were wired when it was
+ * built. A `false` flag means the matching arrays are structurally empty — absence
+ * of records, not absence of history (the honest-gap disclosure carried in-band).
+ */
+export interface AuditCoverage {
+  /** A ratification (audit) ledger is wired (`RatificationDeps` present). */
+  readonly auditLedger: boolean;
+  /** The corroboration-event ledger is wired. */
+  readonly corroborationLedger: boolean;
+  /** The adjudication-provenance ledger is wired. */
+  readonly adjudicationProvenance: boolean;
+  /** A reputation ledger is wired. */
+  readonly reputationLedger: boolean;
+}
+
+/** One provenance root of the explained strand, verbatim plus derived flags. */
+export interface ExplainRoot {
+  readonly rootId: ProvenanceRootId;
+  readonly independenceClass: IndependenceClassId;
+  readonly sourceId: SourceId | null;
+  readonly establishedAt: EpochMs;
+  /** TRUE when the class was inherited from the causal origin, not earned. */
+  readonly inherited: boolean;
+  /**
+   * `establishedAt > observedAt` — INFERRED evidence a later ratify appended this
+   * root. NOT proof of a state flip (an echo ratify appends without flipping),
+   * and a same-millisecond ratify is invisible (documented residual).
+   */
+  readonly appendedAfterWrite: boolean;
+}
+
+/** One distinct source backing the explained strand, with its canonical stamp. */
+export interface ExplainSource {
+  readonly sourceId: SourceId;
+  /** The identity layer's canonical stamp — engine-owned evidence, never cached. */
+  readonly stamp: IdentityStamp;
+  /**
+   * Registry metadata (label + kind) — the ENGINE always reports `null` (it has
+   * no trust-registry handle); the facade's `explain` enriches it via
+   * `trust.refOf`. Descriptive only, never load-bearing.
+   */
+  readonly registered: { readonly label: string | null; readonly kind: string } | null;
+}
+
+/**
+ * WHY a DEMOTED strand was demoted, resolved from its `outranked_by` edge. The
+ * demotion TIME is a RECEIPT (the first matching `DEMOTE` MUTATION) when the
+ * audit ledger recorded one, else `null` + `STRAND_FIELD` — never invented.
+ */
+export type ExplainDemotion =
+  | {
+      readonly kind: "OUTRANKED_BY_STRAND";
+      readonly outranksEdgeId: EdgeId;
+      readonly winnerStrandId: StrandId;
+      readonly at: EpochMs | null;
+      readonly atFidelity: EvidenceFidelity;
+    }
+  | {
+      /** The `from` was a disown sentinel: provenance was disowned, no peer won. */
+      readonly kind: "DISOWN_SENTINEL";
+      readonly outranksEdgeId: EdgeId;
+      readonly disownedSourceId: SourceId;
+      readonly at: EpochMs | null;
+      readonly atFidelity: EvidenceFidelity;
+    }
+  | {
+      /** `outranked_by` names an edge the store cannot resolve — reported, never invented. */
+      readonly kind: "EDGE_MISSING";
+      readonly outranksEdgeId: EdgeId;
+    };
+
+/** One dispute (open or resolved) the explained strand is/was a member of. */
+export type ExplainDispute =
+  | {
+      readonly status: "OPEN";
+      readonly contradictionSetId: ContradictionSetId;
+      readonly reason: PendingRatificationReason;
+      readonly createdAt: EpochMs;
+      readonly members: readonly StrandId[];
+    }
+  | {
+      readonly status: "RESOLVED_BY_APPROVAL";
+      readonly contradictionSetId: ContradictionSetId;
+      readonly winner: StrandId;
+      readonly approverSourceId: SourceId;
+      readonly approvedAt: EpochMs;
+      readonly ownerOverride: boolean;
+    }
+  | {
+      readonly status: "RESOLVED_BY_ADJUDICATION";
+      readonly contradictionSetId: ContradictionSetId;
+      readonly winner: StrandId;
+      readonly margin: number;
+      readonly at: EpochMs;
+      /** Whether a later disown re-opened this resolution (`isReopened(csid)`). */
+      readonly reopened: boolean;
+    };
+
+/** One corroboration event naming the explained strand (either role). */
+export interface ExplainCorroborationEvent {
+  readonly eventId: string;
+  readonly at: EpochMs;
+  readonly beneficiarySourceId: SourceId;
+  readonly reputationDelta: number;
+  /** RATIFIED = this strand earned the credit; CORROBORATOR = it funded one. */
+  readonly role: "RATIFIED" | "CORROBORATOR";
+  readonly reversed: boolean;
+}
+
+/**
+ * THE BELIEF DOSSIER: "why does the system believe this?" — plain data assembling
+ * what the graph + the wired ledgers already know about one strand. READ-ONLY:
+ * built entirely from `getStrand`/`getEdge`/edge indexes, the identity layer, and
+ * ledger scans; `independentRootCount` / `agreementStrandIds` are THE SAME numbers
+ * the adjudication gates read (`#R` / `#deriveAgreementSet`), never a parallel
+ * computation. Always recomputed fresh (no memoization — a dispute can open or
+ * close between calls); deterministic for equal inputs via the explicit sort rules.
+ */
+export interface ExplainReport {
+  readonly strandId: StrandId;
+  readonly entity: EntityId;
+  readonly attribute: AttributeKey | null;
+  readonly payload: unknown;
+  readonly contentHash: ContentHash;
+  readonly factState: FactState;
+  readonly origin: FactOrigin;
+  readonly tier: Tier;
+  readonly observedAt: EpochMs;
+  readonly externalReobservationCount: number;
+  /** The strand's provenance roots, in strand order, verbatim. */
+  readonly roots: readonly ExplainRoot[];
+  /** Distinct backing sources, first-appearance order over the roots. */
+  readonly sources: readonly ExplainSource[];
+  /** `#R(strand)` — the EXACT number the adjudication/high-impact gates read. */
+  readonly independentRootCount: number;
+  /** A sorted COPY of `#deriveAgreementSet(strand)` (the gates' own basis). */
+  readonly agreementStrandIds: readonly StrandId[];
+  /** Out-DERIVATION edges' `to` (what this strand rests on), sorted by edge id. */
+  readonly restsOn: readonly StrandId[];
+  /** In-DERIVATION edges' `from` (what rests on this strand), sorted by edge id. */
+  readonly supports: readonly StrandId[];
+  /** Demotion explanation; `null` unless `outranked_by` is set. */
+  readonly demotion: ExplainDemotion | null;
+  /** Member of any OPEN pending dispute (the same rule the recall label uses). */
+  readonly contested: boolean;
+  /** Every dispute naming this strand, ledger-chain order then provenance order. */
+  readonly disputes: readonly ExplainDispute[];
+  /** Corroboration events naming this strand (either role), append order. */
+  readonly corroborationEvents: readonly ExplainCorroborationEvent[];
+  /** MUTATION receipts whose `subjectId` IS this strand, chain order. */
+  readonly mutationReceipts: readonly MutationPayload[];
+  /**
+   * MUTATION receipts whose `subjectId` is one of this strand's BACKING SOURCE
+   * ids — surfaces e.g. a `DISOWN_CRATER` against the source of a still-LIVE
+   * seed strand (the sweep demotes only derivatives; T8's honest residual).
+   */
+  readonly sourceMutationReceipts: readonly MutationPayload[];
+  readonly coverage: AuditCoverage;
+}
+
+/**
+ * One event in a (entity, attribute) belief timeline. EVERY dated event's `at` is
+ * copied VERBATIM from a record field or strand field (the fabrication ban); an
+ * event whose time is unknowable carries `at: null` and lives in
+ * {@link BeliefTimeline.undatedEvents}. There are deliberately NO promotion
+ * events (PROVISIONAL→LIVE / DERIVED→OBSERVED): no promotion receipt type exists,
+ * so their absence IS the honest answer — `OBSERVED.birthState` is structurally
+ * `"UNKNOWN"` because a strand's birth state is recorded nowhere.
+ */
+export type BeliefEvent =
+  | {
+      readonly kind: "OBSERVED";
+      readonly strandId: StrandId;
+      readonly at: EpochMs;
+      readonly source: "STRAND_FIELD";
+      /** Birth state (LIVE vs PROVISIONAL) is recorded NOWHERE — honesty is structural. */
+      readonly birthState: "UNKNOWN";
+    }
+  | {
+      readonly kind: "EXTERNAL_ROOT_APPENDED";
+      readonly strandId: StrandId;
+      readonly at: EpochMs;
+      /** INFERRED: root-append ≠ state flip (an echo ratify appends without flipping). */
+      readonly source: "INFERRED";
+      readonly rootId: ProvenanceRootId;
+      readonly sourceId: SourceId | null;
+    }
+  | {
+      readonly kind: "DEMOTED";
+      readonly strandId: StrandId;
+      readonly at: EpochMs | null;
+      readonly source: "RECEIPT" | "STRAND_FIELD";
+      readonly outranksEdgeId: EdgeId | null;
+      readonly by: "STRAND" | "DISOWN" | "UNKNOWN";
+    }
+  | {
+      readonly kind: "DISPUTE_OPENED";
+      readonly contradictionSetId: ContradictionSetId;
+      readonly at: EpochMs;
+      readonly source: "RECEIPT";
+      readonly members: readonly StrandId[];
+      readonly reason: PendingRatificationReason;
+    }
+  | {
+      readonly kind: "DISPUTE_RESOLVED";
+      readonly contradictionSetId: ContradictionSetId;
+      readonly at: EpochMs;
+      readonly source: "RECEIPT";
+      readonly winner: StrandId;
+      readonly approverSourceId: SourceId;
+      readonly ownerOverride: boolean;
+    }
+  | {
+      readonly kind: "DISPUTE_REOPENED";
+      readonly contradictionSetId: ContradictionSetId;
+      readonly at: EpochMs;
+      readonly source: "RECEIPT";
+      readonly winner: StrandId;
+    }
+  | {
+      readonly kind: "CORROBORATION_CREDITED";
+      readonly strandId: StrandId;
+      readonly at: EpochMs;
+      readonly source: "RECEIPT";
+      readonly eventId: string;
+      readonly beneficiarySourceId: SourceId;
+      readonly reversed: boolean;
+    };
+
+/**
+ * TIME-TRAVEL over one (entity, attribute): the ordered history of what was
+ * believed, exactly as far as the records support it — and an explicit
+ * `undatedEvents` bucket where they do not. `believedAt(t)` is NOT exactly
+ * reconstructible in general (see the transition→record matrix in the spec):
+ * demotions and dispute open/resolve/re-open are RECEIPT-exact iff a ratification
+ * ledger was wired at transition time; birth state and promotions are never exact.
+ */
+export interface BeliefTimeline {
+  readonly entity: EntityId;
+  readonly attribute: AttributeKey;
+  /** The member strands (attribute index filtered to `entity`), sorted (observedAt, id). */
+  readonly members: readonly StrandId[];
+  /** Dated events, ascending (at, kindRank, strandId/csid). NEVER an invented timestamp. */
+  readonly events: readonly BeliefEvent[];
+  /** `at: null` only (e.g. a receiptless DEMOTED) — the honest gap bucket. */
+  readonly undatedEvents: readonly BeliefEvent[];
+  /** Members with `fact_state === LIVE` NOW (a STRAND_FIELD read, not history). */
+  readonly currentBelief: readonly StrandId[];
+  readonly coverage: AuditCoverage;
 }
 
 // ---------------------------------------------------------------------------
@@ -289,8 +619,9 @@ export interface IntelligentDb {
    *   - RESOLVED  → persist each loser's demotion + the OUTRANKS edge, and drive
    *                 `reputation.contradict` on the losers.
    *   - DEFERRED  → record the {@link PendingRatification} in the ratification
-   *                 LEDGER (a signed PENDING record) for the second-admin horn.
-   *                 NOTHING is demoted — only an external `approve()` may resolve it.
+   *                 LEDGER (a checksum-chained PENDING record) for the second-admin
+   *                 horn. NOTHING is demoted — only an external `approve()` may
+   *                 resolve it.
    *   - NOOP      → nothing to do.
    *
    * Returns the raw {@link ConsolidationOutcome} so the caller can observe the
@@ -335,42 +666,106 @@ export interface IntelligentDb {
 
   /**
    * RESOLVE a deferred dispute by an EXTERNAL approver's decision (the second-admin
-   * answer). Records a signed APPROVAL receipt in the immortal ledger, then APPLIES
+   * answer). Records an APPROVAL receipt in the immortal checksum chain, then APPLIES
    * the resolution to the store: winner stays LIVE; losers DEMOTED + `outranked_by`
    * set (never deleted); the minted OUTRANKS edges persisted; reputation driven.
    * REQUIRES the approver to be DISTINCT from every source that authored a member
-   * (rejects self-approval) and to present a verifiable passport.
+   * (rejects self-approval) and to be REGISTERED in the identity layer with at
+   * least one anchor (fail-closed — "no provenance → no voice").
+   *
+   * PHASE 4: pass {@link ApproveOptions.allowAuthorApprover} `true` to invoke the
+   * PERSONAL-tier OWNER-OVERRIDE policy hook (see {@link ApproveOptions}) — the
+   * distinct-approver and RC-5 independence-vs-authors gates are bypassed and the
+   * APPROVAL record is stamped `ownerOverride: true`. Default absent/false:
+   * enterprise semantics unchanged.
    *
    * @throws if no ratification ledger is wired, the dispute is unknown / resolved,
-   *         the winner is not a member, the approver is self / forged.
+   *         the winner is not a member, the approver is self / unregistered /
+   *         anchorless / not anchor-independent of an author.
    */
   approve(
     contradictionSetId: ContradictionSetId,
     winnerStrandId: StrandId,
-    approver: KeyPair,
+    approver: SourceId,
     now?: EpochMs,
+    opts?: ApproveOptions,
   ): ResolvedDispute;
 
   /**
-   * A2 EPOCH TICK: publish the current Signed Tree Head to every wired sink
-   * (operator/cron-driven, NEVER per-op — this is the per-op anchoring VETO honored at
-   * the engine seam). Returns the published {@link STH}, or `null` when no merkle layer
-   * is wired. Off the write/recall path.
+   * THE BELIEF DOSSIER (read-only): assemble everything the graph + the wired
+   * ledgers already know about WHY one strand is believed (or not): claim, state,
+   * backing sources with canonical stamps, the gates' OWN independence count and
+   * agreement basis, DERIVATION citations both directions, demotion cause,
+   * dispute status, corroboration events, and audit receipts. Performs ZERO
+   * writes; observes (never influences) the walk; degrades honestly when ledgers
+   * are unwired (`coverage` flags + empty arrays). Control-plane cost: O(chain)
+   * ledger scans — never on the recall hot path.
+   *
+   * @returns `null` for an unknown strand (a query miss, not an error).
    */
-  anchorEpoch(now?: EpochMs): STH | null;
+  explain(strandId: StrandId): ExplainReport | null;
 
   /**
-   * A2: publish the GENESIS STH (the empty tree) once at init so pre-first-anchor history
-   * is not attacker-choosable. Returns the published STH, or `null` when unwired.
+   * TIME-TRAVEL (read-only): the ordered belief history of one (entity,
+   * attribute) — each member's appearance, dispute open/resolve/re-open,
+   * receipted demotions, corroboration credits — with an explicit fidelity
+   * marker per event and an `undatedEvents` bucket for transitions the records
+   * cannot date (NEVER a fabricated timestamp). An unknown (entity, attribute)
+   * yields empty arrays; never throws. Control-plane cost, read-only.
    */
-  publishGenesis(now?: EpochMs): STH | null;
-
-  /**
-   * A2: the wired {@link MerkleLog} (for witness checks / inclusion proofs), or `null`
-   * when no merkle layer is wired.
-   */
-  merkleLog(): MerkleLog | null;
+  beliefTimeline(entity: EntityId, attribute: AttributeKey): BeliefTimeline;
 }
+
+// ---------------------------------------------------------------------------
+// Trust-tiered ingest (Phase 3) — the quarantine gate policy
+// ---------------------------------------------------------------------------
+
+/**
+ * TRUST-TIERED INGEST policy (design doc §4.1 "Ingestion wiring"): the ONE knob
+ * governing whether a filed fact lands {@link FactState.LIVE} or is QUARANTINED
+ * as {@link FactState.PROVISIONAL} — the EXISTING "visible superposition" state,
+ * reused verbatim (no new enum, no new promotion machinery).
+ *
+ * THE RULE: the engine re-derives the filer's canonical stamp from the identity
+ * layer (`identity.stampFor(stamp.source_id)` — engine-owned evidence, OD-8:
+ * the caller-supplied `anchor_set` is NEVER trusted for this gate, since a
+ * caller could inflate it) and takes the STRONGEST SINGLE anchor
+ * `independenceWeight` — the same "strongest single anchor, never a sum" notion
+ * `aggregateAnchorCost` / `applySelfStackCap` use, so a stack of cheap anchors
+ * cannot buy its way past the gate. If that strongest weight is BELOW
+ * `quarantineThreshold`, the fact lands PROVISIONAL/WARM (stored, traversable,
+ * recallable — the spiderweb SHOWS superpositions — but unable to demote a LIVE
+ * incumbent: `adjudicate` admits only LIVE members). At-or-above lands LIVE/WARM
+ * exactly as before.
+ *
+ * THE DEFAULT ({@link DEFAULT_QUARANTINE_THRESHOLD} = 0.10, applied when the
+ * policy is OMITTED — fail-open-forever was the bug being closed): BARE_KEY
+ * (0.00) and PUBLISHER_UNVERIFIED (0.04) quarantine; SSO_TENANT_MEMBER (0.12),
+ * PUBLISHER_TRACKED (0.18), LOCAL_DOCUMENT (0.35), DOMAIN (0.35), OWNER (0.90)
+ * do not. `quarantineThreshold: 0` is the EXPLICIT escape hatch that restores
+ * the legacy always-LIVE ingest (nothing has a strongest weight below 0).
+ *
+ * EXIT from quarantine is ONLY through the existing promotion paths: `ratify()`
+ * by an anchor-INDEPENDENT external source (see the quarantine-exit gate in
+ * `#ratifyImpl`) or an `approve()` resolution.
+ */
+export interface IngestPolicy {
+  /**
+   * Strongest-single-anchor `independenceWeight` below which an ingested fact
+   * lands PROVISIONAL. Defaults to {@link DEFAULT_QUARANTINE_THRESHOLD}; set 0
+   * to restore legacy always-LIVE ingest.
+   */
+  readonly quarantineThreshold?: number;
+}
+
+/**
+ * The default {@link IngestPolicy.quarantineThreshold}. Sits exactly at
+ * EMAIL_OAUTH's 0.10 (the cheapest non-bare rung of the anchor ladder): with a
+ * strict `<` comparison, an email-grade-or-better anchor passes and only the
+ * near-free classes below it (BARE_KEY 0.00, PUBLISHER_UNVERIFIED 0.04) — the
+ * identities a Sybil can mint for ~nothing — are held at the door.
+ */
+export const DEFAULT_QUARANTINE_THRESHOLD = 0.1;
 
 // ---------------------------------------------------------------------------
 // Factory
@@ -392,6 +787,12 @@ export interface IntelligentDb {
  * only belief-raising verb, and the SAME ledger instance must back the identity
  * facade's `ReputationLedgerPort.scoreOf` so the next `stampFor` reflects it. When
  * null (the scaffold default), ratification raises belief but earns no reputation.
+ *
+ * The {@link IngestPolicy} is the trust-tiered ingest knob (Phase 3). OMITTED (or
+ * null) means the DEFAULT gate at {@link DEFAULT_QUARANTINE_THRESHOLD} — a fact
+ * from a source whose strongest single anchor weight is below 0.10 lands
+ * PROVISIONAL, not LIVE. Pass `{ quarantineThreshold: 0 }` for the explicit
+ * legacy always-LIVE escape hatch.
  */
 export function createIntelligentDb(
   store: StrandStore,
@@ -399,22 +800,23 @@ export function createIntelligentDb(
   consolidation: ConsolidationPort | null = null,
   reputation: ReputationLedger | null = null,
   ratification: RatificationDeps | null = null,
+  ingest: IngestPolicy | null = null,
 ): IntelligentDb {
-  return new IntelligentDbImpl(store, identity, consolidation, reputation, ratification);
+  return new IntelligentDbImpl(store, identity, consolidation, reputation, ratification, ingest);
 }
 
 /**
  * The ratification wiring the engine needs to back the {@link PendingRatification}
- * horn: the append-only signed LEDGER (vault + doorbell) and the SYSTEM signer (the
- * engine's own passport) used to sign PENDING records. Optional — when absent, the
- * engine still adjudicates (RESOLVED/NOOP) but cannot DEFER or approve (it throws on
- * those paths so a deferred dispute is never silently dropped).
+ * horn: the append-only checksum-chained LEDGER (vault + doorbell) and the SYSTEM
+ * source id attributed on every system-authored PENDING/MUTATION record. Optional —
+ * when absent, the engine still adjudicates (RESOLVED/NOOP) but cannot DEFER or
+ * approve (it throws on those paths so a deferred dispute is never silently dropped).
  */
 export interface RatificationDeps {
-  /** The immortal, hash-chained, signed ratification ledger. */
+  /** The immortal, hash-chained ratification ledger (a tamper-evident checksum chain). */
   readonly ledger: PendingLedger;
-  /** The engine's passport, signing every system-authored PENDING record. */
-  readonly systemSigner: KeyPair;
+  /** The engine's own {@link SourceId}, attributed on every system-authored record. */
+  readonly systemSource: SourceId;
   /**
    * Optional CORROBORATION-EVENT LEDGER. When supplied, the `ratify` verb RECORDS a
    * corroboration event with the EXACT applied reputation delta whenever an external
@@ -439,16 +841,6 @@ export interface RatificationDeps {
    * DERIVATION citation.
    */
   readonly weakInfluence?: WeakInfluenceLedger;
-  /**
-   * A2 [optional/latent] — wire a {@link MerkleLog} over the SAME ratification ledger so
-   * a witness can detect a hidden disown (mk-m3). OMITTED (the default) ⇒ behavior is
-   * back-compatible: A1 MUTATION receipts are STILL journaled latently into the ledger
-   * (the audit COVERAGE), but NO STH is published and no sink is written. When supplied,
-   * the engine builds the log at construction (`createMerkleLog` enforces ≥2 independent
-   * sinks — fail-closed at wiring time) and exposes {@link IntelligentDb.anchorEpoch} /
-   * {@link IntelligentDb.publishGenesis} / {@link IntelligentDb.merkleLog}.
-   */
-  readonly merkle?: { readonly signer: KeyPair; readonly sinks: readonly PublicationSink[] };
 }
 
 /**
@@ -465,6 +857,24 @@ export interface AdjudicateOptions {
    * index); the caller supplies NO evidence proxy (OD-8, engine-owned-evidence).
    */
   readonly highImpact?: boolean;
+}
+
+/**
+ * Optional knobs for {@link IntelligentDb.approve} (PHASE 4 — surfacing the dispute
+ * horn per tier). `allowAuthorApprover` is the PERSONAL tier's OWNER-OVERRIDE policy
+ * hook, threaded verbatim into {@link ApproveContext.allowAuthorApprover} (where the
+ * full WHY is documented): in a mom-and-pop deployment the OWNER is the trust root —
+ * an EXTERNAL_AUTHORITY-grade anchor with no second admin to ring — and the owner
+ * overriding a memory they themselves authored ("you told me X in March") is the
+ * tier's ground truth, not self-dealing. Under the flag ONLY the distinct-approver
+ * gate and the RC-5 independence-vs-authors check are bypassed; registered-with-
+ * anchors, dispute-open, and winner-is-member stay unconditional, and the APPROVAL
+ * record is stamped `ownerOverride: true` in the immortal chain. DEFAULT FALSE —
+ * enterprise callers that omit it get exactly the pre-Phase-4 fail-closed gates.
+ */
+export interface ApproveOptions {
+  /** PERSONAL-tier owner-override (see above). Default `false` (fail-closed). */
+  readonly allowAuthorApprover?: boolean;
 }
 
 /**
@@ -504,22 +914,63 @@ function hashPayload(entity: EntityId, payload: unknown): ContentHash {
   const h = createHash("sha256");
   h.update(String(entity));
   h.update("\u0000");
-  h.update(JSON.stringify(payload ?? null));
+  // CANONICAL serialization (core/canonicalJson.ts): `content_hash` is the engine's
+  // "same claim" fingerprint — the corroboration agreement set (#deriveAgreementSet),
+  // the AGENT_RELAY echo gate (resolveCausalOrigin's claimHash), and disown's
+  // dedupe-by-root all compare it — so it must be a function of the payload VALUE,
+  // never of key insertion order. Raw JSON.stringify made {city, since} and
+  // {since, city} hash differently: corroboration silently undercounted, and class
+  // inheritance was refused to a byte-reordered relay of the SAME object (re-opening
+  // the manufactured-corroboration hole the relay fix closed).
+  //
+  // MIGRATION NOTE (stated out loud): this CHANGES the computed content_hash for any
+  // payload whose stored hash was minted from non-sorted key order, and there is no
+  // schema-migration ladder (a documented GAP-LIST item) — hashes persisted in a
+  // pre-existing database file simply predate this function. Acceptable for the
+  // prototype; a real deployment would rehash under a user_version migration.
+  h.update(canonicalJson(payload ?? null));
   return h.digest("hex") as ContentHash;
 }
 
 /**
- * Build a single provenance root from a source's stamp. The source's passport key
+ * Cheap, deterministic proxy for CLAUDE.md's `description_value` ("reconstruction-loss
+ * bits vs independent neighbors, echo-discounted"). This is the ONLY real signal the
+ * forgetting layer's LOW_UNIQUE_VALUE gate (`forgetting/tiers.ts`) has to work with —
+ * without it every strand looks equally (un)unique and the gate is dead weight. Uses a
+ * zero-dependency order-0 Shannon-entropy estimate over the JSON-serialized payload:
+ * real information content, one pass, deterministic, no embeddings/ML. A rich,
+ * non-repetitive payload scores many bits (hard to reconstruct from nothing); a
+ * degenerate/empty one scores near zero (trivially reconstructable, cheap to let go).
+ */
+function descriptionValueOf(payload: unknown): number {
+  const s = JSON.stringify(payload ?? null);
+  const n = s.length;
+  if (n === 0) return 0;
+  const freq = new Map<string, number>();
+  for (const ch of s) freq.set(ch, (freq.get(ch) ?? 0) + 1);
+  let entropyPerChar = 0;
+  for (const count of freq.values()) {
+    const p = count / n;
+    entropyPerChar -= p * Math.log2(p);
+  }
+  return entropyPerChar * n;
+}
+
+/**
+ * Build a single provenance root from a source's stamp. The stamp's source id
  * becomes the root's source; the independence CLASS is offline-assigned elsewhere,
  * so the scaffold seeds it from the source id (one root, one class) — the identity
  * layer's `independentRootCount` is the authority that later collapses same-class
- * echoes. Shared by the new-strand root-set ({@link provenanceFromStamp}) and the
- * external root appended by `ratify`, so both mint roots identically.
+ * echoes. Shared by the new-strand DEFAULT root-set ({@link provenanceFromStamp} —
+ * the fallback when no {@link CausalOrigin} says otherwise) and the external root
+ * appended by `ratify`, so both mint roots identically. The ratify path is
+ * DELIBERATELY untouched by the relay fix: an external ratifier is a genuine
+ * per-source witness, not a relay.
  */
 function provenanceRootFromStamp(stamp: IdentityStamp, at: EpochMs): ProvenanceRoot {
   return {
     rootId: (`root:${randomUUID()}` as ProvenanceRoot["rootId"]),
-    // Offline-assigned in production; scaffold derives one class per source key.
+    // Offline-assigned in production; scaffold derives one class per source id.
     independenceClass: (`class:${String(stamp.source_id)}` as ProvenanceRoot["independenceClass"]),
     sourceId: stamp.source_id,
     establishedAt: at,
@@ -528,10 +979,214 @@ function provenanceRootFromStamp(stamp: IdentityStamp, at: EpochMs): ProvenanceR
 
 /**
  * Build the provenance root-set for a newly observed strand from its stamp (one
- * root, one class — see {@link provenanceRootFromStamp}).
+ * root, one class — see {@link provenanceRootFromStamp}). This is the DEFAULT /
+ * fallback path: `causalOrigin` omitted, `USER_STATEMENT`, or an `AGENT_RELAY`
+ * whose consulted strands all failed to resolve (no worse than omission).
  */
 function provenanceFromStamp(stamp: IdentityStamp, at: EpochMs): readonly ProvenanceRoot[] {
   return [provenanceRootFromStamp(stamp, at)];
+}
+
+/**
+ * Mint a fresh provenance root carrying a CALLER-DETERMINED independence class
+ * (the relay fix's copy/derive paths). Fresh `rootId` (a root is an occurrence,
+ * never shared), the FILING stamp's `sourceId` (who filed it is still true and
+ * is what a disown sweep keys on), `establishedAt = now` — only the CLASS is
+ * taken from the causal origin instead of the filing source.
+ *
+ * `inheritedClass: true` marks the class as BELONGING to the causal origin (the
+ * upstream witness / the external resource), NOT to the filing source. This is
+ * load-bearing for the disown sweep: without it, disowning a RELAYER would taint
+ * the honest UPSTREAM source's class (`taintedClasses` keys on roots whose
+ * `sourceId === disowned`) and permanently scar every honest source rooted in
+ * it — a suppression vector (relay a rival, get disowned, crater the rival).
+ */
+function mintRootWithClass(
+  klass: IndependenceClassId,
+  sourceId: SourceId,
+  at: EpochMs,
+): ProvenanceRoot {
+  return {
+    rootId: (`root:${randomUUID()}` as ProvenanceRoot["rootId"]),
+    independenceClass: klass,
+    sourceId,
+    establishedAt: at,
+    inheritedClass: true,
+  };
+}
+
+/**
+ * Deterministic independence class for a TOOL_CALL / DOCUMENT origin, derived
+ * from (kind, resourceId) — NEVER from the filing agent — so the SAME underlying
+ * resource collapses to ONE class regardless of WHICH agent fetched it. The kind
+ * participates in the hash (domain separation: a document and a tool that happen
+ * to share an id string are different witnesses), joined by the same NUL
+ * separator {@link hashPayload} uses. `resourceId` is trusted to be the
+ * canonicalized UNDERLYING resource (normalized URL / content hash) — the
+ * caller's job; this layer just hashes what it is given.
+ */
+function resourceIndependenceClass(
+  kind: "TOOL_CALL" | "DOCUMENT",
+  resourceId: string,
+): IndependenceClassId {
+  const h = createHash("sha256");
+  h.update(kind);
+  h.update("\u0000");
+  h.update(resourceId);
+  return (`class:resource:${h.digest("hex")}` as IndependenceClassId);
+}
+
+/**
+ * The write path's resolved view of a fact's {@link CausalOrigin}: the provenance
+ * root-set the new strand will carry, plus the consulted strands (AGENT_RELAY
+ * only) to mint DERIVATION citation edges to.
+ */
+interface ResolvedCausalOrigin {
+  /** The provenance root-set for the new strand. */
+  readonly provenance: readonly ProvenanceRoot[];
+  /**
+   * Resolved consulted strand ids (deduped, store-verified). One DERIVATION edge
+   * (new strand → witness) is minted per entry; empty for every non-relay origin.
+   */
+  readonly derivationWitnesses: readonly StrandId[];
+}
+
+/**
+ * Resolve a fact's {@link CausalOrigin} into the provenance roots + DERIVATION
+ * witnesses the write path mints (the relay fix's class-computation rules):
+ *
+ *  - omitted or USER_STATEMENT ⇒ today's behavior EXACTLY: one fresh root in
+ *    `class:${source_id}` (back-compatible fallback).
+ *  - TOOL_CALL / DOCUMENT ⇒ one fresh root in the deterministic per-resource
+ *    class ({@link resourceIndependenceClass}) — same resource, one class,
+ *    regardless of the fetching agent.
+ *  - AGENT_RELAY ⇒ COPY the independence class(es) of the resolved consulted
+ *    strands' existing roots — one minted root per DISTINCT upstream class
+ *    (fresh rootId, filing stamp's sourceId, establishedAt = now). Because
+ *    Stage-1 of `independentRootCount` collapses same-class roots
+ *    unconditionally, copying the class is what makes the relay count as the
+ *    SAME witness — no new graph-reachability check anywhere else.
+ *
+ * THE ECHO GATE (adversarial finding, fail-open closed): a witness's class is
+ * copied ONLY when the new fact is the SAME CLAIM as that witness — same
+ * `content_hash` (which bakes in entity + payload) AND same `attribute`. Class
+ * inheritance means "I am the same observation as my witness"; without the gate
+ * a zero-reputation attacker could file a CONTRADICTING payload under
+ * AGENT_RELAY citing the victim's strand, inherit the victim's class, and
+ * collapse a genuine multi-class dispute into `tryConsolidate`'s single-class
+ * echo lane (deterministic-id tiebreak — a coin-flip demotion of the honest
+ * incumbent, strictly WORSE than omitting the origin). A witness that fails the
+ * gate contributes NO class (the write falls back toward the default per-source
+ * class — no worse than omission) but KEEPS its DERIVATION citation: the
+ * consultation is a graph fact regardless of agreement, and the disown-sweep
+ * taint BFS must still see it. A paraphrased relay (different payload bytes)
+ * therefore minting a fresh class is the documented residual — it is exactly
+ * today's pre-fix behavior, never worse.
+ *
+ * AGENT_RELAY edge cases, each handled deliberately:
+ *  - EMPTY `consultedStrandIds` ⇒ fallback/default, identical to omission.
+ *  - consulted ids that do NOT resolve ⇒ skipped; if NONE resolve, fallback —
+ *    same as omission, no worse (and no dangling DERIVATION edges).
+ *  - DUPLICATE consulted ids ⇒ deduped (one witness, one DERIVATION edge).
+ *  - a consulted strand whose provenance carries MULTIPLE classes ⇒ each
+ *    distinct class is copied exactly once across the whole consulted set.
+ *  - (defensive) resolved witnesses whose provenance is EMPTY ⇒ no class to
+ *    copy; fall back to the default root but KEEP the DERIVATION citations
+ *    (the strand demonstrably rested on them — the disown sweep must see it).
+ */
+function resolveCausalOrigin(
+  input: WriteFactInput,
+  at: EpochMs,
+  getStrand: (id: StrandId) => Strand | null,
+): ResolvedCausalOrigin {
+  const origin = input.causalOrigin;
+
+  // Omitted / USER_STATEMENT: the filing source genuinely is the witness.
+  if (origin === undefined || origin.kind === "USER_STATEMENT") {
+    return { provenance: provenanceFromStamp(input.stamp, at), derivationWitnesses: [] };
+  }
+
+  if (origin.kind === "TOOL_CALL" || origin.kind === "DOCUMENT") {
+    const klass = resourceIndependenceClass(origin.kind, origin.resourceId);
+    return {
+      provenance: [mintRootWithClass(klass, input.stamp.source_id, at)],
+      derivationWitnesses: [],
+    };
+  }
+
+  // AGENT_RELAY: copy upstream classes; cite the witnesses with DERIVATION edges.
+  // The ECHO GATE (see the doc above): a class is inherited only from a witness
+  // making the SAME CLAIM — same content_hash (entity + payload) + same attribute.
+  const claimHash = hashPayload(input.entity, input.payload);
+  const claimAttr = input.attribute ?? null; // Strand.attribute normalizes to null
+  const witnesses: StrandId[] = [];
+  const seenIds = new Set<StrandId>(); // dedupe duplicate consulted ids
+  const classes = new Set<IndependenceClassId>(); // one copy per DISTINCT class
+  for (const id of origin.consultedStrandIds) {
+    if (seenIds.has(id)) continue;
+    seenIds.add(id);
+    const consulted = getStrand(id);
+    if (consulted === null) continue; // unresolvable id: skip it, never abort
+    witnesses.push(consulted.id); // the citation is kept even when the gate refuses
+    if (consulted.content_hash !== claimHash) continue; // ECHO GATE: different claim
+    if (consulted.attribute !== claimAttr) continue; //    ... or different attribute
+    for (const root of consulted.provenance) classes.add(root.independenceClass);
+  }
+
+  // Empty consulted list, or nothing resolved: identical to omission (no worse).
+  if (witnesses.length === 0) {
+    return { provenance: provenanceFromStamp(input.stamp, at), derivationWitnesses: [] };
+  }
+
+  // No inheritable classes: either the ECHO GATE refused every witness (the fact
+  // is a DIFFERENT claim from everything it consulted — an attacker-shaped input,
+  // or an honest paraphrase/derivation), or (defensive; should not happen — every
+  // engine-minted strand has ≥1 root) the witnesses carry no provenance. Either
+  // way: the default per-source root (identical to omission, never worse), and
+  // the DERIVATION citations are KEPT — the derivation is a fact about the graph
+  // regardless of what class the roots collapse to.
+  const provenance =
+    classes.size > 0
+      ? [...classes].map((k) => mintRootWithClass(k, input.stamp.source_id, at))
+      : provenanceFromStamp(input.stamp, at);
+
+  return { provenance, derivationWitnesses: witnesses };
+}
+
+/**
+ * Mint the DERIVATION citation edge for an AGENT_RELAY write: `from` = the NEW
+ * (derived) strand, `to` = the consulted witness — DERIVATION points
+ * derived→witness, exactly the direction `downstreamDisownSweep`'s BFS expects
+ * (it walks `store.inEdges(witness)` and takes each edge's `from` as the
+ * downstream frontier), so a later disown of the upstream source taints the
+ * relayed strand.
+ *
+ * Field values mirror the codebase's synthetic-edge precedent (disown.ts's
+ * OUTRANKS stub and every test-built DERIVATION edge): unit link_confidence /
+ * provenance_independence / recency / w. These are STRUCTURAL bookkeeping edges,
+ * not librarian-confidence threads — the taint BFS filters by edgeType only and
+ * never reads the weights. `out_weight_sum` starts at 1 and is reconciled to the
+ * true Σw by the `recomputeOutWeightSum` call the write path issues after all of
+ * a strand's citation edges are in (the store contract's required step, unlike
+ * the disown sentinel whose synthetic `from` has exactly one edge by
+ * construction).
+ *
+ * The id is deterministic in (derived, witness) — mirroring disown.ts's
+ * `defaultMintEdgeId` — so a replayed write of the same strand cannot duplicate
+ * citation edges.
+ */
+function derivationEdgeFor(derived: StrandId, witness: StrandId): Edge {
+  return {
+    id: asEdgeId(`edge:derivation:${String(derived)}->${String(witness)}`),
+    from: derived,
+    to: witness,
+    edgeType: EdgeType.DERIVATION,
+    link_confidence: 1,
+    provenance_independence: 1,
+    recency: 1,
+    w: 1,
+    out_weight_sum: 1, // provisional; recomputeOutWeightSum(derived) sets the true Σw
+  };
 }
 
 /** Default per-traversal-independent salience for a freshly observed strand. */
@@ -546,10 +1201,24 @@ function emptyBridgeAccounting(): BridgeAccounting {
 
 /**
  * Construct a fresh OBSERVED strand. New observed strands are pinned WARM for an
- * un-forgeable grace window (CLAUDE.md forgetting floor) and start LIVE; their
- * `observedAt` sets the grace floor.
+ * un-forgeable grace window (CLAUDE.md forgetting floor); their `observedAt`
+ * sets the grace floor. The provenance root-set is supplied by the caller
+ * ({@link resolveCausalOrigin} owns the class-computation rules — the relay
+ * fix), never re-derived here — and so is `factState` (the engine's
+ * trust-tiered ingest gate owns the LIVE-vs-PROVISIONAL decision; see
+ * {@link IngestPolicy}). EVERYTHING ELSE is identical for both states: a
+ * quarantined PROVISIONAL strand gets the same WARM grace pin, the same fresh
+ * salience, the same entity indexing (via `putStrand`) and the same real
+ * `description_value` a LIVE one gets — only `fact_state` differs, so the
+ * superposition is fully visible/traversable in the web while being unable to
+ * demote a LIVE incumbent (adjudicate admits only LIVE members).
  */
-function makeObservedStrand(input: WriteFactInput, at: EpochMs): Strand {
+function makeObservedStrand(
+  input: WriteFactInput,
+  at: EpochMs,
+  provenance: readonly ProvenanceRoot[],
+  factState: FactState,
+): Strand {
   const id = asStrandId(`strand:${randomUUID()}`);
   return {
     id,
@@ -558,15 +1227,15 @@ function makeObservedStrand(input: WriteFactInput, at: EpochMs): Strand {
     payload: input.payload,
     content_hash: hashPayload(input.entity, input.payload),
     origin: FactOrigin.OBSERVED,
-    fact_state: FactState.LIVE,
+    fact_state: factState,
     tier: Tier.WARM, // pinned WARM for the grace window
-    provenance: provenanceFromStamp(input.stamp, at),
+    provenance,
     outEdges: [],
     inEdges: [],
     outranked_by: null,
     bridge: emptyBridgeAccounting(),
     salience: freshSalience(at),
-    description_value: 0,
+    description_value: descriptionValueOf(input.payload),
     observedAt: at,
     external_reobservation_count: 0,
     contradiction_set: null,
@@ -617,6 +1286,80 @@ function withTxn<T>(store: StrandStore, fn: () => T): T {
 }
 
 // ---------------------------------------------------------------------------
+// explain / beliefTimeline construction helpers (read-only, deterministic)
+// ---------------------------------------------------------------------------
+
+/**
+ * The disown sweep's synthetic-OUTRANKS sentinel prefix (`disownSentinelFor`,
+ * ratification/disown.ts). An `outranked_by` edge whose `from` starts with this
+ * names "your provenance was disowned", not a winning peer strand — the sentinel
+ * must NEVER be resolved as a strand (it deliberately resolves to null). The
+ * suffix after the prefix is the disowned SourceId, verbatim.
+ */
+const DISOWN_SENTINEL_PREFIX = "strand:disown-sentinel:";
+
+/**
+ * The disown sweep's deterministic OUTRANKS edge-id prefix (its `defaultMintEdgeId`
+ * mints `edge:disown-outranks:<winner>-><loser>` with the sentinel as winner). A
+ * DEMOTE receipt whose `refEventId` starts with this was a demote-by-disown.
+ */
+const DISOWN_OUTRANKS_EDGE_PREFIX = "edge:disown-outranks:";
+
+/** Deterministic string ordering (explicit, locale-independent). */
+function compareStrings(a: string, b: string): number {
+  return a < b ? -1 : a > b ? 1 : 0;
+}
+
+/** Sort edges by id — the spec's deterministic order for restsOn / supports. */
+function byEdgeId(a: Edge, b: Edge): number {
+  return compareStrings(String(a.id), String(b.id));
+}
+
+/**
+ * The timeline's same-instant tiebreak rank (spec: OBSERVED=0,
+ * EXTERNAL_ROOT_APPENDED=1, DISPUTE_OPENED=2, DISPUTE_RESOLVED=3,
+ * DISPUTE_REOPENED=4, DEMOTED=5, CORROBORATION_CREDITED=6) — causally sensible
+ * ordering for events sharing one millisecond (a dispute opens before it
+ * resolves; a demotion lands after the resolution that caused it).
+ */
+const BELIEF_EVENT_KIND_RANK: Record<BeliefEvent["kind"], number> = {
+  OBSERVED: 0,
+  EXTERNAL_ROOT_APPENDED: 1,
+  DISPUTE_OPENED: 2,
+  DISPUTE_RESOLVED: 3,
+  DISPUTE_REOPENED: 4,
+  DEMOTED: 5,
+  CORROBORATION_CREDITED: 6,
+};
+
+/** The per-event deterministic tie key (strandId for strand events, csid for disputes). */
+function beliefEventTieKey(e: BeliefEvent): string {
+  switch (e.kind) {
+    case "DISPUTE_OPENED":
+    case "DISPUTE_RESOLVED":
+    case "DISPUTE_REOPENED":
+      return String(e.contradictionSetId);
+    default:
+      return String(e.strandId);
+  }
+}
+
+/**
+ * Ascending (at, kindRank, tieKey) — the timeline's total order. Only DATED
+ * events are ever sorted with this (the `events` array holds no `at: null` by
+ * construction; nulls live in `undatedEvents`), so the null branch is defensive.
+ */
+function byBeliefEventOrder(a: BeliefEvent, b: BeliefEvent): number {
+  const ta = a.at === null ? 0 : (a.at as number);
+  const tb = b.at === null ? 0 : (b.at as number);
+  if (ta !== tb) return ta - tb;
+  const ra = BELIEF_EVENT_KIND_RANK[a.kind];
+  const rb = BELIEF_EVENT_KIND_RANK[b.kind];
+  if (ra !== rb) return ra - rb;
+  return compareStrings(beliefEventTieKey(a), beliefEventTieKey(b));
+}
+
+// ---------------------------------------------------------------------------
 // Concrete engine
 // ---------------------------------------------------------------------------
 
@@ -639,17 +1382,10 @@ class IntelligentDbImpl implements IntelligentDb {
   readonly #reputation: ReputationLedger | null;
   /**
    * Optional ratification backing (the vault + doorbell). When present, DEFERRED
-   * disputes are recorded in `#ratification.ledger` signed by
-   * `#ratification.systemSigner`, and `approve` resolves them. Null in the scaffold.
+   * disputes are recorded in `#ratification.ledger` attributed to
+   * `#ratification.systemSource`, and `approve` resolves them. Null in the scaffold.
    */
   readonly #ratification: RatificationDeps | null;
-
-  /**
-   * A2 [optional/latent] — the wired Merkle log over the ratification ledger, or null
-   * when `ratification.merkle` was omitted. Built once at construction; never touched on
-   * a verb path (anchoring is exclusively {@link anchorEpoch}).
-   */
-  readonly #merkleLog: MerkleLog | null;
 
   /**
    * M3 anti-grief (BATCH 4, OD-2 seam family) — the per-source-pair contradiction
@@ -665,53 +1401,78 @@ class IntelligentDbImpl implements IntelligentDb {
   /** The per-pair scar rate-limit window (one decay half-life, 90 days). */
   readonly #SCAR_WINDOW_MS = 90 * 86_400_000;
 
+  /**
+   * TRUST-TIERED INGEST (Phase 3): the resolved {@link IngestPolicy.quarantineThreshold}.
+   * A filed fact whose FILER's strongest single anchor `independenceWeight` (re-derived
+   * from the identity layer, never the caller's stamp) is below this lands PROVISIONAL.
+   * Defaults to {@link DEFAULT_QUARANTINE_THRESHOLD} when the policy is omitted; 0 is
+   * the explicit legacy always-LIVE escape hatch.
+   */
+  readonly #quarantineThreshold: number;
+
   constructor(
     store: StrandStore,
     identity: SourceIdentityLayer,
     consolidation: ConsolidationPort | null,
     reputation: ReputationLedger | null,
     ratification: RatificationDeps | null,
+    ingest: IngestPolicy | null,
   ) {
     this.#store = store;
     this.#identity = identity;
     this.#consolidation = consolidation;
     this.#reputation = reputation;
     this.#ratification = ratification;
-    // A2: build the Merkle log over the SAME ratification ledger when wired.
-    // `createMerkleLog` throws on <2 sinks — correct fail-closed, surfaced at construction.
-    this.#merkleLog =
-      ratification?.merkle !== undefined
-        ? createMerkleLog({
-            ledger: ratification.ledger,
-            signer: ratification.merkle.signer,
-            sinks: ratification.merkle.sinks,
-          })
-        : null;
+    this.#quarantineThreshold = ingest?.quarantineThreshold ?? DEFAULT_QUARANTINE_THRESHOLD;
   }
 
   /**
-   * A1 [Merkle MUTATION coverage] — journal ONE content-addressed MUTATION receipt into
-   * the wired ratification ledger, signed by the system signer. A no-op when no
+   * THE INGEST GATE (Phase 3, design doc §4.1): decide whether a fact filed under
+   * `filer` lands LIVE or is QUARANTINED as PROVISIONAL.
+   *
+   * ENGINE-OWNED EVIDENCE (OD-8): the gate re-stamps the filer through the identity
+   * layer — exactly the way `#ratifyImpl` re-stamps its external witness — and reads
+   * the ANCHOR-derived trust from THAT canonical stamp, never from the caller-supplied
+   * `WriteFactInput.stamp` (whose `anchor_set` a caller could inflate to smuggle a
+   * bare-key fact past the gate).
+   *
+   * THE MEASURE is the stamp's STRONGEST SINGLE anchor `independenceWeight` — the same
+   * "strongest single anchor, never a sum" notion `aggregateAnchorCost` and
+   * `applySelfStackCap` (identity/anchors.ts) pin: a source stacking N cheap anchors
+   * is worth its one best anchor, so self-stacking can't buy passage here either. An
+   * unregistered/anchorless filer has an empty canonical anchor set ⇒ strongest 0 ⇒
+   * quarantined at any positive threshold (BARE_KEY's 0.00 row made mechanical).
+   *
+   * WHO is gated, not WHAT was consulted: this reads the FILER's stamp (who is
+   * SPEAKING), never the fact's `causalOrigin` (what was consulted). A low-trust
+   * filer relaying a high-trust strand still quarantines — the relay fix copies the
+   * WITNESS's independence class so the observation is never double-counted as fresh
+   * corroboration, but the SPEAKER's trust is what gates belief in the new assertion
+   * (the relay copies the witness CLASS for independence-counting; it does not borrow
+   * the witness's authority).
+   */
+  #ingestStateFor(filer: SourceId): FactState {
+    const canonical: IdentityStamp = this.#identity.stampFor(filer);
+    let strongest = 0;
+    for (const binding of canonical.anchor_set) {
+      if (binding.independenceWeight > strongest) strongest = binding.independenceWeight;
+    }
+    // Strict `<`: EMAIL_OAUTH's 0.10 passes the default 0.10 threshold, and the
+    // `quarantineThreshold: 0` escape hatch never quarantines (strongest >= 0).
+    return strongest < this.#quarantineThreshold ? FactState.PROVISIONAL : FactState.LIVE;
+  }
+
+  /**
+   * A1 [MUTATION audit coverage] — journal ONE content-addressed MUTATION receipt into
+   * the wired ratification ledger, attributed to the system source. A no-op when no
    * ratification ledger is wired (nowhere to journal — the latent-journaling gate). Call
    * sites sit INSIDE the compound op's `withTxn` envelope so receipt + mutation commit
    * atomically.
    */
   #emitMutation(payload: MutationPayload): void {
     if (this.#ratification !== null) {
-      this.#ratification.ledger.appendMutation(payload, this.#ratification.systemSigner);
+      this.#ratification.ledger.appendMutation(payload, this.#ratification.systemSource);
     }
-  }
-
-  anchorEpoch(at?: EpochMs): STH | null {
-    return this.#merkleLog === null ? null : this.#merkleLog.anchor(at ?? now());
-  }
-
-  publishGenesis(at?: EpochMs): STH | null {
-    return this.#merkleLog === null ? null : this.#merkleLog.publishGenesis(at ?? now());
-  }
-
-  merkleLog(): MerkleLog | null {
-    return this.#merkleLog;
   }
 
   // -------------------------------------------------------------------------
@@ -884,10 +1645,24 @@ class IntelligentDbImpl implements IntelligentDb {
   writeFact(input: WriteFactInput): StrandId {
     const at = now();
 
+    // 0) Resolve the CAUSAL ORIGIN into the provenance root-set + DERIVATION
+    //    witnesses (the relay fix, see {@link resolveCausalOrigin}). Omitted /
+    //    USER_STATEMENT is byte-identical to the old per-source class mint;
+    //    TOOL_CALL/DOCUMENT collapse to a per-resource class; AGENT_RELAY copies
+    //    the consulted strands' classes so the relay is the SAME witness under
+    //    the identity layer's Stage-1 collapse (never manufactured corroboration).
+    const resolved = resolveCausalOrigin(input, at, (id) => this.#store.getStrand(id));
+
+    // 0.5) TRUST-TIERED INGEST (Phase 3): gate LIVE-vs-PROVISIONAL on the FILER's
+    //    canonical anchor trust (#ingestStateFor — engine-owned evidence, never the
+    //    caller's stamp; and the FILER, never the causal origin: who is SPEAKING
+    //    gates belief, what was consulted only shapes independence classes above).
+    const factState = this.#ingestStateFor(input.stamp.source_id);
+
     // 1) Mint the OBSERVED strand. `provenance_independence` for its edges is read
-    //    FROM input.stamp (invariant 2); the strand itself carries the source's
-    //    provenance root derived from the same stamp.
-    const fresh = makeObservedStrand(input, at);
+    //    FROM input.stamp (invariant 2); the strand itself carries the provenance
+    //    root-set the causal origin resolved to and the gated fact_state.
+    const fresh = makeObservedStrand(input, at, resolved.provenance, factState);
 
     // 2) Mechanical attachment by SHARED_ENTITY — represented as an INDEX, not a
     //    materialized clique. "All facts about entity E are related" is a lookup
@@ -902,11 +1677,23 @@ class IntelligentDbImpl implements IntelligentDb {
     //    write. CONFIRMED_LINK relationships (the librarian's job, out of scope here)
     //    and CROSS_WEB_BRIDGE edges are unchanged and still materialized.
     //
-    // ATOMIC: a single `putStrand`. Trivially all-or-nothing (one write), and the
-    // entity index it maintains is the read-time substrate the walk now derives
-    // siblings from. No sibling rewrites, no edge inserts, no out_weight_sum recompute.
+    // ATOMIC: the `putStrand` PLUS (AGENT_RELAY only) every DERIVATION citation edge
+    // and the one `recomputeOutWeightSum` reconciling the new strand's Σw commit as
+    // ONE unit — a crash mid-write must never leave a relayed strand standing with
+    // its citations missing (that half-state IS the laundering hole: relay-classed
+    // provenance is safe on its own, but the disown sweep's taint BFS needs the
+    // edges). Non-relay writes stay the single put they were.
     withTxn(this.#store, () => {
       this.#store.putStrand(fresh);
+      if (resolved.derivationWitnesses.length > 0) {
+        for (const witness of resolved.derivationWitnesses) {
+          this.#store.putEdge(derivationEdgeFor(fresh.id, witness));
+        }
+        // The store contract: after adding out-edges of a node, the caller MUST
+        // reconcile the cached share-normalization denominator (one call for the
+        // whole batch of citations, O(degree) total).
+        this.#store.recomputeOutWeightSum(fresh.id);
+      }
     });
 
     return fresh.id;
@@ -917,18 +1704,44 @@ class IntelligentDbImpl implements IntelligentDb {
   // -------------------------------------------------------------------------
 
   writeFactsBatch(inputs: readonly WriteFactInput[]): StrandId[] {
-    // Mirror writeFact EXACTLY per fact: a per-fact `now()` timestamp and the same
-    // `makeObservedStrand` mint (provenance root from the stamp, content hash, entity
-    // index key). The ONLY difference is the put is batched: one `putStrandsBatch`
-    // under one `withTxn`, so the whole ingest pays ONE durability barrier and the
-    // store maintains the SAME entity index as N individual `putStrand` calls would.
-    const fresh = inputs.map((input) => makeObservedStrand(input, now()));
-
-    withTxn(this.#store, () => {
-      this.#store.putStrandsBatch(fresh);
+    // Mirror writeFact EXACTLY per fact: a per-fact `now()` timestamp, the same
+    // causal-origin resolution (the relay fix — identical mint path per fact), and
+    // the same `makeObservedStrand` mint (provenance from the resolved origin,
+    // content hash, entity index key). The ONLY difference is the put is batched:
+    // one `putStrandsBatch` under one `withTxn`, so the whole ingest pays ONE
+    // durability barrier and the store maintains the SAME entity index as N
+    // individual `putStrand` calls would.
+    //
+    // NOTE on in-batch relays: consulted ids are resolved against the STORE, before
+    // this batch lands — semantically identical to sequential writeFact calls,
+    // because a caller cannot name a fellow batch member anyway (strand ids are
+    // minted here and only returned after the batch commits).
+    const minted = inputs.map((input) => {
+      const at = now();
+      const resolved = resolveCausalOrigin(input, at, (id) => this.#store.getStrand(id));
+      // IDENTICAL trust-tiered ingest semantics per fact (the same #ingestStateFor
+      // gate writeFact applies — batch is never a quarantine bypass).
+      const factState = this.#ingestStateFor(input.stamp.source_id);
+      return {
+        strand: makeObservedStrand(input, at, resolved.provenance, factState),
+        witnesses: resolved.derivationWitnesses,
+      };
     });
 
-    return fresh.map((s) => s.id);
+    withTxn(this.#store, () => {
+      this.#store.putStrandsBatch(minted.map((m) => m.strand));
+      // AGENT_RELAY citations, exactly as writeFact mints them (same edges, same
+      // per-strand Σw reconciliation), enrolled in the same single transaction.
+      for (const m of minted) {
+        if (m.witnesses.length === 0) continue;
+        for (const witness of m.witnesses) {
+          this.#store.putEdge(derivationEdgeFor(m.strand.id, witness));
+        }
+        this.#store.recomputeOutWeightSum(m.strand.id);
+      }
+    });
+
+    return minted.map((m) => m.strand.id);
   }
 
   // -------------------------------------------------------------------------
@@ -954,6 +1767,11 @@ class IntelligentDbImpl implements IntelligentDb {
     return {
       lit: result.lit,
       halt: result.halt,
+      // Honest-seeding forward (never a silent stop): which cue ids failed to
+      // resolve and how many did — with NO_SEEDS_RESOLVED already stamped by the
+      // walk when the whole cue was dangling.
+      unresolvedSeeds: result.unresolvedSeeds,
+      seedsResolved: result.seedsResolved,
     };
   }
 
@@ -962,6 +1780,19 @@ class IntelligentDbImpl implements IntelligentDb {
   // -------------------------------------------------------------------------
 
   ratify(input: RatifyInput): void {
+    // ATOMIC: strand promotion + the reputation credit it earns + the corroboration
+    // event that records that credit's exact α-mass commit as ONE unit. A crash
+    // between any two of these must not leave a promoted strand with no matching
+    // reputation gain, or a reputation gain with no recorded (and therefore later
+    // reversible) corroboration event — exactly the off-ledger state
+    // `assertRatifyEmitsEvent` is meant to catch, but that check runs only AFTER
+    // the writes below, so it must never see a partially-committed txn.
+    withTxn(this.#store, () => {
+      this.#ratifyImpl(input);
+    });
+  }
+
+  #ratifyImpl(input: RatifyInput): void {
     // The external stamp is the authority that makes this NOT self-ratification
     // (invariant 1). We re-stamp through the identity layer so the recorded root is
     // the layer's canonical view of the external source, not a caller-supplied one.
@@ -981,8 +1812,12 @@ class IntelligentDbImpl implements IntelligentDb {
     //   DERIVED fact            -> OBSERVED + LIVE   (the "window" in
     //                              wall-with-a-window: an external source turns a
     //                              web-computed belief into a witnessed one).
-    //   PROVISIONAL (observed)  -> LIVE              (the external source confirms
-    //                              the held superposition, collapsing it to current).
+    //   PROVISIONAL (observed)  -> LIVE, ONLY through the QUARANTINE-EXIT GATE
+    //                              below: the ratifier must be anchor-INDEPENDENT
+    //                              of every source already on the strand's
+    //                              provenance. An echo ratify still appends its
+    //                              root + earns reputation, but does NOT flip
+    //                              fact_state.
     //   otherwise (already LIVE/
     //   OBSERVED, or DEMOTED)   -> record an additional external root only; state
     //                              is unchanged, keep-pressure rises.
@@ -1001,8 +1836,25 @@ class IntelligentDbImpl implements IntelligentDb {
       nextOrigin = FactOrigin.OBSERVED;
       nextState = FactState.LIVE;
     } else if (strand.fact_state === FactState.PROVISIONAL) {
-      // Confirm provisional -> live.
-      nextState = FactState.LIVE;
+      // THE QUARANTINE-EXIT GATE (Phase 3, the trust-tiered-ingest exit): a held
+      // superposition collapses to LIVE only on INDEPENDENT corroboration. This is
+      // the wall-with-a-window design applied to quarantine: confirmation is
+      // corroboration by INDEPENDENT provenance — "two strands agreeing from the
+      // same root is an echo, not corroboration" (CLAUDE.md) — so the ratifier must
+      // be anchor-independent (identity.independentSources, the SAME RC-5 predicate
+      // the approve-gate uses; fail-closed for unregistered/anchorless sides) of
+      // EVERY source already on the strand's provenance. Otherwise a quarantined
+      // source could launder its own claim LIVE by re-ratifying through itself or
+      // through a fleet-correlated sibling — the self-witnessing the two governing
+      // invariants forbid. An ECHO ratify (same/correlated source) still appends
+      // the external root and still drives reputation below — the consultation is
+      // a real event and keep-pressure may rise — but belief does NOT: the strand
+      // stays a visible PROVISIONAL superposition until something genuinely
+      // OUTSIDE its provenance vouches for it (or an approve() resolution does).
+      if (this.#independentOfProvenance(canonicalStamp.source_id, strand)) {
+        // Confirm provisional -> live.
+        nextState = FactState.LIVE;
+      }
     }
     // else: already witnessed/current (or demoted) — state unchanged; the new
     // external root below still strengthens keep-pressure.
@@ -1078,6 +1930,39 @@ class IntelligentDbImpl implements IntelligentDb {
       // zero/negative gain — at cap, or decayed — has nothing to record or reverse.)
       assertRatifyEmitsEvent(canonicalStamp.source_id, deltaAlpha, namedCorroborators, recorded);
     }
+  }
+
+  /**
+   * The quarantine-exit predicate (Phase 3): is `ratifier` anchor-INDEPENDENT of
+   * EVERY source already backing `strand`'s provenance?
+   *
+   * Delegates each pair to `identity.independentSources` — the ONE independence
+   * notion the whole system shares (the RC-5 approve-gate and the forgetting count
+   * read the same predicate; anti-drift). Its semantics do the heavy lifting here:
+   *   - `a === b` ⇒ false (self-ratification is an echo — also caught explicitly
+   *     below for clarity);
+   *   - an UNREGISTERED / anchorless side ⇒ false, FAIL-CLOSED (a BARE_KEY-
+   *     equivalent witness has independence_weight 0.00 and can never be
+   *     independent of anything) — so neither an anonymous ratifier nor a strand
+   *     filed by a never-registered source can clear quarantine through this gate;
+   *   - fleet/operator correlation (same SSO tenant, same publisher operator) ⇒
+   *     false, so a Sybil sibling can't vouch its fleet-mate LIVE.
+   *
+   * A strand with NO resolvable provenance source fails closed too: with nothing
+   * to be independent OF, independence cannot be demonstrated ("no provenance →
+   * no voice" — the approve() horn remains the resolution path for such strands).
+   */
+  #independentOfProvenance(ratifier: SourceId, strand: Strand): boolean {
+    const existing = new Set<SourceId>();
+    for (const root of strand.provenance) {
+      if (root.sourceId !== null) existing.add(root.sourceId);
+    }
+    if (existing.size === 0) return false; // fail-closed: nothing to corroborate against
+    for (const source of existing) {
+      if (source === ratifier) return false; // echo: the strand's own author "confirming" it
+      if (!this.#identity.independentSources(ratifier, source)) return false;
+    }
+    return true;
   }
 
   // -------------------------------------------------------------------------
@@ -1242,8 +2127,8 @@ class IntelligentDbImpl implements IntelligentDb {
       }
       case "DEFERRED": {
         // The INDEPENDENT dispute: the web decided NOTHING. Record it in the
-        // immortal signed ledger for the second-admin horn. Refuse to silently drop
-        // a deferral when no ledger is wired.
+        // immortal checksum-chained ledger for the second-admin horn. Refuse to
+        // silently drop a deferral when no ledger is wired.
         if (this.#ratification === null) {
           throw new Error(
             "adjudicate: an INDEPENDENT_DISPUTE was DEFERRED but no ratification ledger is wired; " +
@@ -1259,7 +2144,7 @@ class IntelligentDbImpl implements IntelligentDb {
         const coalesceKey = this.#disputeCoalesceKey(members);
         this.#ratification.ledger.appendPending(
           outcome.pending,
-          this.#ratification.systemSigner,
+          this.#ratification.systemSource,
           { disputingSources, coalesceKey },
         );
         return outcome;
@@ -1382,8 +2267,9 @@ class IntelligentDbImpl implements IntelligentDb {
   approve(
     contradictionSetId: ContradictionSetId,
     winnerStrandId: StrandId,
-    approver: KeyPair,
+    approver: SourceId,
     at?: EpochMs,
+    opts?: ApproveOptions,
   ): ResolvedDispute {
     if (this.#ratification === null) {
       throw new Error("approve: no ratification ledger is wired.");
@@ -1416,9 +2302,14 @@ class IntelligentDbImpl implements IntelligentDb {
         const cached = handed.get(memberId);
         if (cached !== undefined) return cached;
         const s = this.#store.getStrand(memberId);
-        if (s === null) {
-          throw new Error(`approve: member strand ${String(memberId)} not in store.`);
-        }
+        // DANGLING member id (defensive-only: strands are never deleted;
+        // reachable via external store tampering / a mismatched store+ledger
+        // pairing) ⇒ return null so the ledger SKIPS that loser fail-closed.
+        // Throwing here would roll the whole approve back and leave the dispute
+        // permanently un-resolvable (every retry re-throws on the same id) —
+        // pendingQuestions would resurface an answerable-looking question the
+        // owner can never actually answer.
+        if (s === null) return null;
         handed.set(memberId, s);
         return s;
       },
@@ -1432,13 +2323,18 @@ class IntelligentDbImpl implements IntelligentDb {
         this.#identity.independentSources(a, b),
       approverHasAnchors: (sourceId: SourceId): boolean =>
         this.#identity.stampFor(sourceId).anchor_cost > 0,
+      // PHASE 4 — thread the explicit owner-override policy hook through to the
+      // ledger's gates VERBATIM, emit-only-when-true (exactOptionalPropertyTypes:
+      // omit the property entirely unless the caller explicitly opted in, so the
+      // fail-closed default is structural, not a runtime default).
+      ...(opts?.allowAuthorApprover === true ? { allowAuthorApprover: true } : {}),
     };
 
-    // ATOMIC: the ledger's APPROVAL append (the signed audit record) + the reputation
-    // moves it drives + the engine's store persistence (each OUTRANKS edge, each demoted
-    // loser) commit as ONE unit. A crash between "append the signed APPROVAL" and "demote
-    // the losers" would otherwise desync the immortal audit chain from the state it
-    // describes — a record claiming a resolution the store never applied (or vice versa).
+    // ATOMIC: the ledger's APPROVAL append (the checksum-chained audit record) + the
+    // reputation moves it drives + the engine's store persistence (each OUTRANKS edge,
+    // each demoted loser) commit as ONE unit. A crash between "append the APPROVAL" and
+    // "demote the losers" would otherwise desync the immortal audit chain from the state
+    // it describes — a record claiming a resolution the store never applied (or vice versa).
     // With the audit ledger + reputation ledger riding the SAME shared db handle as the
     // store, all three enroll in this single transaction.
     const resolved = withTxn(this.#store, () => {
@@ -1501,9 +2397,9 @@ class IntelligentDbImpl implements IntelligentDb {
       }
 
       // A1 — journal the reputation EFFECTS the ledger drove (one receipt per distinct
-      // author per effect, deterministic by source id). The signed APPROVAL leaf already
-      // commits the DECISION; these add the EFFECT leaves so a hidden reputation move is
-      // detectable. before = the pre-approve snapshot; after = the now-final state.
+      // author per effect, deterministic by source id). The APPROVAL record already
+      // commits the DECISION; these add the EFFECT records so a hidden reputation move
+      // is detectable. before = the pre-approve snapshot; after = the now-final state.
       if (this.#reputation !== null) {
         const loserAuthors = new Set<SourceId>();
         for (const d of plan.demotions) {
@@ -1571,7 +2467,7 @@ class IntelligentDbImpl implements IntelligentDb {
     }
 
     // Assemble the hardening deps from the wired ratification ledgers + the engine's
-    // own system signer. checkSurvivingSupport defaults ON at the engine seam (a disown
+    // own system source id. checkSurvivingSupport defaults ON at the engine seam (a disown
     // must never silently suppress a rival's independently-corroborated downstream work).
     const hardening: DisownHardeningDeps = {
       ...(this.#ratification?.corroboration !== undefined
@@ -1586,8 +2482,8 @@ class IntelligentDbImpl implements IntelligentDb {
       ...(this.#ratification?.ledger !== undefined
         ? { pending: this.#ratification.ledger }
         : {}),
-      ...(this.#ratification?.systemSigner !== undefined
-        ? { systemSigner: this.#ratification.systemSigner }
+      ...(this.#ratification?.systemSource !== undefined
+        ? { systemSource: this.#ratification.systemSource }
         : {}),
       ...(opts?.decisiveMargin !== undefined ? { decisiveMargin: opts.decisiveMargin } : {}),
       checkSurvivingSupport: opts?.checkSurvivingSupport ?? true,
@@ -1611,5 +2507,411 @@ class IntelligentDbImpl implements IntelligentDb {
       undefined,
       hardening,
     );
+  }
+
+  // -------------------------------------------------------------------------
+  // explain / beliefTimeline — READ-ONLY introspection (observe, never influence)
+  // -------------------------------------------------------------------------
+
+  /** The {@link AuditCoverage} of THIS engine's wiring (what a report could see). */
+  #auditCoverage(): AuditCoverage {
+    return {
+      auditLedger: this.#ratification !== null,
+      corroborationLedger: this.#ratification?.corroboration !== undefined,
+      adjudicationProvenance: this.#ratification?.adjudicationProvenance !== undefined,
+      reputationLedger: this.#reputation !== null,
+    };
+  }
+
+  /**
+   * The union of OPEN pending members (as id strings) — the ONE "contested" rule
+   * both `explain` and the facade's recall label share. Reuses the ledger's own
+   * open semantics (`listPending`), never a reimplementation. O(open pendings);
+   * always computed fresh (a dispute can open/close between calls).
+   */
+  #openPendingMemberSet(): Set<string> {
+    const out = new Set<string>();
+    if (this.#ratification === null) return out;
+    for (const p of this.#ratification.ledger.listPending()) {
+      for (const m of p.members) out.add(String(m));
+    }
+    return out;
+  }
+
+  explain(strandId: StrandId): ExplainReport | null {
+    const strand = this.#store.getStrand(strandId);
+    if (strand === null) return null; // unknown strand: a query miss, not an error
+
+    // --- roots (strand order, verbatim) + distinct sources (first appearance) --
+    const roots: ExplainRoot[] = strand.provenance.map((r) => ({
+      rootId: r.rootId,
+      independenceClass: r.independenceClass,
+      sourceId: r.sourceId,
+      establishedAt: r.establishedAt,
+      inherited: r.inheritedClass === true,
+      // Strict `>`: a same-millisecond ratify is invisible (documented residual;
+      // never guess). INFERRED evidence only — root-append ≠ state flip.
+      appendedAfterWrite: (r.establishedAt as number) > (strand.observedAt as number),
+    }));
+
+    const seenSources = new Set<SourceId>();
+    const sources: ExplainSource[] = [];
+    for (const r of strand.provenance) {
+      if (r.sourceId === null || seenSources.has(r.sourceId)) continue;
+      seenSources.add(r.sourceId);
+      sources.push({
+        sourceId: r.sourceId,
+        // Canonical, engine-owned stamp (OD-8) — never a caller-supplied one.
+        stamp: this.#identity.stampFor(r.sourceId),
+        // The engine has no trust-registry handle; the FACADE enriches this.
+        registered: null,
+      });
+    }
+
+    // --- the gates' OWN numbers (OD-6/OD-8): #R + a SORTED COPY of the shared
+    // agreement basis. The shared helpers' return order is untouched.
+    const independentRootCount = this.#R(strand);
+    const agreementStrandIds = [...this.#deriveAgreementSet(strand)].sort((a, b) =>
+      compareStrings(String(a), String(b)),
+    );
+
+    // --- DERIVATION citations, both directions, sorted by edge id ------------
+    const restsOn = this.#store
+      .outEdges(strandId)
+      .filter((e) => e.edgeType === EdgeType.DERIVATION)
+      .sort(byEdgeId)
+      .map((e) => e.to);
+    const supports = this.#store
+      .inEdges(strandId)
+      .filter((e) => e.edgeType === EdgeType.DERIVATION)
+      .sort(byEdgeId)
+      .map((e) => e.from);
+
+    // --- MUTATION receipts: one chain pass splits strand-subject receipts from
+    // backing-source-subject receipts (disjoint id namespaces), and captures the
+    // FIRST DEMOTE receipt's time for the demotion explanation below.
+    const mutationReceipts: MutationPayload[] = [];
+    const sourceMutationReceipts: MutationPayload[] = [];
+    const sourceIdStrings = new Set<string>([...seenSources].map(String));
+    let demoteReceiptAt: EpochMs | null = null;
+    if (this.#ratification !== null) {
+      for (const rec of this.#ratification.ledger.records()) {
+        if (rec.kind !== "MUTATION") continue;
+        const p = rec.payload as MutationPayload;
+        if (p.subjectId === String(strandId)) {
+          mutationReceipts.push(p);
+          if (p.op === "DEMOTE" && demoteReceiptAt === null) demoteReceiptAt = p.at;
+        } else if (sourceIdStrings.has(p.subjectId)) {
+          sourceMutationReceipts.push(p);
+        }
+      }
+    }
+
+    // --- demotion explanation (resolved from outranked_by; time from receipt) --
+    let demotion: ExplainDemotion | null = null;
+    if (strand.outranked_by !== null) {
+      const edge = this.#store.getEdge(strand.outranked_by);
+      if (edge === null) {
+        // A dangling outranks edge is REPORTED, never invented around.
+        demotion = { kind: "EDGE_MISSING", outranksEdgeId: strand.outranked_by };
+      } else {
+        const at = demoteReceiptAt;
+        const atFidelity: EvidenceFidelity = at !== null ? "RECEIPT" : "STRAND_FIELD";
+        const from = String(edge.from);
+        if (from.startsWith(DISOWN_SENTINEL_PREFIX)) {
+          // NEVER getStrand the sentinel (it resolves null by design); the
+          // disowned source id is the suffix, per disownSentinelFor's format.
+          demotion = {
+            kind: "DISOWN_SENTINEL",
+            outranksEdgeId: edge.id,
+            disownedSourceId: from.slice(DISOWN_SENTINEL_PREFIX.length) as SourceId,
+            at,
+            atFidelity,
+          };
+        } else {
+          demotion = {
+            kind: "OUTRANKED_BY_STRAND",
+            outranksEdgeId: edge.id,
+            winnerStrandId: edge.from,
+            at,
+            atFidelity,
+          };
+        }
+      }
+    }
+
+    // --- disputes: OPEN via the ledger's own open semantics; RESOLVED_BY_APPROVAL
+    // by correlating each APPROVAL to its latest earlier PENDING (same csid);
+    // both emitted in CHAIN order. RESOLVED_BY_ADJUDICATION appended after, in
+    // provenance-ledger append order.
+    const contested = this.#openPendingMemberSet().has(String(strandId));
+    const disputes: ExplainDispute[] = [];
+    if (this.#ratification !== null) {
+      const openCsids = new Set<string>(
+        this.#ratification.ledger.listPending().map((p) => String(p.contradictionSetId)),
+      );
+      const latestPendingByCsid = new Map<string, PendingPayload>();
+      const openEmitted = new Set<string>();
+      for (const rec of this.#ratification.ledger.records()) {
+        if (rec.kind === "PENDING") {
+          const p = rec.payload as PendingPayload;
+          const csid = String(p.contradictionSetId);
+          latestPendingByCsid.set(csid, p);
+          if (
+            openCsids.has(csid) &&
+            !openEmitted.has(csid) &&
+            p.members.some((m) => m === strandId)
+          ) {
+            openEmitted.add(csid);
+            disputes.push({
+              status: "OPEN",
+              contradictionSetId: p.contradictionSetId,
+              reason: p.reason,
+              createdAt: p.createdAt,
+              members: [...p.members],
+            });
+          }
+        } else if (rec.kind === "APPROVAL") {
+          const a = rec.payload as ApprovalPayload;
+          const matched = latestPendingByCsid.get(String(a.contradictionSetId));
+          // Losers are NOT in the APPROVAL payload: membership comes from the
+          // matched PENDING's members (T7's recovery rule).
+          if (matched !== undefined && matched.members.some((m) => m === strandId)) {
+            disputes.push({
+              status: "RESOLVED_BY_APPROVAL",
+              contradictionSetId: a.contradictionSetId,
+              winner: a.winner,
+              approverSourceId: a.approverSourceId,
+              approvedAt: a.approvedAt,
+              ownerOverride: a.ownerOverride === true,
+            });
+          }
+        }
+      }
+    }
+    const adjProvenance = this.#ratification?.adjudicationProvenance;
+    if (adjProvenance !== undefined) {
+      for (const rec of adjProvenance.all()) {
+        if (rec.winner === strandId || rec.contributingStrandIds.some((s) => s === strandId)) {
+          disputes.push({
+            status: "RESOLVED_BY_ADJUDICATION",
+            contradictionSetId: rec.contradictionSetId,
+            winner: rec.winner,
+            margin: rec.margin,
+            at: rec.at,
+            reopened: adjProvenance.isReopened(rec.contradictionSetId),
+          });
+        }
+      }
+    }
+
+    // --- corroboration events naming this strand (either role), append order --
+    const corroborationEvents: ExplainCorroborationEvent[] = [];
+    const corroboration = this.#ratification?.corroboration;
+    if (corroboration !== undefined) {
+      for (const ev of corroboration.all()) {
+        const ratified = ev.ratifiedStrandId === strandId;
+        if (!ratified && !ev.corroboratingStrandIds.some((s) => s === strandId)) continue;
+        corroborationEvents.push({
+          eventId: ev.eventId,
+          at: ev.at,
+          beneficiarySourceId: ev.beneficiarySourceId,
+          reputationDelta: ev.reputationDelta,
+          role: ratified ? "RATIFIED" : "CORROBORATOR",
+          reversed: corroboration.isReversed(ev.eventId),
+        });
+      }
+    }
+
+    return {
+      strandId: strand.id,
+      entity: strand.entity,
+      attribute: strand.attribute,
+      payload: strand.payload,
+      contentHash: strand.content_hash,
+      factState: strand.fact_state,
+      origin: strand.origin,
+      tier: strand.tier,
+      observedAt: strand.observedAt,
+      externalReobservationCount: strand.external_reobservation_count,
+      roots,
+      sources,
+      independentRootCount,
+      agreementStrandIds,
+      restsOn,
+      supports,
+      demotion,
+      contested,
+      disputes,
+      corroborationEvents,
+      mutationReceipts,
+      sourceMutationReceipts,
+      coverage: this.#auditCoverage(),
+    };
+  }
+
+  beliefTimeline(entity: EntityId, attribute: AttributeKey): BeliefTimeline {
+    // Members: the attribute index is attribute-keyed only, so filter to the
+    // entity here; sorted (observedAt, id) for a deterministic roster.
+    const memberStrands = this.#store
+      .strandsByAttribute(attribute)
+      .filter((s) => s.entity === entity)
+      .sort(
+        (a, b) =>
+          (a.observedAt as number) - (b.observedAt as number) ||
+          compareStrings(String(a.id), String(b.id)),
+      );
+    const members = memberStrands.map((s) => s.id);
+    const memberIdSet = new Set<string>(members.map(String));
+
+    const dated: BeliefEvent[] = [];
+    const undated: BeliefEvent[] = [];
+
+    // OBSERVED per member (STRAND_FIELD; birth state recorded nowhere), plus
+    // EXTERNAL_ROOT_APPENDED (INFERRED) per root established strictly after the
+    // write — the same-ms residual is documented, never guessed at.
+    for (const s of memberStrands) {
+      dated.push({
+        kind: "OBSERVED",
+        strandId: s.id,
+        at: s.observedAt,
+        source: "STRAND_FIELD",
+        birthState: "UNKNOWN",
+      });
+      for (const r of s.provenance) {
+        if ((r.establishedAt as number) > (s.observedAt as number)) {
+          dated.push({
+            kind: "EXTERNAL_ROOT_APPENDED",
+            strandId: s.id,
+            at: r.establishedAt,
+            source: "INFERRED",
+            rootId: r.rootId,
+            sourceId: r.sourceId,
+          });
+        }
+      }
+    }
+
+    // Ledger-backed events (RECEIPT). Dispute records are admitted only when the
+    // attribute matches AND the members intersect the filtered roster — the guard
+    // against the per-attribute csid collision leaking another entity's dispute.
+    const demoteReceipted = new Set<string>();
+    if (this.#ratification !== null) {
+      const latestPendingByCsid = new Map<string, PendingPayload>();
+      for (const rec of this.#ratification.ledger.records()) {
+        if (rec.kind === "PENDING") {
+          const p = rec.payload as PendingPayload;
+          latestPendingByCsid.set(String(p.contradictionSetId), p);
+          if (p.attribute !== attribute) continue;
+          if (!p.members.some((m) => memberIdSet.has(String(m)))) continue;
+          if (p.reason === "REOPENED_BY_DISOWN") {
+            // A disown re-open re-contests the RECORDED WINNER only (T9:
+            // members are exactly [winner]; losers are DEMOTED, not members).
+            dated.push({
+              kind: "DISPUTE_REOPENED",
+              contradictionSetId: p.contradictionSetId,
+              at: p.createdAt,
+              source: "RECEIPT",
+              winner: p.members[0]!,
+            });
+          } else {
+            dated.push({
+              kind: "DISPUTE_OPENED",
+              contradictionSetId: p.contradictionSetId,
+              at: p.createdAt,
+              source: "RECEIPT",
+              members: [...p.members],
+              reason: p.reason,
+            });
+          }
+        } else if (rec.kind === "APPROVAL") {
+          const a = rec.payload as ApprovalPayload;
+          const matched = latestPendingByCsid.get(String(a.contradictionSetId));
+          if (matched === undefined || matched.attribute !== attribute) continue;
+          if (!matched.members.some((m) => memberIdSet.has(String(m)))) continue;
+          dated.push({
+            kind: "DISPUTE_RESOLVED",
+            contradictionSetId: a.contradictionSetId,
+            at: a.approvedAt,
+            source: "RECEIPT",
+            winner: a.winner,
+            approverSourceId: a.approverSourceId,
+            ownerOverride: a.ownerOverride === true,
+          });
+        } else {
+          const p = rec.payload as MutationPayload;
+          if (p.op !== "DEMOTE" || !memberIdSet.has(p.subjectId)) continue;
+          demoteReceipted.add(p.subjectId);
+          const ref = p.refEventId;
+          dated.push({
+            kind: "DEMOTED",
+            strandId: asStrandId(p.subjectId),
+            at: p.at,
+            source: "RECEIPT",
+            outranksEdgeId: ref === undefined ? null : asEdgeId(ref),
+            by:
+              ref === undefined
+                ? "UNKNOWN"
+                : ref.startsWith(DISOWN_OUTRANKS_EDGE_PREFIX)
+                  ? "DISOWN"
+                  : "STRAND",
+          });
+        }
+      }
+    }
+
+    // Fallback UNDATED demotion per currently-DEMOTED member with no receipt —
+    // receipt wins, never both. `at: null` (Edge carries no timestamp; the time
+    // is unknowable) — the fabrication ban routes it to the honest gap bucket.
+    for (const s of memberStrands) {
+      if (s.fact_state !== FactState.DEMOTED) continue;
+      if (demoteReceipted.has(String(s.id))) continue;
+      let by: "STRAND" | "DISOWN" | "UNKNOWN" = "UNKNOWN";
+      if (s.outranked_by !== null) {
+        const edge = this.#store.getEdge(s.outranked_by);
+        if (edge !== null) {
+          by = String(edge.from).startsWith(DISOWN_SENTINEL_PREFIX) ? "DISOWN" : "STRAND";
+        }
+      }
+      undated.push({
+        kind: "DEMOTED",
+        strandId: s.id,
+        at: null,
+        source: "STRAND_FIELD",
+        outranksEdgeId: s.outranked_by,
+        by,
+      });
+    }
+
+    // CORROBORATION_CREDITED per event whose ratified strand is a member.
+    const corroboration = this.#ratification?.corroboration;
+    if (corroboration !== undefined) {
+      for (const ev of corroboration.all()) {
+        if (!memberIdSet.has(String(ev.ratifiedStrandId))) continue;
+        dated.push({
+          kind: "CORROBORATION_CREDITED",
+          strandId: ev.ratifiedStrandId,
+          at: ev.at,
+          source: "RECEIPT",
+          eventId: ev.eventId,
+          beneficiarySourceId: ev.beneficiarySourceId,
+          reversed: corroboration.isReversed(ev.eventId),
+        });
+      }
+    }
+
+    dated.sort(byBeliefEventOrder);
+
+    return {
+      entity,
+      attribute,
+      members,
+      events: dated,
+      undatedEvents: undated,
+      currentBelief: memberStrands
+        .filter((s) => s.fact_state === FactState.LIVE)
+        .map((s) => s.id),
+      coverage: this.#auditCoverage(),
+    };
   }
 }

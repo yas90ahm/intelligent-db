@@ -3,7 +3,22 @@
   "version": "0.0.0",
   "private": true,
   "description": "A memory substrate for AI agents: latent memory surfaced by spreading activation, with first-class provenance and an external source-identity layer.",
+  "license": "Apache-2.0",
   "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE",
+    "NOTICE"
+  ],
   "engines": {
     "node": ">=20"
   },
@@ -11,7 +26,8 @@
     "intelligent-db-mcp": "dist/mcp/server.js"
   },
   "scripts": {
-    "build": "tsc -p .",
+    "build": "tsc -p tsconfig.build.json",
+    "demo": "npm run build && node dist/examples/demo.js",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
     "bench": "vitest bench --run",

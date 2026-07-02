@@ -218,6 +218,18 @@ class SqliteStrandStoreImpl implements SqliteStrandStore {
    */
   #txnDepth = 0;
 
+  /**
+   * TRUE from the moment an inner (or outer) `rollback()` collapses the open unit of
+   * work until the next OUTERMOST `beginTxn()` clears it. An inner rollback abandons
+   * the WHOLE transaction (SQLite ROLLBACK unwinds everything since the outermost
+   * BEGIN), so a still-outstanding outer `commit()` MUST NOT report success on work
+   * that was already rolled back — it throws loudly instead (see {@link beginTxn}).
+   * Without this flag the outer commit silently decremented `#txnDepth` to -1, which
+   * POISONED the store: every later `beginTxn()` saw depth !== 0, never issued BEGIN
+   * again, and every "atomic" compound op thereafter ran as N autocommitted writes.
+   */
+  #txnAborted = false;
+
   // Lazily-prepared, reused statements (one parse of the SQL each, then bound per call).
   readonly #getStrand;
   readonly #putStrand;
@@ -245,8 +257,26 @@ class SqliteStrandStoreImpl implements SqliteStrandStore {
     // owner is the authoritative place, mirroring the ledger drop-ins).
     if (opts.ownsDb) {
       // WAL: one writer + many concurrent readers; a crash cannot corrupt committed
-      // data. This is the durability floor and is NOT negotiable.
-      this.#db.exec("PRAGMA journal_mode=WAL");
+      // data. This is the durability floor and is NOT negotiable — so we VERIFY the
+      // pragma actually took instead of trusting it. `PRAGMA journal_mode=WAL` is a
+      // REQUEST: SQLite returns the mode it actually set, and it can silently refuse
+      // WAL (most commonly on a network filesystem, where WAL's shared-memory file
+      // does not work) and fall back to a rollback journal — quietly forfeiting the
+      // crash-safety this store's durability claims rest on. An in-memory database
+      // (":memory:") legitimately reports "memory" (it has no journal to speak of and
+      // is non-durable BY DESIGN — the test substrate); anything else is refused.
+      const journalRow = this.#db.prepare("PRAGMA journal_mode=WAL").get() as
+        | Record<string, unknown>
+        | undefined;
+      const journalMode = String(journalRow?.["journal_mode"] ?? "").toLowerCase();
+      if (journalMode !== "wal" && journalMode !== "memory") {
+        throw new Error(
+          `createSqliteStore: PRAGMA journal_mode=WAL did not take (database reports ` +
+            `"${journalMode}"). WAL is the crash-safety floor and cannot be silently ` +
+            `downgraded. The usual cause is a network filesystem (SMB/NFS), where ` +
+            `SQLite refuses WAL — move the database to a local disk.`,
+        );
+      }
       // synchronous=NORMAL (the DEFAULT) — under WAL, a power-cut/OS-crash can lose
       // only the LAST committed txn, never corrupt the file or leave a half-applied
       // compound op. FULL (fsync on every commit) is the opt-in zero-loss-on-power-cut
@@ -477,16 +507,47 @@ class SqliteStrandStoreImpl implements SqliteStrandStore {
    * (depth > 0) returns a NO-OP handle whose `commit`/`rollback` only decrement the
    * depth, so the real COMMIT/ROLLBACK fires once, from the outermost handle. A
    * `rollback()` at depth 0 after an inner ROLLBACK already fired is idempotent.
+   *
+   * LOUD-THROW CONTRACT (commit-after-rollback): an inner `rollback()` abandons the
+   * WHOLE unit of work (SQLite ROLLBACK unwinds everything since the outermost
+   * BEGIN), so an outer `commit()` issued AFTER an inner rollback THROWS —
+   * "commit after inner rollback: this unit of work was already rolled back" —
+   * rather than silently reporting success on rolled-back work. A `commit()` with no
+   * open transaction at all likewise throws ("commit with no open transaction").
+   * The next OUTERMOST `beginTxn()` clears the aborted flag and issues a real BEGIN,
+   * so the store is never left in the depth<0 poisoned state where every later
+   * "transaction" silently ran as autocommitted writes.
    */
   beginTxn(): StoreTxn {
+    // Depth can never go negative under the contract above; if it somehow did, a
+    // silent BEGIN-skip would turn every future compound op into N autocommitted
+    // writes with zero atomicity — assert loudly rather than limp.
+    if (this.#txnDepth < 0) {
+      throw new Error(
+        `beginTxn: transaction depth is ${this.#txnDepth} (internal invariant broken)`,
+      );
+    }
     const outermost = this.#txnDepth === 0;
-    if (outermost) this.#db.exec("BEGIN");
+    if (outermost) {
+      this.#txnAborted = false; // a fresh outermost unit of work starts clean
+      this.#db.exec("BEGIN");
+    }
     this.#txnDepth++;
     let settled = false;
     return {
       commit: (): void => {
         if (settled) return;
         settled = true;
+        if (this.#txnDepth === 0) {
+          // An inner rollback already collapsed this unit of work (or there was
+          // never an open transaction). Committing now would report success on
+          // work that is NOT in the database — throw loudly instead.
+          throw new Error(
+            this.#txnAborted
+              ? "commit after inner rollback: this unit of work was already rolled back"
+              : "commit with no open transaction",
+          );
+        }
         this.#txnDepth--;
         if (this.#txnDepth === 0) this.#db.exec("COMMIT");
       },
@@ -496,8 +557,11 @@ class SqliteStrandStoreImpl implements SqliteStrandStore {
         // A rollback abandons the WHOLE unit of work: a SQLite ROLLBACK unwinds every
         // statement since the outermost BEGIN, so we collapse the depth to 0 and emit
         // exactly one ROLLBACK (guarded against a double-rollback from nested handles).
+        // `#txnAborted` marks the collapse so a still-outstanding outer commit()
+        // throws instead of "succeeding" on rolled-back work.
         if (this.#txnDepth > 0) {
           this.#txnDepth = 0;
+          this.#txnAborted = true;
           this.#db.exec("ROLLBACK");
         }
       },
@@ -582,12 +646,48 @@ class SqliteStrandStoreImpl implements SqliteStrandStore {
  * a throughput cost. We never silently weaken durability — omit it to keep NORMAL. The
  * `{ db }` (borrowed-handle) overload ignores it: the single owner of the shared handle
  * sets the connection pragmas.
+ *
+ * NETWORK PATHS ARE REJECTED BY DEFAULT: a path that names a network share
+ * (Windows UNC `\\server\share\…` or the `//server/share/…` spelling) is refused
+ * unless `opts.allowNetworkPath` is explicitly `true` — see the flag's doc for the
+ * corruption risk being guarded.
  */
 export function createSqliteStore(
   arg: string | { db: DatabaseSyncType },
-  opts?: { synchronous?: "NORMAL" | "FULL" },
+  opts?: {
+    synchronous?: "NORMAL" | "FULL";
+    /**
+     * OPT-IN escape hatch for opening the database on a NETWORK PATH (Windows UNC
+     * `\\server\share\…` or `//…`). DEFAULT `false`: such paths are REJECTED,
+     * because SQLite's locking + WAL shared-memory machinery is well documented to
+     * be unreliable over network filesystems (SMB/NFS) — file locks may not be
+     * honored across clients and the WAL/SHM files may not be coherently shared, so
+     * a second writer (or even a flaky client) can SILENTLY CORRUPT the database
+     * file, defeating every durability guarantee this store makes. Setting this
+     * flag `true` says "I understand the corruption risk and accept it" (e.g. a
+     * strictly single-client share); the journal-mode verification above still runs
+     * and will refuse a share where WAL itself did not take.
+     */
+    allowNetworkPath?: boolean;
+  },
 ): SqliteStrandStore {
   if (typeof arg === "string") {
+    // FAIL-CLOSED network-path guard (see the option doc): reject UNC-shaped paths
+    // unless the caller explicitly accepted the risk. `\\?\C:\…` extended-length
+    // local paths also start with `\\` — spell those as plain `C:\…` instead; the
+    // conservative refusal is deliberate (the cost of a false reject is a renamed
+    // path; the cost of a false accept is silent database corruption).
+    if (
+      (arg.startsWith("\\\\") || arg.startsWith("//")) &&
+      opts?.allowNetworkPath !== true
+    ) {
+      throw new Error(
+        `createSqliteStore: ${JSON.stringify(arg)} looks like a network (UNC) path. ` +
+          `SQLite over a network filesystem risks silent database corruption ` +
+          `(unreliable locks + WAL shared memory). Use a local disk path, or pass ` +
+          `{ allowNetworkPath: true } to accept the risk explicitly.`,
+      );
+    }
     return new SqliteStrandStoreImpl({
       db: new DatabaseSync(arg),
       ownsDb: true,

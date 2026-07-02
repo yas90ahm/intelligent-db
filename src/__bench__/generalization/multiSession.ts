@@ -22,6 +22,7 @@
  */
 
 import { createRequire } from "node:module";
+import { freshSource } from "../../testSupport/identityFixtures.js";
 
 import type { DatabaseSync as DatabaseSyncType } from "node:sqlite";
 
@@ -33,7 +34,6 @@ import {
   createSqliteReputationLedger,
   createSqlitePendingLedger,
   createSourceIdentityLayer,
-  generatePassport,
   asStrandId,
   asEpochMs,
   FactState,
@@ -53,7 +53,7 @@ import type {
   ProvenanceRootId,
   IndependenceClassId,
   ContentHash,
-  KeyRegistryPort,
+  SourceRegistryPort,
   AnchorRegistryPort,
   ReputationLedger,
   ReputationLedgerPort,
@@ -127,7 +127,7 @@ function makeValueStrand(
   };
 }
 
-function makeKeyRegistry(known: Set<string>): KeyRegistryPort {
+function makeSourceRegistry(known: Set<string>): SourceRegistryPort {
   return {
     register: (p) => void known.add(String(p.sourceId)),
     sourceIdOf: (s) => (known.has(String(s)) ? s : null),
@@ -220,14 +220,14 @@ export function ingestSession1(dbPath: string, poisonCount = 8): MultiSessionWor
   const reputationPort: ReputationLedgerPort = { scoreOf: (s) => reputation.scoreOf(s) };
   const stakePort: StakeLedgerPort = { postedFor: () => 0 as Unit };
   const identity = createSourceIdentityLayer({
-    keys: makeKeyRegistry(known),
+    sources: makeSourceRegistry(known),
     anchors: makeAnchorRegistry(anchorBindings),
     reputation: reputationPort,
     stake: stakePort,
   });
   const ratification: RatificationDeps = {
     ledger: createSqlitePendingLedger({ db, reputation }),
-    systemSigner: generatePassport(),
+    systemSource: freshSource().sourceId,
   };
 
   const store: SqliteStrandStore = createSqliteStore({ db });

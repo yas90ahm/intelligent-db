@@ -13,23 +13,31 @@
  *   - the independent-root count used by the forgetting layer
  * — are READ FROM HERE rather than self-computed.
  *
- * This facade is deliberately MECHANICAL: it composes the four pillars
- * (passport keys, anchors, reputation, stake) into one stamp. It performs no
- * judgement of its own. That honors both governing invariants (CLAUDE.md §"The
- * two governing invariants"):
- *   1. The model is never its own witness — this layer is keys/anchors/scores/
- *      stakes, never the model.
+ * This facade is deliberately MECHANICAL: it composes the pillars (source
+ * registry, anchors, reputation) into one stamp. It performs no judgement of
+ * its own. That honors both governing invariants (CLAUDE.md §"The two
+ * governing invariants"):
+ *   1. The model is never its own witness — this layer is registries/anchors/
+ *      scores, never the model.
  *   2. The web is never its own witness about source identity — identity is
- *      witnessed from OUTSIDE the web, by this layer.
+ *      witnessed from OUTSIDE the web, by this layer (consumed from the
+ *      deployment's configured trust root, never manufactured here).
  *
  * ───────────────────────────────────────────────────────────────────────────
- * Module boundary note (SCAFFOLD): the four pillar modules referenced below
- * (identity/keys, identity/anchors, identity/reputation, identity/stake) are
+ * Module boundary note: the pillar modules referenced below (identity/sources,
+ * identity/trustRegistry, identity/anchors, identity/reputation) are
  * dependencies of this facade. They are injected via {@link createSourceIdentityLayer}'s
  * `deps` argument as PORTS — the minimal collaborator contracts this facade
  * needs — so that the facade composes them without importing their concrete
  * implementations. Each port below documents the sibling module it stands in for.
- * Only `core/types.ts` (the shared contract) is imported directly.
+ * Only `core/types.ts` (the shared contract) and the plain {@link SourceRef}
+ * shape (identity/sources) are imported directly.
+ *
+ * STAKE, RETIRED: the security-deposit pillar is retired as a feature —
+ * ATTRIBUTION replaces stake (facts are permanently attributed to named
+ * sources; that IS the deterrent). The {@link StakeLedgerPort} survives only so
+ * the stamp's shape (`stake_posted: 0`) is unchanged; it defaults to a
+ * constant-zero port and no producer posts to it.
  * ───────────────────────────────────────────────────────────────────────────
  */
 
@@ -41,30 +49,31 @@ import type {
   IndependenceClassId,
   Unit,
 } from "../core/types.js";
-// The PASSPORT pillar's public contract (CLAUDE.md pillar 1: "cryptographic key
-// per source"). Its home is identity/keys.ts; this facade depends only on its
-// shape (a `sourceId` fingerprint that proves sameness). Re-exported below for
-// callers of `register`.
-import type { Passport } from "./keys.js";
+// The SAMENESS pillar's public contract (pillar 1, crypto-free): a plain,
+// serializable source descriptor whose deterministic id proves sameness (same
+// issuer+subject ⇒ same source ⇒ never corroboration). Its home is
+// identity/sources.ts; this facade depends only on its shape. Re-exported
+// below for callers of `register`.
+import type { SourceRef } from "./sources.js";
 
-export type { Passport };
+export type { SourceRef };
 
 // ---------------------------------------------------------------------------
-// Collaborator PORTS (the four pillars, injected — see module boundary note)
+// Collaborator PORTS (the pillars, injected — see module boundary note)
 // ---------------------------------------------------------------------------
 
 /**
- * Port for identity/keys.ts — the PASSPORT pillar (CLAUDE.md pillar 1:
- * "cryptographic key per source"). Proves SAMENESS: same key ⇒ same source ⇒
- * never corroboration. Cheap to mint, so necessary but not sufficient for
- * independence.
+ * Port for the SAMENESS pillar (pillar 1) — the source registry side of
+ * identity/trustRegistry.ts. Proves SAMENESS: same source id ⇒ same source ⇒
+ * never corroboration. Cheap to mint (any issuer+subject pair), so necessary
+ * but not sufficient for independence.
  */
-export interface KeyRegistryPort {
-  /** Record a passport key for a source (idempotent on `passport.sourceId`). */
-  register(passport: Passport): void;
-  /** The {@link SourceId} (passport key fingerprint) for a source, if registered. */
+export interface SourceRegistryPort {
+  /** Record a source at the border (idempotent on `source.sourceId`). */
+  register(source: SourceRef): void;
+  /** The {@link SourceId} for a source, if registered. */
   sourceIdOf(sourceId: SourceId): SourceId | null;
-  /** Whether this source has a registered passport (has shown ID at the door). */
+  /** Whether this source is registered (has shown ID at the door). */
   has(sourceId: SourceId): boolean;
 }
 
@@ -127,15 +136,23 @@ export interface ReputationLedgerPort {
 }
 
 /**
- * Port for identity/stake.ts — the SECURITY-DEPOSIT pillar (CLAUDE.md pillar 4:
- * "staking makes lying cost something"). Composes multiplicatively with the
- * anchor it backs; burns on falsity and claws back reputation across everything
- * the anchor ever asserted.
+ * RETIRED pillar port, kept for stamp-shape stability only. Staking is retired
+ * as a feature — ATTRIBUTION replaces stake (facts are permanently attributed
+ * to named sources; the disown sweep is the clawback). This port survives so
+ * `IdentityStamp.stake_posted` keeps its shape (constant 0 by default); no
+ * producer posts to it. Omit it from the deps for the zero default.
  */
 export interface StakeLedgerPort {
-  /** Total stake currently posted backing this source's assertions. */
+  /** Total stake currently posted backing this source's assertions (0 today). */
   postedFor(sourceId: SourceId): number;
 }
+
+/** The constant-zero {@link StakeLedgerPort} default (stake is retired). */
+export const ZERO_STAKE_PORT: StakeLedgerPort = {
+  postedFor(_sourceId: SourceId): number {
+    return 0;
+  },
+};
 
 // ---------------------------------------------------------------------------
 // Facade dependencies
@@ -143,13 +160,17 @@ export interface StakeLedgerPort {
 
 /**
  * The wiring `createSourceIdentityLayer` needs: one port per pillar. These are
- * the keys + anchors + reputation + stake ledgers/maps composed into the stamp.
+ * the source registry + anchors + reputation ledgers/maps composed into the
+ * stamp. The crypto-free trust registry (identity/trustRegistry.ts) satisfies
+ * BOTH `sources` and `anchors` — wire ONE instance into both so sameness and
+ * independence read from the same book.
  */
 export interface SourceIdentityLayerDeps {
-  readonly keys: KeyRegistryPort;
+  readonly sources: SourceRegistryPort;
   readonly anchors: AnchorRegistryPort;
   readonly reputation: ReputationLedgerPort;
-  readonly stake: StakeLedgerPort;
+  /** RETIRED pillar; omit for the constant-zero default ({@link ZERO_STAKE_PORT}). */
+  readonly stake?: StakeLedgerPort;
   /**
    * OPTIONAL note hook fired when {@link SourceIdentityLayer.independentRootCount}
    * falls back from the EXACT maximum-independent-set to the bounded GREEDY
@@ -194,12 +215,15 @@ export interface SourceIdentityLayer {
   stampFor(sourceId: SourceId): IdentityStamp;
 
   /**
-   * Register a source at the border: record its passport key (sameness) and bind
-   * its anchor set (independence roots). Idempotent per source; binding is
-   * additive. This is the "shows ID at the door" step before a source counts as
-   * a distinct witness.
+   * Register a source at the border: record its {@link SourceRef} (sameness)
+   * and bind its anchor set (independence roots). Idempotent per source;
+   * binding is additive. This is the "shows ID at the door" step before a
+   * source counts as a distinct witness. (The trust registry's claim producers
+   * — registerOwner / registerSsoMember / registerPublisher /
+   * registerSystemOfRecord — are the primary path; this generic form serves
+   * manual/legacy wiring.)
    */
-  register(passport: Passport, anchors: AnchorBinding[]): void;
+  register(source: SourceRef, anchors: AnchorBinding[]): void;
 
   /**
    * The INDEPENDENT-ROOT COUNT the forgetting layer reads from this layer instead
@@ -218,10 +242,21 @@ export interface SourceIdentityLayer {
 
   /**
    * RC-5 — true MIS anchor-independence between two SOURCES (not a mere distinct
-   * key). Reproduces the EXACT pair logic {@link independentRootCount}'s internal
-   * `independent` predicate uses, at the source level:
-   *   - if EITHER source is unresolvable (not registered) ⇒ fall open to `true`
-   *     (the count layer's class-disjoint fallback; mirrors the null-source branch);
+   * key). Reproduces the pair logic {@link independentRootCount}'s internal
+   * `independent` predicate uses, at the source level, EXCEPT for unregistered
+   * sources (see below):
+   *   - if EITHER source is unresolvable (never `register()`-ed) ⇒ FAIL CLOSED to
+   *     `false`. This is NOT the same situation as `independentRootCount`'s
+   *     null-source fallback (a provenance root that recorded no sourceId at all
+   *     — genuinely no identity to speak of, judged on the Stage-1 class check
+   *     alone). Here the sourceId exists but was never registered, i.e. it never
+   *     bound an anchor — that is exactly a BARE_KEY (independence_weight 0.00
+   *     per the anchor-cost table), and a BARE_KEY can never be independent of
+   *     anything (mirrors the trust registry's matching fail-closed
+   *     empty-claim-set case). Treating "unregistered" as "trivially
+   *     independent" would let a caller-supplied, never-registered `SourceId`
+   *     (e.g. via `WriteFactInput.stamp`/`SourceRef`) pass RC-5's distinct-
+   *     approver / anchor-disjointness gate for free;
    *   - else PREFER the registry's source-aware `anchors.independentSources`
    *     (it sees per-anchor `classId` + the `operatorClassId` fleet axis), else
    *     fall back to `anchors.independenceBetween(...) > 0`.
@@ -236,23 +271,25 @@ export interface SourceIdentityLayer {
 // ---------------------------------------------------------------------------
 
 /**
- * Wire the four pillar ledgers/maps (keys + anchors + reputation + stake) into a
+ * Wire the pillar ledgers/maps (source registry + anchors + reputation) into a
  * {@link SourceIdentityLayer}. Pure dependency injection: the concrete backends
- * live in identity/keys, identity/anchors, identity/reputation, identity/stake
- * and are passed in via `deps`, keeping this facade mechanical and swappable
- * (the whole anchor table is "one swappable trust root").
+ * live in identity/trustRegistry, identity/anchors, identity/reputation and are
+ * passed in via `deps`, keeping this facade mechanical and swappable (the
+ * registry config + anchor table are "one swappable trust root"). The retired
+ * stake port defaults to constant zero.
  */
 export function createSourceIdentityLayer(
   deps: SourceIdentityLayerDeps,
 ): SourceIdentityLayer {
-  const { keys, anchors, reputation, stake } = deps;
+  const { sources, anchors, reputation } = deps;
+  const stake = deps.stake ?? ZERO_STAKE_PORT;
 
   return {
-    register(passport: Passport, anchorBindings: AnchorBinding[]): void {
-      // 1. Passport: prove sameness (idempotent on the source's key).
-      keys.register(passport);
+    register(source: SourceRef, anchorBindings: AnchorBinding[]): void {
+      // 1. Sameness: record the source descriptor (idempotent on its id).
+      sources.register(source);
       // 2. Anchors: bind the scarce external roots that price independence.
-      anchors.bind(passport.sourceId, anchorBindings);
+      anchors.bind(source.sourceId, anchorBindings);
     },
 
     stampFor(sourceId: SourceId): IdentityStamp {
@@ -516,10 +553,12 @@ export function createSourceIdentityLayer(
       // count share ONE independence notion (anti-drift).
       // A source is trivially not independent of itself (an echo).
       if (a === b) return false;
-      // Mirror the null-source branch: consult anchors only when BOTH sources are
-      // resolvable (registered); otherwise fall OPEN to `true` (class-disjoint
-      // verdict), never DOWNGRADE without positive correlation evidence.
-      if (keys.has(a) && keys.has(b)) {
+      // FAIL CLOSED for an unregistered source: it never bound an anchor, so it
+      // is a BARE_KEY-equivalent witness (independence_weight 0.00 per the
+      // anchor-cost table) and can never be independent of anything — never
+      // fall open to `true` just because a caller-supplied `SourceId` was never
+      // passed through `identity.register()`.
+      if (sources.has(a) && sources.has(b)) {
         // PREFER the registry's source-aware predicate (it sees per-anchor
         // `classId` + the `operatorClassId` fleet axis); else the anchor-set
         // disjointness math with the same `> 0` threshold the count layer uses.
@@ -530,7 +569,7 @@ export function createSourceIdentityLayer(
           anchors.independenceBetween(anchors.anchorsOf(a), anchors.anchorsOf(b)) > 0
         );
       }
-      return true;
+      return false;
     },
   };
 }

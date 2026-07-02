@@ -17,16 +17,15 @@
  */
 
 import { describe, it, expect } from "vitest";
+import { freshSource } from "../testSupport/identityFixtures.js";
 
 import {
   createIntelligentDb,
   createMemoryStore,
   createSourceIdentityLayer,
-  createStakeLedger,
   createPendingLedger,
   createReputationLedger,
   createCorroborationLedger,
-  generatePassport,
   independenceBetween,
   AnchorClass,
   FactState,
@@ -44,12 +43,12 @@ import type {
   Unit,
   AnchorBinding,
   ProvenanceRoot,
-  KeyRegistryPort,
+  SourceRegistryPort,
   AnchorRegistryPort,
   ReputationLedgerPort,
   StakeLedgerPort,
   SourceIdentityLayer,
-  Passport,
+  SourceRef,
   Strand,
   StrandId,
   ContentHash,
@@ -62,10 +61,10 @@ const ATTR = "berlin#capital_of" as AttributeKey;
 
 // --- minimal pillar ports (mirrors engineAdjudicate.test.ts) ----------------
 
-function makeKeyRegistry(): KeyRegistryPort {
+function makeSourceRegistry(): SourceRegistryPort {
   const known = new Set<SourceId>();
   return {
-    register(p: Passport): void {
+    register(p: SourceRef): void {
       known.add(p.sourceId);
     },
     sourceIdOf(s: SourceId): SourceId | null {
@@ -101,10 +100,10 @@ function makeAnchorRegistry(): AnchorRegistryPort {
 function makeIdentity(reputation: ReputationLedgerPort): {
   identity: SourceIdentityLayer;
 } {
-  const stake = createStakeLedger();
-  const stakePort: StakeLedgerPort = { postedFor: (s) => stake.posted(s) };
+  // Staking is RETIRED (attribution replaces stake): a constant-zero port.
+  const stakePort: StakeLedgerPort = { postedFor: () => 0 };
   const identity = createSourceIdentityLayer({
-    keys: makeKeyRegistry(),
+    sources: makeSourceRegistry(),
     anchors: makeAnchorRegistry(),
     reputation,
     stake: stakePort,
@@ -183,17 +182,17 @@ describe("BATCH 1 — #R + the engine-owned high-impact gate (OD-6 / OD-8 / F1)"
     const reputation = createReputationLedger(() => 0.9 as Unit, undefined, () => NOW);
     const { identity } = makeIdentity({ scoreOf: (s) => reputation.scoreOf(s) });
     const ledger = createPendingLedger({ reputation });
-    const ratification: RatificationDeps = { ledger, systemSigner: generatePassport() };
+    const ratification: RatificationDeps = { ledger, systemSource: freshSource().sourceId };
     const db = createIntelligentDb(store, identity, null, reputation, ratification);
 
     // The winner self-stacks four anchor-CLASS costumes — all resolving to ONE actor.
-    identity.register({ ...generatePassport(), sourceId: WINNER } as Passport, [
+    identity.register({ ...freshSource(), sourceId: WINNER } as SourceRef, [
       bindingOf(AnchorClass.EMAIL_OAUTH, 0.1),
       bindingOf(AnchorClass.PHONE_SIM, 0.2),
       bindingOf(AnchorClass.DOMAIN, 0.35),
       bindingOf(AnchorClass.ORGANIZATION, 0.75),
     ]);
-    identity.register({ ...generatePassport(), sourceId: CHAL } as Passport, []);
+    identity.register({ ...freshSource(), sourceId: CHAL } as SourceRef, []);
 
     // Pre-EARN the winner to a DECISIVE, EARNED reputation so the multi-class dispute
     // reaches the high-impact gate (the gate is what we are testing).
@@ -222,18 +221,18 @@ describe("BATCH 1 — #R + the engine-owned high-impact gate (OD-6 / OD-8 / F1)"
     const reputation = createReputationLedger(() => 0.9 as Unit, undefined, () => NOW);
     const { identity } = makeIdentity({ scoreOf: (s) => reputation.scoreOf(s) });
     const ledger = createPendingLedger({ reputation });
-    const ratification: RatificationDeps = { ledger, systemSigner: generatePassport() };
+    const ratification: RatificationDeps = { ledger, systemSource: freshSource().sourceId };
     const db = createIntelligentDb(store, identity, null, reputation, ratification);
 
     // Two GENUINELY anchor-disjoint actors: DOMAIN vs PHONE_SIM (disjoint classes ⇒
     // independenceBetween > 0 ⇒ mutually independent under the MIS).
-    identity.register({ ...generatePassport(), sourceId: WINNER } as Passport, [
+    identity.register({ ...freshSource(), sourceId: WINNER } as SourceRef, [
       bindingOf(AnchorClass.DOMAIN, 0.35),
     ]);
-    identity.register({ ...generatePassport(), sourceId: CORROB } as Passport, [
+    identity.register({ ...freshSource(), sourceId: CORROB } as SourceRef, [
       bindingOf(AnchorClass.PHONE_SIM, 0.2),
     ]);
-    identity.register({ ...generatePassport(), sourceId: CHAL } as Passport, []);
+    identity.register({ ...freshSource(), sourceId: CHAL } as SourceRef, []);
 
     // The winner must be DECISIVE + EARNED, AND clear the gate's corroboration-count.
     for (let i = 0; i < 6; i++) reputation.ratify(WINNER, NOW, 1);
@@ -280,18 +279,18 @@ describe("BATCH 1 — #R + the engine-owned high-impact gate (OD-6 / OD-8 / F1)"
     };
     const { identity } = makeIdentity({ scoreOf: (s) => reputation.scoreOf(s) });
     const ledger = createPendingLedger({ reputation });
-    const ratification: RatificationDeps = { ledger, systemSigner: generatePassport() };
+    const ratification: RatificationDeps = { ledger, systemSource: freshSource().sourceId };
     const db = createIntelligentDb(store, identity, null, reputation, ratification);
 
     // Two disjoint actors so #R = 2 (so the gate is reachable on (c) and the ONLY failing
     // term is the fail-closed recency check we are exercising).
-    identity.register({ ...generatePassport(), sourceId: WINNER } as Passport, [
+    identity.register({ ...freshSource(), sourceId: WINNER } as SourceRef, [
       bindingOf(AnchorClass.DOMAIN, 0.35),
     ]);
-    identity.register({ ...generatePassport(), sourceId: CORROB } as Passport, [
+    identity.register({ ...freshSource(), sourceId: CORROB } as SourceRef, [
       bindingOf(AnchorClass.PHONE_SIM, 0.2),
     ]);
-    identity.register({ ...generatePassport(), sourceId: CHAL } as Passport, []);
+    identity.register({ ...freshSource(), sourceId: CHAL } as SourceRef, []);
 
     for (let i = 0; i < 6; i++) real.ratify(WINNER, NOW, 1);
 
@@ -311,12 +310,12 @@ describe("BATCH 1 — #R + the engine-owned high-impact gate (OD-6 / OD-8 / F1)"
     const corroboration = createCorroborationLedger();
     const ratification: RatificationDeps = {
       ledger,
-      systemSigner: generatePassport(),
+      systemSource: freshSource().sourceId,
       corroboration,
     };
     const db = createIntelligentDb(store, identity, null, reputation, ratification);
 
-    identity.register({ ...generatePassport(), sourceId: "src:ext" as SourceId } as Passport, []);
+    identity.register({ ...freshSource(), sourceId: "src:ext" as SourceId } as SourceRef, []);
 
     // The target + three siblings about the SAME (entity, attribute):
     //   - a LIVE same-VALUE agreer    → MUST be in the derived agreement set

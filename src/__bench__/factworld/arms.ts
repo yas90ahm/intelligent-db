@@ -18,7 +18,6 @@ import {
   createSourceIdentityLayer,
   createReputationLedger,
   createPendingLedger,
-  generatePassport,
   asStrandId,
   asEpochMs,
   FactState,
@@ -38,7 +37,7 @@ import type {
   ProvenanceRootId,
   IndependenceClassId,
   ContentHash,
-  KeyRegistryPort,
+  SourceRegistryPort,
   AnchorRegistryPort,
   ReputationLedger,
   ReputationLedgerPort,
@@ -48,6 +47,7 @@ import type {
 } from "../../index.js";
 
 import { cosine } from "../retrieval/embed.js";
+import { freshSource } from "../../testSupport/identityFixtures.js";
 import { PRIMARY_WARMUP_RATIFIES } from "../trustWarmup.js";
 import type { Assertion, FWQuestion } from "./generate.js";
 
@@ -130,7 +130,7 @@ function makeValueStrand(idRaw: string, entity: string, attrKey: string, value: 
   };
 }
 
-function makeKeyRegistry(known: Set<string>): KeyRegistryPort {
+function makeSourceRegistry(known: Set<string>): SourceRegistryPort {
   return {
     register: (p) => void known.add(String(p.sourceId)),
     sourceIdOf: (s) => (known.has(String(s)) ? s : null),
@@ -215,12 +215,12 @@ export function substrateArm(assertions: readonly Assertion[]): FwArm {
   const reputationPort: ReputationLedgerPort = { scoreOf: (s) => reputation.scoreOf(s) };
   const stakePort: StakeLedgerPort = { postedFor: () => 0 as Unit };
   const identity = createSourceIdentityLayer({
-    keys: makeKeyRegistry(known),
+    sources: makeSourceRegistry(known),
     anchors: makeAnchorRegistry(anchorBindings),
     reputation: reputationPort,
     stake: stakePort,
   });
-  const ratification: RatificationDeps = { ledger: createPendingLedger(), systemSigner: generatePassport() };
+  const ratification: RatificationDeps = { ledger: createPendingLedger(), systemSource: freshSource().sourceId };
   const engine = createIntelligentDb(store, identity, null, reputation, ratification);
 
   for (const s of earnSources) for (let r = 0; r < PRIMARY_WARMUP_RATIFIES; r++) reputation.ratify(s as SourceId, NOW, 1 as Unit);

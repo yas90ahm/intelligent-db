@@ -57,7 +57,7 @@ export interface FactRecord {
   readonly text: string;
   /** Offline-assigned independence class for this fact's single provenance root. */
   readonly sourceClass: string;
-  /** The source (passport key) that asserted this fact. */
+  /** The source (registered source id) that asserted this fact. */
   readonly sourceId: string;
 }
 

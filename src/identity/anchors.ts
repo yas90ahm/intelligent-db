@@ -6,9 +6,9 @@
  * table"):
  *
  *  - An **anchor** measures independence against scarce external roots, never
- *    declared. Each passport key binds to one or more anchors (domain, verified
- *    human, org, device attestation, posted stake) — things costly/rate-limited
- *    in the real world.
+ *    declared. Each source binds to one or more anchors (domain, verified
+ *    human, org, owner authority, system of record) — things costly/rate-limited
+ *    or explicitly configured as trusted in the real world.
  *
  *  - **Independence between two sources = set-disjointness of their anchor
  *    sets, weighted by anchor cost.** Two sources sharing ANY anchor are not
@@ -93,14 +93,32 @@ export const STAKE_INDEPENDENCE_MAX: Unit = 0.85;
  * | class                | independence_weight | rep_cap |
  * |----------------------|---------------------|---------|
  * | BARE_KEY             | 0.00                | 0.05    |
+ * | PUBLISHER_UNVERIFIED | 0.04                | 0.10    |
  * | EMAIL_OAUTH          | 0.10                | 0.30    |
+ * | SSO_TENANT_MEMBER    | 0.12                | 0.30    |
+ * | PUBLISHER_TRACKED    | 0.18                | 0.35    |
  * | PHONE_SIM            | 0.20                | 0.40    |
  * | DOMAIN               | 0.35                | 0.60    |
+ * | LOCAL_DOCUMENT       | 0.35                | 0.60    |
  * | HARDWARE_ATTESTATION | 0.45                | 0.65    |
  * | VERIFIED_HUMAN       | 0.70                | 0.90    |
  * | ORGANIZATION         | 0.75                | 0.92    |
  * | FINANCIAL_STAKE      | 0.30–0.85 (∝ stake) | 0.85    |
  * | EXTERNAL_AUTHORITY   | 0.90                | 0.98    |
+ * | OWNER                | 0.90                | 0.98    |
+ * | SYSTEM_OF_RECORD     | 0.90                | 0.98    |
+ *
+ * Deliberate calibrations on the crypto-free rows (the trust-registry producers
+ * in identity/trustRegistry.ts; design doc §4.1):
+ *  - SSO_TENANT_MEMBER is EMAIL-grade ON PURPOSE: a fresh SSO tenant is a
+ *    five-minute, near-free, self-service mint, so bare tenant membership must
+ *    never approach ORGANIZATION weight. A tenant earns DOMAIN weight only via a
+ *    registry-configured VERIFIED CUSTOM DOMAIN (an additional DOMAIN binding).
+ *  - PUBLISHER_TRACKED stays BELOW DOMAIN's 0.60 repCap: a publisher, however
+ *    tenured, is structurally weaker than a domain someone registers and controls.
+ *  - OWNER / SYSTEM_OF_RECORD are EXTERNAL_AUTHORITY-grade: the deployment owner
+ *    (personal tier) and a registry-configured authoritative system (enterprise
+ *    tier) are each the configured ground truth of their deployment.
  */
 export const ANCHOR_TABLE: Record<AnchorClass, AnchorSpec> = {
   [AnchorClass.BARE_KEY]: {
@@ -149,6 +167,36 @@ export const ANCHOR_TABLE: Record<AnchorClass, AnchorSpec> = {
     class: AnchorClass.EXTERNAL_AUTHORITY,
     independenceWeight: 0.9,
     repCap: 0.98,
+  },
+  [AnchorClass.OWNER]: {
+    class: AnchorClass.OWNER,
+    independenceWeight: 0.9,
+    repCap: 0.98,
+  },
+  [AnchorClass.SYSTEM_OF_RECORD]: {
+    class: AnchorClass.SYSTEM_OF_RECORD,
+    independenceWeight: 0.9,
+    repCap: 0.98,
+  },
+  [AnchorClass.LOCAL_DOCUMENT]: {
+    class: AnchorClass.LOCAL_DOCUMENT,
+    independenceWeight: 0.35,
+    repCap: 0.6,
+  },
+  [AnchorClass.SSO_TENANT_MEMBER]: {
+    class: AnchorClass.SSO_TENANT_MEMBER,
+    independenceWeight: 0.12,
+    repCap: 0.3,
+  },
+  [AnchorClass.PUBLISHER_UNVERIFIED]: {
+    class: AnchorClass.PUBLISHER_UNVERIFIED,
+    independenceWeight: 0.04,
+    repCap: 0.1,
+  },
+  [AnchorClass.PUBLISHER_TRACKED]: {
+    class: AnchorClass.PUBLISHER_TRACKED,
+    independenceWeight: 0.18,
+    repCap: 0.35,
   },
 };
 

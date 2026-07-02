@@ -22,15 +22,16 @@
 
 import {
   createIntelligentDb, createMemoryStore, createSourceIdentityLayer, createReputationLedger,
-  createPendingLedger, generatePassport, asStrandId, asEpochMs, FactState, FactOrigin, Tier, AnchorClass,
+  createPendingLedger, asStrandId, asEpochMs, FactState, FactOrigin, Tier, AnchorClass,
 } from "../../index.js";
 import type {
   Strand, StrandStore, SourceId, Unit, EpochMs, EntityId, AttributeKey, ProvenanceRoot,
-  ProvenanceRootId, IndependenceClassId, ContentHash, AnchorBinding, KeyRegistryPort,
+  ProvenanceRootId, IndependenceClassId, ContentHash, AnchorBinding, SourceRegistryPort,
   AnchorRegistryPort, ReputationLedger, ReputationLedgerPort, StakeLedgerPort, RatificationDeps,
 } from "../../index.js";
 
 import { cosine } from "../retrieval/embed.js";
+import { freshSource } from "../../testSupport/identityFixtures.js";
 import type { KBPassage, PRQuestion } from "./data.js";
 import type { PrArm } from "./arms.js";
 
@@ -107,7 +108,7 @@ export function substrateNoTrustArm(passages: readonly KBPassage[], vecs: readon
 
   // Identity + reputation wiring is built IDENTICALLY to substrateArm so the only difference
   // is behavioral (no pre-earn, no adjudicate), never structural.
-  const keys: KeyRegistryPort = { register: () => {}, sourceIdOf: (s) => (known.has(String(s)) ? s : null), has: (s) => known.has(String(s)) };
+  const sources: SourceRegistryPort = { register: () => {}, sourceIdOf: (s) => (known.has(String(s)) ? s : null), has: (s) => known.has(String(s)) };
   const anchors: AnchorRegistryPort = {
     bind: () => {},
     anchorsOf: (s) => anchorBindings.get(String(s)) ?? [],
@@ -125,8 +126,8 @@ export function substrateNoTrustArm(passages: readonly KBPassage[], vecs: readon
   const reputation: ReputationLedger = createReputationLedger(repCapOf, undefined, () => NOW);
   const reputationPort: ReputationLedgerPort = { scoreOf: (s) => reputation.scoreOf(s) };
   const stake: StakeLedgerPort = { postedFor: () => 0 as Unit };
-  const identity = createSourceIdentityLayer({ keys, anchors, reputation: reputationPort, stake });
-  const ratification: RatificationDeps = { ledger: createPendingLedger(), systemSigner: generatePassport() };
+  const identity = createSourceIdentityLayer({ sources, anchors, reputation: reputationPort, stake });
+  const ratification: RatificationDeps = { ledger: createPendingLedger(), systemSource: freshSource().sourceId };
   // The engine IS wired (same machinery) — we simply never drive the trust verbs.
   createIntelligentDb(store, identity, null, reputation, ratification);
 

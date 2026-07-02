@@ -3,7 +3,7 @@
  *
  * Pins the invariants the verifier checks at the api.ts seam:
  *  - INVARIANT 3 (NO AUTO-RESOLVE): a multi-independence-class dispute, adjudicated
- *    through the engine, is DEFERRED — recorded as a signed PENDING in the ledger —
+ *    through the engine, is DEFERRED — recorded as a PENDING in the ledger —
  *    and EVERY member stays LIVE. The web never picks an in-graph winner.
  *  - END-TO-END APPROVE: an external, distinct approver resolves the deferred
  *    dispute through the engine; the loser is persisted DEMOTED + outranked_by, the
@@ -14,19 +14,18 @@
  */
 
 import { describe, it, expect } from "vitest";
+import { freshSource } from "../testSupport/identityFixtures.js";
 
 import {
   createIntelligentDb,
   createMemoryStore,
   createSourceIdentityLayer,
-  createStakeLedger,
   createPendingLedger,
   createReputationLedger,
   createAdjudicationProvenanceLedger,
   createCorroborationLedger,
   downstreamDisownSweep,
   OffLedgerReputationError,
-  generatePassport,
   independenceBetween,
   FactState,
   FactOrigin,
@@ -44,12 +43,12 @@ import type {
   Unit,
   AnchorBinding,
   ProvenanceRoot,
-  KeyRegistryPort,
+  SourceRegistryPort,
   AnchorRegistryPort,
   ReputationLedgerPort,
   StakeLedgerPort,
   SourceIdentityLayer,
-  Passport,
+  SourceRef,
   Strand,
   ContradictionSetId,
   RatificationDeps,
@@ -63,10 +62,10 @@ const ATTR = "berlin#capital_of" as AttributeKey;
 
 // --- minimal pillar ports (mirrors smoke.test.ts) --------------------------
 
-function makeKeyRegistry(): KeyRegistryPort {
+function makeSourceRegistry(): SourceRegistryPort {
   const known = new Set<SourceId>();
   return {
-    register(p: Passport): void {
+    register(p: SourceRef): void {
       known.add(p.sourceId);
     },
     sourceIdOf(s: SourceId): SourceId | null {
@@ -100,10 +99,10 @@ function makeAnchorRegistry(): AnchorRegistryPort {
 
 /** A reputation-bearing identity layer wired over a shared reputation ledger. */
 function makeIdentity(reputation: ReputationLedgerPort): SourceIdentityLayer {
-  const stake = createStakeLedger();
-  const stakePort: StakeLedgerPort = { postedFor: (s) => stake.posted(s) };
+  // Staking is RETIRED (attribution replaces stake): a constant-zero port.
+  const stakePort: StakeLedgerPort = { postedFor: () => 0 };
   return createSourceIdentityLayer({
-    keys: makeKeyRegistry(),
+    sources: makeSourceRegistry(),
     anchors: makeAnchorRegistry(),
     reputation,
     stake: stakePort,
@@ -157,13 +156,13 @@ function fileStrand(
 }
 
 describe("engine.adjudicate — routing the consolidation outcome", () => {
-  it("INVARIANT 3: a multi-class dispute DEFERS, records a signed PENDING, demotes NOTHING", () => {
+  it("INVARIANT 3: a multi-class dispute DEFERS, records a PENDING, demotes NOTHING", () => {
     const store = createMemoryStore();
     const reputation = createReputationLedger(() => 0.9, undefined, () => NOW);
     const identity = makeIdentity({ scoreOf: (s) => reputation.scoreOf(s) });
     const ledger = createPendingLedger({ reputation });
-    const systemSigner = generatePassport();
-    const ratification: RatificationDeps = { ledger, systemSigner };
+    const systemSource = freshSource().sourceId;
+    const ratification: RatificationDeps = { ledger, systemSource };
 
     const db = createIntelligentDb(store, identity, null, reputation, ratification);
 
@@ -180,7 +179,7 @@ describe("engine.adjudicate — routing the consolidation outcome", () => {
     expect(store.getStrand(a.id)?.outranked_by).toBeNull();
     expect(store.getStrand(b.id)?.outranked_by).toBeNull();
 
-    // A signed PENDING is now in the immortal ledger, and it verifies.
+    // A PENDING is now in the immortal ledger, and it verifies.
     expect(ledger.records().map((r) => r.kind)).toEqual(["PENDING"]);
     expect(ledger.verifyChain().ok).toBe(true);
 
@@ -195,25 +194,43 @@ describe("engine.adjudicate — routing the consolidation outcome", () => {
     const reputation = createReputationLedger(() => 0.9, undefined, () => NOW);
     const identity = makeIdentity({ scoreOf: (s) => reputation.scoreOf(s) });
     const ledger = createPendingLedger({ reputation });
-    const systemSigner = generatePassport();
+    const systemSource = freshSource().sourceId;
     const db = createIntelligentDb(store, identity, null, reputation, {
       ledger,
-      systemSigner,
+      systemSource,
     });
 
     const a = fileStrand(store, "strand:a", "src:a" as SourceId, "class:A", { v: "Germany" });
     const b = fileStrand(store, "strand:b", "src:b" as SourceId, "class:B", { v: "Atlantis" });
+    // Both authors must be registered with their own anchors so RC-5's
+    // independence check has a source to reason about: an unregistered source
+    // is a BARE_KEY-equivalent witness and is now judged NOT independent of
+    // anything (fail-closed), so the approver could never clear the gate below
+    // if these were left unregistered.
+    identity.register(
+      { ...freshSource(), sourceId: "src:a" as SourceId } as SourceRef,
+      [
+        { anchorClass: AnchorClass.VERIFIED_HUMAN, realizedCost: 0.7 as Unit, independenceWeight: 0.7 as Unit },
+      ],
+    );
+    identity.register(
+      { ...freshSource(), sourceId: "src:b" as SourceId } as SourceRef,
+      [
+        { anchorClass: AnchorClass.HARDWARE_ATTESTATION, realizedCost: 0.45 as Unit, independenceWeight: 0.45 as Unit },
+      ],
+    );
     expect(db.adjudicate(ATTR).kind).toBe("DEFERRED");
 
     // An EXTERNAL, distinct approver designates a as the winner. RC-5: the approver
     // must hold a priced anchor (no anchor → no independent voice) and be MIS-
-    // independent of the member authors (src:a/src:b are unregistered ⇒ fail-open).
-    const approver = generatePassport(); // not src:a, not src:b
+    // independent of the member authors (a DOMAIN anchor is disjoint from src:a's
+    // VERIFIED_HUMAN and src:b's HARDWARE_ATTESTATION anchors).
+    const approver = freshSource(); // not src:a, not src:b
     identity.register(approver, [
       { anchorClass: AnchorClass.DOMAIN, realizedCost: 0.35 as Unit, independenceWeight: 0.35 as Unit },
     ]);
     const csid = ledger.listPending()[0]!.contradictionSetId as ContradictionSetId;
-    const resolved = db.approve(csid, a.id, approver, NOW);
+    const resolved = db.approve(csid, a.id, approver.sourceId, NOW);
 
     expect(resolved.winner).toBe(a.id);
 
@@ -244,19 +261,74 @@ describe("engine.adjudicate — routing the consolidation outcome", () => {
     expect(reputation.stateOf("src:b" as SourceId)?.contradictedCount).toBe(1);
   });
 
+  it("REGRESSION: an UNREGISTERED disputed author is judged NOT independent (fail-closed, not fail-open)", () => {
+    // Guards against the `identity.independentSources` bug where either side
+    // being unresolvable (never passed through `identity.register()`) fell
+    // OPEN to `true`. A hand-built/raw SourceId that never registered an
+    // anchor is a BARE_KEY-equivalent witness (independence_weight 0.00) and
+    // must never pass RC-5's anchor-disjointness gate "for free".
+    const store = createMemoryStore();
+    const reputation = createReputationLedger(() => 0.9, undefined, () => NOW);
+    const identity = makeIdentity({ scoreOf: (s) => reputation.scoreOf(s) });
+    const ledger = createPendingLedger({ reputation });
+    const db = createIntelligentDb(store, identity, null, reputation, {
+      ledger,
+      systemSource: freshSource().sourceId,
+    });
+
+    // "src:raw" is a hand-built SourceId used directly as a strand author —
+    // never passed through identity.register(), so it has bound no anchor.
+    const a = fileStrand(store, "strand:a", "src:raw" as SourceId, "class:A", {
+      v: "Germany",
+    });
+    const b = fileStrand(store, "strand:b", "src:b" as SourceId, "class:B", {
+      v: "Atlantis",
+    });
+    expect(db.adjudicate(ATTR).kind).toBe("DEFERRED");
+
+    // A distinct, registered, priced approver — genuinely anchor-independent of
+    // the REGISTERED counterparty (src:b), but src:raw was never registered.
+    const approver = freshSource();
+    identity.register(approver, [
+      { anchorClass: AnchorClass.DOMAIN, realizedCost: 0.35 as Unit, independenceWeight: 0.35 as Unit },
+    ]);
+    identity.register(
+      { ...freshSource(), sourceId: "src:b" as SourceId } as SourceRef,
+      [
+        { anchorClass: AnchorClass.HARDWARE_ATTESTATION, realizedCost: 0.45 as Unit, independenceWeight: 0.45 as Unit },
+      ],
+    );
+
+    // Directly exercises the facade predicate: an unregistered source must
+    // never be reported independent of anything.
+    expect(identity.independentSources(approver.sourceId, "src:raw" as SourceId)).toBe(false);
+    expect(identity.independentSources("src:raw" as SourceId, "src:b" as SourceId)).toBe(false);
+
+    const csid = ledger.listPending()[0]!.contradictionSetId as ContradictionSetId;
+    // approve() must reject: the approver is not anchor-independent of the
+    // unregistered author src:raw (fail-closed), so it can't be waved through
+    // just because src:raw never showed up at the identity border.
+    expect(() => db.approve(csid, b.id, approver.sourceId, NOW)).toThrow(/not anchor-independent/i);
+
+    // Nothing demoted; the dispute is still open.
+    expect(store.getStrand(a.id)?.fact_state).toBe(FactState.LIVE);
+    expect(store.getStrand(b.id)?.fact_state).toBe(FactState.LIVE);
+    expect(ledger.records().map((r) => r.kind)).toEqual(["PENDING"]);
+  });
+
   it("engine.approve through a self-approver (authored a member) is REJECTED", () => {
     const store = createMemoryStore();
     const reputation = createReputationLedger(() => 0.9, undefined, () => NOW);
     const identity = makeIdentity({ scoreOf: (s) => reputation.scoreOf(s) });
     const ledger = createPendingLedger({ reputation });
-    const systemSigner = generatePassport();
+    const systemSource = freshSource().sourceId;
     const db = createIntelligentDb(store, identity, null, reputation, {
       ledger,
-      systemSigner,
+      systemSource,
     });
 
     // The approver's OWN source authors member a => self-approval must be rejected.
-    const approver = generatePassport();
+    const approver = freshSource();
     const a = fileStrand(store, "strand:a", approver.sourceId, "class:A", { v: "Germany" });
     const b = fileStrand(store, "strand:b", "src:b" as SourceId, "class:B", { v: "Atlantis" });
     expect(db.adjudicate(ATTR).kind).toBe("DEFERRED");
@@ -264,7 +336,7 @@ describe("engine.adjudicate — routing the consolidation outcome", () => {
     void b;
 
     const csid = ledger.listPending()[0]!.contradictionSetId as ContradictionSetId;
-    expect(() => db.approve(csid, b.id, approver, NOW)).toThrow(/self-approval/i);
+    expect(() => db.approve(csid, b.id, approver.sourceId, NOW)).toThrow(/self-approval/i);
 
     // Nothing demoted; the dispute is still open and only the PENDING record exists.
     expect(store.getStrand(a.id)?.fact_state).toBe(FactState.LIVE);
@@ -279,7 +351,7 @@ describe("engine.adjudicate — routing the consolidation outcome", () => {
     const ledger = createPendingLedger({ reputation });
     const db = createIntelligentDb(store, identity, null, reputation, {
       ledger,
-      systemSigner: generatePassport(),
+      systemSource: freshSource().sourceId,
     });
 
     // Same independence class => echo dispute => SAFE; reputation drives the winner.
@@ -327,9 +399,9 @@ describe("engine hardening integration", () => {
     const reputation = createReputationLedger(() => 0.9, undefined, () => NOW);
     const identity = makeIdentity({ scoreOf: (s) => reputation.scoreOf(s) });
     const ledger = createPendingLedger({ reputation });
-    const systemSigner = generatePassport();
+    const systemSource = freshSource().sourceId;
     const adjudicationProvenance = createAdjudicationProvenanceLedger();
-    const ratification: RatificationDeps = { ledger, systemSigner, adjudicationProvenance };
+    const ratification: RatificationDeps = { ledger, systemSource, adjudicationProvenance };
     const db = createIntelligentDb(store, identity, null, reputation, ratification);
 
     // SAFE single-class dispute: src:a (pre-earned) outranks fresh src:b => RESOLVED,
@@ -355,7 +427,7 @@ describe("engine hardening integration", () => {
       NOW,
       undefined,
       undefined,
-      { adjudicationProvenance, pending: ledger, systemSigner, decisiveMargin: 0.3 },
+      { adjudicationProvenance, pending: ledger, systemSource, decisiveMargin: 0.3 },
     );
     expect(res.reopenedDisputes).toContain(recs[0]!.contradictionSetId);
     const reopened = db.listPending().find((p) => p.contradictionSetId === recs[0]!.contradictionSetId);
@@ -371,7 +443,7 @@ describe("engine hardening integration", () => {
     // ratify that earns α has NO place to record the event ⇒ off-ledger ⇒ throws.
     const db = createIntelligentDb(store, identity, null, reputation, {
       ledger,
-      systemSigner: generatePassport(),
+      systemSource: freshSource().sourceId,
     });
 
     // witness AGREES with target (same entity + content_hash + LIVE) so the engine
@@ -397,7 +469,7 @@ describe("engine hardening integration", () => {
     const corroboration = createCorroborationLedger();
     const db = createIntelligentDb(store, identity, null, reputation, {
       ledger,
-      systemSigner: generatePassport(),
+      systemSource: freshSource().sourceId,
       corroboration,
     });
 

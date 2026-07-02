@@ -23,6 +23,7 @@
  */
 
 import { createRequire } from "node:module";
+import { freshSource } from "../testSupport/identityFixtures.js";
 import { rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -37,7 +38,6 @@ import {
   createSqliteReputationLedger,
   createSqliteCorroborationLedger,
   createSqlitePendingLedger,
-  generatePassport,
   FactState,
   FactOrigin,
   Tier,
@@ -301,8 +301,8 @@ describe("SqliteCorroborationLedger — events + reversed set survive a restart"
 
 describe("SqlitePendingLedger — audit chain survives a restart and stays tamper-evident", () => {
   function drive(path: string): { a: StrandId; b: StrandId } {
-    const sys = generatePassport();
-    const approver = generatePassport();
+    const sys = freshSource();
+    const approver = freshSource();
     const led = track(createSqlitePendingLedger({ path }));
 
     const a = asStrandId("strand:a");
@@ -312,8 +312,8 @@ describe("SqlitePendingLedger — audit chain survives a restart and stays tampe
       [b, memberStrand("strand:b", "src:b" as SourceId, { v: "Atlantis" })],
     ]);
 
-    led.appendPending(pendingOf([a, b]), sys);
-    led.approve(CSID, a, approver, NOW, ctxOver(byId));
+    led.appendPending(pendingOf([a, b]), sys.sourceId);
+    led.approve(CSID, a, approver.sourceId, NOW, ctxOver(byId));
     expect(led.verifyChain()).toEqual({ ok: true, firstBrokenSeq: null });
     led.close();
     return { a, b };
@@ -361,11 +361,11 @@ describe("SqlitePendingLedger — audit chain survives a restart and stays tampe
 
   it("listPending reflects the persisted state after reopen", () => {
     const path = freshPath("chain-pending");
-    const sys = generatePassport();
+    const sys = freshSource();
     const led = track(createSqlitePendingLedger({ path }));
     const a = asStrandId("strand:a");
     const b = asStrandId("strand:b");
-    led.appendPending(pendingOf([a, b]), sys);
+    led.appendPending(pendingOf([a, b]), sys.sourceId);
     led.close();
 
     const reopened = track(createSqlitePendingLedger({ path }));
@@ -376,7 +376,7 @@ describe("SqlitePendingLedger — audit chain survives a restart and stays tampe
 
   it("OD-2 (SQLite path): cross-attribute dedup + per-source cap bound the durable horn; chain stays verifiable", () => {
     const path = freshPath("od2-bound");
-    const sys = generatePassport();
+    const sys = freshSource();
     const led = track(createSqlitePendingLedger({ path }));
     const S = "src:attacker" as SourceId;
     const a = asStrandId("strand:a");
@@ -385,7 +385,7 @@ describe("SqlitePendingLedger — audit chain survives a restart and stays tampe
     // First dispute appends.
     const first = led.appendPending(
       { ...pendingOf([a, b]), contradictionSetId: "cset:od2-1" as ContradictionSetId, attribute: "attr#1" as AttributeKey },
-      sys,
+      sys.sourceId,
       { disputingSources: [S], coalesceKey: "DUP", perSourceCap: 2 },
     );
     expect(led.records().length).toBe(1);
@@ -393,7 +393,7 @@ describe("SqlitePendingLedger — audit chain survives a restart and stays tampe
     // Same coalesce key across a DIFFERENT attribute ⇒ no-op returning the existing record.
     const dup = led.appendPending(
       { ...pendingOf([a, b]), contradictionSetId: "cset:od2-2" as ContradictionSetId, attribute: "attr#2" as AttributeKey },
-      sys,
+      sys.sourceId,
       { disputingSources: [S], coalesceKey: "DUP", perSourceCap: 2 },
     );
     expect(dup.seq).toBe(first.seq);
@@ -402,7 +402,7 @@ describe("SqlitePendingLedger — audit chain survives a restart and stays tampe
     // A distinct dispute naming S still appends (1 -> 2)...
     led.appendPending(
       { ...pendingOf([a, b]), contradictionSetId: "cset:od2-3" as ContradictionSetId, attribute: "attr#3" as AttributeKey },
-      sys,
+      sys.sourceId,
       { disputingSources: [S], coalesceKey: "K3", perSourceCap: 2 },
     );
     expect(led.records().length).toBe(2);
@@ -410,7 +410,7 @@ describe("SqlitePendingLedger — audit chain survives a restart and stays tampe
     // ...but the per-source cap (2) now rejects a further pending naming S (no-op).
     led.appendPending(
       { ...pendingOf([a, b]), contradictionSetId: "cset:od2-4" as ContradictionSetId, attribute: "attr#4" as AttributeKey },
-      sys,
+      sys.sourceId,
       { disputingSources: [S], coalesceKey: "K4", perSourceCap: 2 },
     );
     expect(led.records().length).toBe(2);
@@ -461,14 +461,14 @@ describe("END-TO-END restart — facts/trust/audit in ONE crash-consistent file"
     });
 
     // Drive a full dispute -> approve (audit + reputation move through the SAME rep1).
-    const sys = generatePassport();
-    const approver = generatePassport();
+    const sys = freshSource();
+    const approver = freshSource();
     const byId = new Map<StrandId, Strand>([
       [a, memberStrand("strand:a", srcA, { v: "Germany" })],
       [b, memberStrand("strand:b", srcB, { v: "Atlantis" })],
     ]);
-    ledger1.appendPending(pendingOf([a, b]), sys);
-    ledger1.approve(CSID, a, approver, NOW, ctxOver(byId));
+    ledger1.appendPending(pendingOf([a, b]), sys.sourceId);
+    ledger1.approve(CSID, a, approver.sourceId, NOW, ctxOver(byId));
 
     const scoreABefore = rep1.scoreOf(srcA);
     expect(scoreABefore).toBeGreaterThan(0); // winner author ratified

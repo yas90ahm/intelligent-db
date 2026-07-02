@@ -39,7 +39,6 @@ import {
   createSourceIdentityLayer,
   createReputationLedger,
   createPendingLedger,
-  generatePassport,
   asStrandId,
   asEpochMs,
   FactState,
@@ -59,7 +58,7 @@ import type {
   ProvenanceRootId,
   IndependenceClassId,
   ContentHash,
-  KeyRegistryPort,
+  SourceRegistryPort,
   AnchorRegistryPort,
   ReputationLedger,
   ReputationLedgerPort,
@@ -69,6 +68,7 @@ import type {
 } from "../../index.js";
 
 import type { CIItem } from "./costlyIndependent.generate.js";
+import { freshSource } from "../../testSupport/identityFixtures.js";
 
 const NOW: EpochMs = asEpochMs(1_700_000_000_000);
 const attrKeyOf = (entity: string, attribute: string): string => `${entity}::${attribute}`;
@@ -182,7 +182,7 @@ function makeValueStrand(
   };
 }
 
-function makeKeyRegistry(known: Set<string>): KeyRegistryPort {
+function makeSourceRegistry(known: Set<string>): SourceRegistryPort {
   return {
     register: (p) => void known.add(String(p.sourceId)),
     sourceIdOf: (s) => (known.has(String(s)) ? s : null),
@@ -290,12 +290,12 @@ export function measureLevel(items: readonly CIItem[], cfg: CIConfig): CILevelRe
   const reputationPort: ReputationLedgerPort = { scoreOf: (s) => reputation.scoreOf(s) };
   const stakePort: StakeLedgerPort = { postedFor: () => 0 as Unit };
   const identity = createSourceIdentityLayer({
-    keys: makeKeyRegistry(known),
+    sources: makeSourceRegistry(known),
     anchors: makeAnchorRegistry(anchorBindings),
     reputation: reputationPort,
     stake: stakePort,
   });
-  const ratification: RatificationDeps = { ledger: createPendingLedger(), systemSigner: generatePassport() };
+  const ratification: RatificationDeps = { ledger: createPendingLedger(), systemSource: freshSource().sourceId };
   const engine = createIntelligentDb(store, identity, null, reputation, ratification);
 
   // Pre-earn: the true primary (modest, decisive) and — in "anchors+rep" — the poison primary

@@ -1,9 +1,10 @@
+import { freshSource } from "../../testSupport/identityFixtures.js";
 /**
  * __bench__/redteam/harness.ts — REAL-ENGINE SYBIL RED-TEAM HARNESS (gated REDTEAM=1).
  *
  * Materializes designed Sybil attacks as ACTUAL Intelligent DB engine state and runs
  * the REAL engine verbs (writeFact / ratify / adjudicate / disown) over a shared
- * in-memory store + a fully-wired Source-Identity Layer (passport keys, an anchor
+ * in-memory store + a fully-wired Source-Identity Layer (registered source ids, an anchor
  * registry that models the OFFLINE class-assignment + operator/fleet axis, a live
  * Beta(α,β) reputation ledger on a controllable clock, a stake ledger) + the full
  * ratification stack (pending / corroboration / adjudication-provenance / weak-influence
@@ -33,7 +34,6 @@ import {
   repCapFor,
   aggregateAnchorCost,
   independenceBetween,
-  generatePassport,
 } from "../../index.js";
 
 import type {
@@ -44,8 +44,7 @@ import type {
   EpochMs,
   IdentityStamp,
   IntelligentDb,
-  KeyPair,
-  KeyRegistryPort,
+  SourceRegistryPort,
   AnchorRegistryPort,
   ReputationLedger,
   ReputationLedgerPort,
@@ -61,6 +60,7 @@ import type {
   Unit,
   ConsolidationOutcome,
   RatificationDeps,
+  SourceRef,
 } from "../../index.js";
 
 export const DAY = 86_400_000;
@@ -68,7 +68,7 @@ export const DAY = 86_400_000;
 /** A registered source plus the OFFLINE-assigned independence/operator labels. */
 export interface SourceRec {
   readonly sourceId: SourceId;
-  readonly key: KeyPair;
+  readonly key: SourceRef;
   readonly label: string;
   readonly anchors: AnchorBinding[];
   /** Offline-assigned independence class (the human-judgment seam the attacks probe). */
@@ -94,6 +94,12 @@ export function anchorOf(
     [AnchorClass.ORGANIZATION]: 0.75,
     [AnchorClass.FINANCIAL_STAKE]: 0.3,
     [AnchorClass.EXTERNAL_AUTHORITY]: 0.9,
+    [AnchorClass.OWNER]: 0.9,
+    [AnchorClass.SYSTEM_OF_RECORD]: 0.9,
+    [AnchorClass.LOCAL_DOCUMENT]: 0.35,
+    [AnchorClass.SSO_TENANT_MEMBER]: 0.12,
+    [AnchorClass.PUBLISHER_UNVERIFIED]: 0.04,
+    [AnchorClass.PUBLISHER_TRACKED]: 0.18,
   };
   const w = opts.independenceWeight ?? weights[cls];
   return {
@@ -115,7 +121,7 @@ export class Harness {
   readonly reputation: ReputationLedger;
   readonly identity: SourceIdentityLayer;
   readonly engine: IntelligentDb;
-  readonly systemSigner: KeyPair;
+  readonly systemSource: SourceId;
   readonly ratification: RatificationDeps;
 
   private readonly sources = new Map<SourceId, SourceRec>();
@@ -126,7 +132,7 @@ export class Harness {
     this.nowMs = startMs;
     const clock = (): EpochMs => asEpochMs(this.nowMs);
 
-    const keys: KeyRegistryPort = (() => {
+    const keys: SourceRegistryPort = (() => {
       const known = new Set<SourceId>();
       return {
         register: (p) => void known.add(p.sourceId),
@@ -175,17 +181,17 @@ export class Harness {
     const stakePort: StakeLedgerPort = { postedFor: (s) => this.stakeMap.get(s) ?? 0 };
 
     this.identity = createSourceIdentityLayer({
-      keys,
+      sources: keys,
       anchors,
       reputation: reputationPort,
       stake: stakePort,
     });
 
     this.store = createMemoryStore();
-    this.systemSigner = generatePassport();
+    this.systemSource = freshSource().sourceId;
     this.ratification = {
       ledger: createPendingLedger({ reputation: this.reputation }),
-      systemSigner: this.systemSigner,
+      systemSource: this.systemSource,
       corroboration: createCorroborationLedger(),
       adjudicationProvenance: createAdjudicationProvenanceLedger(),
       weakInfluence: createWeakInfluenceLedger(),
@@ -207,7 +213,7 @@ export class Harness {
     this.nowMs += d * DAY;
   }
 
-  /** Register a passport + bind anchors + record offline labels. */
+  /** Register a source + bind anchors + record offline labels. */
   addSource(opts: {
     label: string;
     anchors?: AnchorBinding[];
@@ -215,7 +221,7 @@ export class Harness {
     operatorClass?: string | null;
     stake?: number;
   }): SourceRec {
-    const key = generatePassport();
+    const key = freshSource();
     const anchors = opts.anchors ?? [];
     const rec: SourceRec = {
       sourceId: key.sourceId,

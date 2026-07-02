@@ -11,29 +11,22 @@
  *     to `co.uk` (a public suffix) — the naive rule collapses an entire ccTLD.
  *
  * The unit block asserts both directions on `registrableDomain`; the integration
- * block proves the FIX flows through the DNS binder: two subdomains of ONE ordinary
- * registrable name collapse to the SAME DOMAIN classId (the subdomain seam closed),
- * while two genuinely-distinct registrable names stay DISTINCT (the Registrar
- * Carousel is correctly NOT collapsed — it is the priced-not-prevented residual).
+ * block proves the FIX flows through the trust registry's publisher producer: two
+ * URLs under ONE ordinary registrable name collapse to the SAME publisher source
+ * (the subdomain seam closed), while two genuinely-distinct registrable names stay
+ * DISTINCT (the Registrar Carousel is correctly NOT collapsed — it is the
+ * priced-not-prevented residual; the config-injected `operatorOf` fleet hook is
+ * the partial mitigation, also exercised here).
  *
  * Complements (does not duplicate) publicSuffix.test.ts: that file proves the
- * github.io PRIVATE distinctness through the binder; this file proves the
- * COLLAPSE direction and the carousel-stays-distinct direction through the binder.
+ * github.io PRIVATE distinctness through the producer; this file proves the
+ * COLLAPSE direction and the carousel-stays-distinct direction through it.
  */
 
 import { describe, it, expect } from "vitest";
 
-import { registrableDomain, pslResolver } from "./publicSuffix.js";
-import { asEpochMs } from "../../core/types.js";
-import { generatePassport, sourceIdFromPublicKey, type KeyPair } from "../keys.js";
-import { isRejection } from "../binding.js";
-import {
-  bindDomainViaDns,
-  fakeResolver,
-  createDnsDomainProofChecker,
-  type DnsResolver,
-  type DnsDomainBindDeps,
-} from "./dnsDomainProver.js";
+import { registrableDomain } from "./publicSuffix.js";
+import { createTrustRegistry } from "../trustRegistry.js";
 
 // ---------------------------------------------------------------------------
 // Unit: both directions on registrableDomain
@@ -72,6 +65,19 @@ describe("PSL both-directions correctness", () => {
     expect(registrableDomain("sub.www.ck")).toBe("www.ck");
   });
 
+  it("REGRESSION (red-team ce-c3-02): K same-owner subdomains collapse to ONE class; K PRIVATE-section tenants stay K", () => {
+    // The exact Mega-Provider Subdomain Seam scenario the cycle-3 red-team spec
+    // now routes through this SAME shipped resolver: 5 subdomains of one $9
+    // registrable parent must yield ONE independence class (one witness)…
+    const subs = Array.from({ length: 5 }, (_, i) => registrableDomain(`sub${i}.evilcorp.com`));
+    expect(new Set(subs).size).toBe(1);
+    expect(subs[0]).toBe("evilcorp.com");
+    // …while 5 genuinely-distinct GitHub Pages owners (PSL PRIVATE section)
+    // must NOT be over-collapsed into a phantom single owner.
+    const tenants = Array.from({ length: 5 }, (_, i) => registrableDomain(`owner${i}.github.io`));
+    expect(new Set(tenants).size).toBe(5);
+  });
+
   it("two genuinely-distinct registrable names stay distinct (carousel)", () => {
     // PSL does NOT collapse a registrar carousel — distinct $/yr names are
     // legitimately independent DOMAIN classes (priced-not-prevented residual).
@@ -80,72 +86,47 @@ describe("PSL both-directions correctness", () => {
 });
 
 // ---------------------------------------------------------------------------
-// Integration: the seam through bindDomainViaDns (classId both directions)
+// Integration: the seam through registerPublisher (both directions)
 // ---------------------------------------------------------------------------
 
-describe("integration — PSL classId both-directions through bindDomainViaDns", () => {
-  const NOW = asEpochMs(1_700_000_000_000);
-  const NONCE = "nonce-bothdir";
+describe("integration — PSL both-directions through registerPublisher", () => {
+  it("SEAM CLOSED: two subdomain URLs of one ordinary name collapse to ONE publisher", () => {
+    const registry = createTrustRegistry();
 
-  function bindDeps(verifier: KeyPair, resolver: DnsResolver): DnsDomainBindDeps {
-    return {
-      verifier,
-      checker: createDnsDomainProofChecker({ resolver }),
-      etld: pslResolver,
-      anchorSalt: "test-salt",
-      resolver,
-    };
-  }
+    const a = registry.registerPublisher("https://a.evilcorp.com/page-1");
+    const b = registry.registerPublisher("https://b.evilcorp.com/page-2");
 
-  async function classIdFor(
-    domain: string,
-    verifier: KeyPair,
-    resolver: DnsResolver,
-  ): Promise<string> {
-    const src = sourceIdFromPublicKey(generatePassport().publicKeyPem);
-    const att = await bindDomainViaDns(src, domain, NONCE, bindDeps(verifier, resolver), NOW);
-    expect(isRejection(att)).toBe(false);
-    if (isRejection(att)) throw new Error(`unexpected rejection: ${att.reason}`);
-    return att.classId as unknown as string;
-  }
-
-  it("SEAM CLOSED: two subdomains of one ordinary name share ONE DOMAIN classId", async () => {
-    const verifier = generatePassport();
-    const resolver = fakeResolver(
-      new Map<string, string[][]>([
-        ["_iddb-challenge.a.evilcorp.com", [[NONCE]]],
-        ["_iddb-challenge.b.evilcorp.com", [[NONCE]]],
-      ]),
-      new Map<string, string[]>([
-        // NS keyed by the registrable apex (deriveOperatorClass resolves the apex).
-        ["evilcorp.com", ["ns1.somehost.net"]],
-      ]),
-    );
-
-    const a = await classIdFor("a.evilcorp.com", verifier, resolver);
-    const b = await classIdFor("b.evilcorp.com", verifier, resolver);
-    expect(a).toBe("evilcorp.com");
-    expect(b).toBe("evilcorp.com");
-    expect(a).toBe(b); // subdomain seam closed — not two phantom witnesses
+    // One registrable name ⇒ ONE publisher source ⇒ an echo, never two witnesses.
+    expect(a.label).toBe("evilcorp.com");
+    expect(b.label).toBe("evilcorp.com");
+    expect(a.sourceId).toBe(b.sourceId); // subdomain seam closed
   });
 
-  it("CAROUSEL NOT COLLAPSED: two distinct registrable names get DISTINCT classIds", async () => {
-    const verifier = generatePassport();
-    const resolver = fakeResolver(
-      new Map<string, string[][]>([
-        ["_iddb-challenge.evil1.com", [[NONCE]]],
-        ["_iddb-challenge.evil2.com", [[NONCE]]],
-      ]),
-      new Map<string, string[]>([
-        ["evil1.com", ["ns1.somehost.net"]],
-        ["evil2.com", ["ns1.somehost.net"]],
-      ]),
-    );
+  it("CAROUSEL NOT COLLAPSED: two distinct registrable names stay DISTINCT publishers", () => {
+    const registry = createTrustRegistry();
 
-    const a = await classIdFor("evil1.com", verifier, resolver);
-    const b = await classIdFor("evil2.com", verifier, resolver);
-    expect(a).toBe("evil1.com");
-    expect(b).toBe("evil2.com");
-    expect(a).not.toBe(b); // PSL leaves the carousel as distinct priced identities
+    const a = registry.registerPublisher("https://evil1.com/x");
+    const b = registry.registerPublisher("https://evil2.com/y");
+
+    expect(a.label).toBe("evil1.com");
+    expect(b.label).toBe("evil2.com");
+    expect(a.sourceId).not.toBe(b.sourceId);
+    // PSL leaves the carousel as distinct priced identities…
+    expect(registry.independentSources(a.sourceId, b.sourceId)).toBe(true);
+  });
+
+  it("…but the operatorOf FLEET hook is the partial mitigation: one operator collapses the carousel", () => {
+    // A configured ownership-cluster lookup maps both names to one operator.
+    const registry = createTrustRegistry({
+      operatorOf: (etld1) =>
+        etld1 === "evil1.com" || etld1 === "evil2.com" ? "op:evil-cluster" : etld1,
+    });
+
+    const a = registry.registerPublisher("https://evil1.com/x");
+    const b = registry.registerPublisher("https://evil2.com/y");
+
+    expect(a.sourceId).not.toBe(b.sourceId); // still two sources (sameness)…
+    // …but NOT independent: the shared operator class is the fleet cap.
+    expect(registry.independentSources(a.sourceId, b.sourceId)).toBe(false);
   });
 });

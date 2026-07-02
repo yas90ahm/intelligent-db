@@ -3,16 +3,18 @@
  *
  * ONE integration test that wires the WHOLE pipeline together over a SINGLE,
  * SHARED SQLite handle (facts + trust + corroboration + adjudication-provenance +
- * audit, one crash-consistent file) and proves the four roadmap pillars compose as a
- * SYSTEM — surfacing any capability that is built-but-UNWIRED. It exercises, in order:
+ * audit, one crash-consistent file) and proves the pillars compose as a SYSTEM —
+ * surfacing any capability that is built-but-UNWIRED. It exercises, in order:
  *
- *   (a) ANCHOR BINDING → INDEPENDENCE: a source proves a DOMAIN anchor through the real
- *       binder + fleet-capped {@link createAnchorRegistry}.ingest(signed attestation);
- *       its stamp gains real anchor_cost (independence > 0), and a SECOND domain source
- *       behind a DIFFERENT registrar/eTLD is genuinely independent of it.
+ *   (a) TRUST-REGISTRY CLAIMS → INDEPENDENCE: two SSO members of DIFFERENT tenants
+ *       with registry-CONFIGURED verified custom domains each gain a DOMAIN-grade
+ *       claim through {@link createTrustRegistry}; their stamps gain real
+ *       anchor_cost (independence > 0) and the two are genuinely independent,
+ *       while an unresolvable publisher URL and an UNCONFIGURED domain hint are
+ *       fail-closed (no source minted / no lift granted).
  *   (b) writeFact lands provenance-rooted strands attached by SHARED_ENTITY.
- *   (c) CORROBORATION → BETA REPUTATION + EVENT: db.ratify(..., corroboratingStrandIds)
- *       raises the source's Beta LCB AND records an append-only corroboration event.
+ *   (c) CORROBORATION → BETA REPUTATION + EVENT: db.ratify(...) raises the
+ *       source's Beta LCB AND records an append-only corroboration event.
  *   (d) DECISIVE-OR-DEFER: a multi-class dispute with a decisively-out-earned winner
  *       AUTO-RESOLVES on the LCB margin; the SAME dispute flagged HIGH-IMPACT (winner
  *       fails the count/anchor-class gate) DEFERS to listPending().
@@ -20,24 +22,25 @@
  *       DEMOTES its derivatives (sparing an independently-corroborated one via false-
  *       disown protection), reverses the EXACT corroboration credit, and RE-OPENS a
  *       dispute a tainted strand merely tipped.
- *   (f) MERKLE STH: the audit chain's Merkle Signed Tree Head verifies, and a rollback
- *       to a smaller tree is CAUGHT against a witness's published prior STH.
+ *   (f) THE CHECKSUM CHAIN: the audit chain hash-verifies end-to-end; a byte
+ *       flipped in a persisted record is caught NAMING the first broken seq; and a
+ *       chainHead() CHECKPOINT exported to external storage exposes a wholesale
+ *       chain rewrite/rollback (the head a replacement chain reaches never matches).
  *   (g) reconcileLedger reports ok (no off-ledger drift).
  *
  * COMPOSITION-ROOT NOTE (the stranded capability this test resolves): before this work,
  * `downstreamDisownSweep` (the full undo engine) was reachable ONLY as a free function
  * from the barrel — NOT through the `IntelligentDb` engine. It is now WIRED as the
  * `db.disown(...)` verb (api.ts), assembling its `DisownHardeningDeps` from the wired
- * RatificationDeps. The Merkle `MerkleLog` witness layer is, by design, a STANDALONE
- * tamper-evidence layer composed DIRECTLY over the same audit chain (the shared pending
- * ledger's records ARE its leaves) — kept explicit rather than over-coupling the engine.
+ * RatificationDeps.
  *
  * Everything runs through the public barrel (`../index.js`). A controllable clock is
- * injected EVERYWHERE time matters (reputation decay-on-read, attestation TTL, STH) so
- * no assertion is wall-clock-dependent.
+ * injected EVERYWHERE time matters (reputation decay-on-read) so no assertion is
+ * wall-clock-dependent.
  */
 
 import { rmSync } from "node:fs";
+import { freshSource } from "../testSupport/identityFixtures.js";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createRequire } from "node:module";
@@ -55,20 +58,13 @@ import {
   createSqlitePendingLedger,
   createPendingLedger,
   createSourceIdentityLayer,
-  createAnchorRegistry,
-  createStakeLedger,
-  createMerkleLog,
-  InMemoryPublicationSink,
-  verifyTreeHead,
-  signAttestation,
+  createTrustRegistry,
   repCapFor,
-  AnchorClass,
   EdgeType,
   FactState,
   FactOrigin,
   Tier,
   reconcileLedger,
-  generatePassport,
   asEpochMs,
   asStrandId,
   asEdgeId,
@@ -86,16 +82,12 @@ import type {
   ProvenanceRoot,
   IdentityStamp,
   ContradictionSetId,
-  KeyRegistryPort,
   ReputationLedgerPort,
   StakeLedgerPort,
   SourceIdentityLayer,
-  Passport,
-  KeyPair,
   AlphaSnapshot,
-  AnchorAttestation,
   IndependenceClassId,
-  OperatorClassId,
+  LedgerRecord,
   RatificationDeps,
 } from "../index.js";
 
@@ -133,48 +125,6 @@ function freshPath(): string {
     }
   });
   return p;
-}
-
-// --- minimal key-registry port (the real registry owns anchors) -------------
-
-function makeKeyRegistry(): KeyRegistryPort {
-  const known = new Set<SourceId>();
-  return {
-    register(p: Passport): void {
-      known.add(p.sourceId);
-    },
-    sourceIdOf(s: SourceId): SourceId | null {
-      return known.has(s) ? s : null;
-    },
-    has(s: SourceId): boolean {
-      return known.has(s);
-    },
-  };
-}
-
-/** Hand-build + sign a DOMAIN attestation binding `sourceId` to a domain/operator. */
-function domainAttestation(
-  sourceId: SourceId,
-  classId: string,
-  operatorClassId: string,
-  verifier: KeyPair,
-  now: EpochMs,
-): AnchorAttestation {
-  const weight = 0.35 as Unit; // DOMAIN independence weight
-  return signAttestation(
-    {
-      sourceId,
-      anchorType: AnchorClass.DOMAIN,
-      anchorId: `anchorid:${classId}`,
-      operatorClassId: operatorClassId as unknown as OperatorClassId,
-      proofRef: `_iddb-challenge.${classId}`,
-      weight,
-      classId: classId as unknown as IndependenceClassId,
-      notBefore: now,
-      notAfter: asEpochMs((now as number) + 30 * DAY),
-    },
-    verifier,
-  );
 }
 
 /**
@@ -239,7 +189,7 @@ function derivationEdge(derived: StrandId, witness: StrandId): Edge {
 }
 
 describe("END-TO-END SYSTEM COHERENCE — the whole pipeline over one shared SQLite handle", () => {
-  it("binds anchors -> earns Beta credit + events -> decisive/high-impact adjudication -> disown demotes+reverses+re-opens -> Merkle STH verifies + rollback caught -> reconcile ok", () => {
+  it("registers trust-registry claims -> earns Beta credit + events -> decisive/high-impact adjudication -> disown demotes+reverses+re-opens -> checksum chain verifies + tamper/rewrite caught -> reconcile ok", () => {
     const require = createRequire(import.meta.url);
     const { DatabaseSync } = require("node:sqlite") as {
       DatabaseSync: new (p: string) => DatabaseSyncType;
@@ -256,80 +206,90 @@ describe("END-TO-END SYSTEM COHERENCE — the whole pipeline over one shared SQL
     });
 
     // ---- ONE shared handle backs the WHOLE substrate -----------------------
-    // The verifier whose key signs every attestation; the registry validates against it.
-    const verifier = generatePassport();
-    const realAnchors = createAnchorRegistry({
-      verifierPublicKeyPem: verifier.publicKeyPem,
-      now: () => NOW,
+    // The crypto-free TRUST REGISTRY is the deployment's swappable trust root: the
+    // CONFIG (not any proof machinery in this codebase) asserts which tenants hold
+    // verified custom domains. One instance serves BOTH facade ports.
+    const trust = createTrustRegistry({
+      verifiedTenantDomains: {
+        "tenant:winner": "winner.example",
+        "tenant:corrob": "corrob.example",
+      },
     });
 
-    const repCapOf = (s: SourceId): Unit => repCapFor([...realAnchors.anchorsOf(s)]);
+    const repCapOf = (s: SourceId): Unit => repCapFor([...trust.anchorsOf(s)]);
     const reputation = createSqliteReputationLedger(repCapOf, { db, clock: () => NOW });
     const corroboration = createSqliteCorroborationLedger({ db });
     const adjudicationProvenance = createSqliteAdjudicationProvenanceLedger({ db });
     const store = createSqliteStore({ db });
-    const systemSigner = generatePassport();
+    const systemSource = freshSource().sourceId;
     const auditLedger = createSqlitePendingLedger({ db, reputation });
 
     const reputationPort: ReputationLedgerPort = { scoreOf: (s) => reputation.scoreOf(s) };
-    const stakeLedger = createStakeLedger();
-    const stakePort: StakeLedgerPort = { postedFor: (s) => stakeLedger.posted(s) };
+    // Staking is RETIRED (attribution replaces stake): a constant-zero port.
+    const stakePort: StakeLedgerPort = { postedFor: () => 0 };
     const identity: SourceIdentityLayer = createSourceIdentityLayer({
-      keys: makeKeyRegistry(),
-      anchors: realAnchors,
+      sources: trust,
+      anchors: trust,
       reputation: reputationPort,
       stake: stakePort,
     });
 
     const ratification: RatificationDeps = {
       ledger: auditLedger,
-      systemSigner,
+      systemSource,
       corroboration,
       adjudicationProvenance,
     };
     const engine = createIntelligentDb(store, identity, null, reputation, ratification);
 
     // =====================================================================
-    // (a) ANCHOR BINDING -> INDEPENDENCE
+    // (a) TRUST-REGISTRY CLAIMS -> INDEPENDENCE
     // =====================================================================
-    const winnerSrc = "src:winner-domain" as SourceId; // the strong, anchored incumbent
-    const corroboratorSrc = "src:corroborator-domain" as SourceId; // independent witness
-    const challengerSrc = "src:challenger" as SourceId; // fresh, weightless
+    // Two SSO members of DIFFERENT tenants, each with a registry-CONFIGURED verified
+    // custom domain, so each holds SSO_TENANT_MEMBER + a DOMAIN-grade claim on a
+    // DIFFERENT eTLD+1 / different fleet ⇒ genuinely INDEPENDENT under the fleet cap.
+    const winnerSrc = trust.registerSsoMember({
+      issuer: "https://idp.winner.example",
+      subject: "alice",
+      tenantId: "tenant:winner",
+      verifiedCustomDomain: "winner.example",
+      label: "winner",
+    }).sourceId; // the strong, anchored incumbent
+    const corroboratorSrc = trust.registerSsoMember({
+      issuer: "https://idp.corrob.example",
+      subject: "bob",
+      tenantId: "tenant:corrob",
+      verifiedCustomDomain: "corrob.example",
+      label: "corroborator",
+    }).sourceId; // independent witness
+    const challengerSrc = "src:challenger" as SourceId; // fresh, weightless, bare
     const beneficiarySrc = "src:beneficiary" as SourceId; // earns corroboration credit
 
-    identity.register({ ...generatePassport(), sourceId: winnerSrc } as Passport, []);
-    identity.register({ ...generatePassport(), sourceId: corroboratorSrc } as Passport, []);
-
-    // Ingest signed DOMAIN attestations on DIFFERENT eTLD+1 + DIFFERENT registrar so the
-    // two sources are genuinely INDEPENDENT under the fleet cap (not same-operator).
+    // FAIL-CLOSED, twice over:
+    //  - an unresolvable publisher URL must never mint a source;
+    expect(() => trust.registerPublisher("")).toThrow(RangeError);
+    //  - an UNCONFIGURED tenant claiming a custom-domain hint gains NO DOMAIN lift
+    //    (the config asserts the claim; a caller hint alone grants nothing).
+    const pretenderSrc = trust.registerSsoMember({
+      issuer: "https://idp.evil.example",
+      subject: "mallory",
+      tenantId: "tenant:evil", // not in verifiedTenantDomains
+      verifiedCustomDomain: "winner.example",
+    }).sourceId;
     expect(
-      realAnchors.ingest(
-        domainAttestation(winnerSrc, "winner.example", "registrar:A", verifier, NOW),
-        NOW,
-      ),
+      trust.anchorsOf(pretenderSrc).every((b) => b.independenceWeight <= 0.12),
     ).toBe(true);
-    expect(
-      realAnchors.ingest(
-        domainAttestation(corroboratorSrc, "corrob.example", "registrar:B", verifier, NOW),
-        NOW,
-      ),
-    ).toBe(true);
-    // A FORGED attestation (signed by a stranger, not the verifier) is fail-closed.
-    const forger = generatePassport();
-    expect(
-      realAnchors.ingest(
-        domainAttestation("src:forged" as SourceId, "evil.example", "registrar:Z", forger, NOW),
-        NOW,
-      ),
-    ).toBe(false);
 
-    // The stamp now carries real independence (anchor_cost > 0) for an anchored source,
-    // and 0 for a BARE_KEY (fail-closed default).
+    // The stamp now carries real independence (anchor_cost > 0) for a claimed source,
+    // and 0 for a bare source (fail-closed default).
     const winnerStamp: IdentityStamp = identity.stampFor(winnerSrc);
     expect(winnerStamp.anchor_cost).toBeGreaterThan(0);
     expect(identity.stampFor(challengerSrc).anchor_cost).toBe(0);
-    // The two anchored sources are genuinely independent (different eTLD+1 + registrar).
-    expect(realAnchors.independentSources!(winnerSrc, corroboratorSrc)).toBe(true);
+    // The two claimed sources are genuinely independent (different eTLD+1 + tenant).
+    expect(trust.independentSources(winnerSrc, corroboratorSrc)).toBe(true);
+    // ... while the pretender shares no verified domain and stays correlated-to-nothing
+    // useful: it is NOT independent of a bare id (fail-closed empty side).
+    expect(trust.independentSources(pretenderSrc, challengerSrc)).toBe(false);
 
     // =====================================================================
     // (b) writeFact lands provenance-rooted strands (SHARED_ENTITY attach)
@@ -526,35 +486,49 @@ describe("END-TO-END SYSTEM COHERENCE — the whole pipeline over one shared SQL
     expect(second.reversedCorroborationEventIds).toEqual([]);
 
     // =====================================================================
-    // (f) MERKLE STH verifies; a rollback is caught against a witness's prior STH
+    // (f) THE CHECKSUM CHAIN: verify end-to-end; tamper caught; checkpoint
+    //     exposes a rewrite/rollback
     // =====================================================================
-    // The audit chain (the shared pending ledger) IS the Merkle log's leaves. Two
-    // independent sinks witness each Signed Tree Head.
-    const sinkA = new InMemoryPublicationSink();
-    const sinkB = new InMemoryPublicationSink();
-    const merkle = createMerkleLog({ ledger: auditLedger, signer: systemSigner, sinks: [sinkA, sinkB] });
-    merkle.publishGenesis(NOW);
-    const sth = merkle.anchor(asEpochMs((NOW as number) + DAY)); // publish the current STH to both sinks
-    // The STH verifies against the log's public key (authentic, non-repudiable).
-    expect(verifyTreeHead(sth, merkle.logPublicKeyPem())).toBe(true);
-    expect(sth.tree_size).toBe(auditLedger.records().length);
-    // A healthy witness check (the live tree still extends the witnessed prior STH) passes.
-    expect(merkle.witness(sinkA, asEpochMs((NOW as number) + 2 * DAY)).ok).toBe(true);
+    // The untampered audit chain hash-verifies end-to-end, and the current
+    // chainHead() CHECKPOINT is exactly the last record's checksum — the plain
+    // `{seq, headHash}` artifact an operator exports to ACCESS-SEGREGATED external
+    // storage for insider-tamper evidence (the honest-disclosure residual: an actor
+    // with live write access could rewrite the whole chain and re-checksum it, so
+    // the exported head is what pins history).
+    expect(auditLedger.verifyChain()).toEqual({ ok: true, firstBrokenSeq: null });
+    const records = auditLedger.records();
+    expect(records.length).toBeGreaterThan(0);
+    const head = auditLedger.chainHead();
+    expect(head.seq).toBe(records.length - 1);
+    expect(head.headHash).toBe(records[records.length - 1]!.thisHash);
 
-    // ROLLBACK CAUGHT: an operator that rolls the log back to a SMALLER tree cannot serve
-    // a consistency proof from the witness's prior STH — detected as ROLLBACK_OR_DELETION.
-    const rolledBack = createPendingLedger();
-    const rolledLog = createMerkleLog({
-      ledger: rolledBack,
-      signer: systemSigner,
-      sinks: [new InMemoryPublicationSink(), new InMemoryPublicationSink()],
-    });
-    const caught = rolledLog.witness(sinkA, asEpochMs((NOW as number) + 3 * DAY));
-    expect(caught.ok).toBe(false);
-    expect(caught.reason).toBe("ROLLBACK_OR_DELETION");
-
-    // The untampered audit chain itself still hash-verifies end-to-end.
+    // BYTE-TAMPER CAUGHT: flip one persisted checksum byte at rest (raw SQL, behind
+    // the ledger's back) — verifyChain reports ok:false NAMING that exact seq.
+    const row = db
+      .prepare("SELECT seq, json FROM ratification_records ORDER BY seq LIMIT 1")
+      .get() as { seq: number; json: string };
+    const tamperedRec = JSON.parse(row.json) as LedgerRecord & { thisHash: string };
+    tamperedRec.thisHash =
+      (tamperedRec.thisHash[0] === "0" ? "1" : "0") + tamperedRec.thisHash.slice(1);
+    db.prepare("UPDATE ratification_records SET json = ? WHERE seq = ?").run(
+      JSON.stringify(tamperedRec),
+      row.seq,
+    );
+    expect(auditLedger.verifyChain()).toEqual({ ok: false, firstBrokenSeq: row.seq });
+    // Restore the original row; the chain verifies again (side-effect-free check).
+    db.prepare("UPDATE ratification_records SET json = ? WHERE seq = ?").run(row.json, row.seq);
     expect(auditLedger.verifyChain().ok).toBe(true);
+
+    // REWRITE/ROLLBACK EXPOSED BY THE CHECKPOINT: a wholesale replacement chain
+    // (an insider's re-checksummed history, or a rollback to a shorter chain)
+    // verifies internally — that is the disclosed limit of a checksum chain — but
+    // it can NEVER reproduce the externally-stored head: seq/hash diverge.
+    const rewritten = createPendingLedger();
+    expect(rewritten.verifyChain().ok).toBe(true); // internally consistent...
+    const rewrittenHead = rewritten.chainHead();
+    expect(rewrittenHead.seq).not.toBe(head.seq); // ...but the checkpoint exposes it
+    expect(rewrittenHead.headHash).not.toBe(head.headHash);
+
     expect(store.integrityCheck!()).toBe(true);
 
     // =====================================================================

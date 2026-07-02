@@ -72,7 +72,6 @@ import type { CorroborationLedger } from "./corroboration.js";
 import type { WeakInfluenceLedger } from "./weakInfluence.js";
 import type { AdjudicationProvenanceLedger } from "./adjudicationProvenance.js";
 import type { MutationPayload, PendingLedger } from "./pendingLedger.js";
-import type { KeyPair } from "../identity/keys.js";
 import { demote } from "../forgetting/consolidation.js";
 import {
   hashReputationState,
@@ -166,12 +165,12 @@ export interface DisownHardeningDeps {
   readonly adjudicationProvenance?: AdjudicationProvenanceLedger;
   /**
    * The PENDING (ratification) ledger to append a `REOPENED_BY_DISOWN` request to when
-   * a margin collapses. Required (with a {@link systemSigner}) for HARDENING 3 to
+   * a margin collapses. Required (with a {@link systemSource}) for HARDENING 3 to
    * actually transition a dispute back to PENDING.
    */
   readonly pending?: PendingLedger;
-  /** The system signer for the re-opened PENDING record (HARDENING 3). */
-  readonly systemSigner?: KeyPair;
+  /** The system source id attributed on the re-opened PENDING record (HARDENING 3). */
+  readonly systemSource?: SourceId;
   /**
    * The decisive margin threshold a re-opened dispute's surviving margin is checked
    * against (HARDENING 3). Defaults to {@link DEFAULT_DECISIVE_MARGIN}. A surviving
@@ -409,7 +408,10 @@ function withSweepTxn<T>(store: StrandStore, fn: () => T): T {
  *  2. TAINT ROOTS: the deduped seed strands (resolved from the store), deduped by
  *     `content_hash` so a same-root flood counts once. The TAINTED INDEPENDENCE
  *     CLASS SET = the independence classes of the seed strands' roots whose
- *     `sourceId === sourceId` (the classes the disowned source actually sourced).
+ *     `sourceId === sourceId` (the classes the disowned source actually sourced),
+ *     EXCLUDING roots marked `inheritedClass` — a class the source merely COPIED
+ *     from its causal origin (relay / resource) belongs to the upstream witness,
+ *     and tainting it would scar honest sources for a fraudster's relay.
  *  3. DOWNSTREAM WALK: BFS following `store.inEdges(t)` filtered to
  *     {@link EdgeType.DERIVATION}. A DERIVATION edge points derived-fact -> the
  *     strands it was computed from, so a strand tainted-as-a-witness `t` is reached
@@ -427,7 +429,7 @@ function withSweepTxn<T>(store: StrandStore, fn: () => T): T {
  * Fails closed: a missing strand or dangling edge skips only that node; the sweep
  * never throws on the graph-reachable path and never silently no-ops a first call.
  *
- * @param sourceId          the disowned source (passport key).
+ * @param sourceId          the disowned source id.
  * @param assertedStrandIds every strand this source asserted (the seed set the
  *                          caller enumerates from the store by
  *                          `provenance.sourceId === sourceId`).
@@ -463,7 +465,7 @@ export function downstreamDisownSweep(
   const weakInfluence = hardening?.weakInfluence;
   const adjProvenance = hardening?.adjudicationProvenance;
   const pending = hardening?.pending;
-  const systemSigner = hardening?.systemSigner;
+  const systemSource = hardening?.systemSource;
   const decisiveMargin = hardening?.decisiveMargin ?? DEFAULT_DECISIVE_MARGIN;
   const survivingMargin = hardening?.survivingMargin ?? defaultSurvivingMargin;
   const checkSurvivingSupport = hardening?.checkSurvivingSupport === true;
@@ -471,14 +473,14 @@ export function downstreamDisownSweep(
   // ATOMIC: the whole sweep is ONE all-or-nothing unit of work over the shared handle
   // (crater + every demotion/edge + every contradict + every precise credit reversal).
   // A mid-sweep crash leaves either the FULL sweep or NONE — never a half-clawed state.
-  // A1 [Merkle MUTATION coverage] — journal each control-plane effect as a signed,
+  // A1 [MUTATION audit coverage] — journal each control-plane effect as a
   // content-addressed MUTATION receipt INSIDE this same sweep transaction (so a receipt
   // + the mutation it describes commit or roll back as ONE unit). Emitted ONLY when a
-  // ratification ledger + system signer are wired (latent-journaling gate); with no
+  // ratification ledger + system source are wired (latent-journaling gate); with no
   // ledger there is nowhere to journal and the path is byte-identical to today.
   const emitMut = (payload: MutationPayload): void => {
-    if (pending !== undefined && systemSigner !== undefined) {
-      pending.appendMutation(payload, systemSigner);
+    if (pending !== undefined && systemSource !== undefined) {
+      pending.appendMutation(payload, systemSource);
     }
   };
 
@@ -521,6 +523,10 @@ export function downstreamDisownSweep(
   const seedStrands: Strand[] = [];
   const seenFingerprints = new Set<string>();
   const taintedClasses = new Set<IndependenceClassId>();
+  // Did ANY seed root record the disowned source as its sourceId? Gates the
+  // fail-closed fallback below (its purpose is "provenance recorded no sourceId",
+  // NOT "the disowned source owned no class").
+  let sawDisownedSourceRoot = false;
 
   for (const id of seedClawedBack) {
     if (visited.has(id)) continue;
@@ -533,21 +539,40 @@ export function downstreamDisownSweep(
       seenFingerprints.add(fp);
       seedStrands.push(strand);
     }
-    // The tainted independence classes are the classes the DISOWNED source sourced.
+    // The tainted independence classes are the classes the DISOWNED source SOURCED
+    // — i.e. classes minted from its OWN identity. A root whose class was INHERITED
+    // from the causal origin (an AGENT_RELAY copy of an upstream witness's class,
+    // or a per-resource TOOL_CALL/DOCUMENT class — `inheritedClass: true`) does NOT
+    // taint: that class belongs to the honest UPSTREAM witness/resource, and
+    // tainting it would contradict-and-permanently-scar every honest source rooted
+    // in it — the exact suppression vector pillar 4 forbids (relay a rival, get
+    // disowned, crater the rival). The relayed strand itself is still a seed, so
+    // its DERIVATION downstream is still demoted; only the CLASS-bounded
+    // reputation clawback is withheld from classes the fraudster never owned.
     for (const root of strand.provenance) {
-      if (root.sourceId === sourceId) taintedClasses.add(root.independenceClass);
+      if (root.sourceId !== sourceId) continue;
+      sawDisownedSourceRoot = true;
+      if (root.inheritedClass !== true) taintedClasses.add(root.independenceClass);
     }
   }
 
   // Fail-closed fallback: if none of the seed strands recorded the disowned source
-  // as a root's sourceId (e.g. provenance sourceId left null), treat EVERY class on
-  // the seed strands as tainted. Better to over-demote downstream than to silently
-  // let a fraudulent root's derivatives stand — and contradiction is still bounded
-  // to these seed-derived classes (a wholly-unrelated independent class never
-  // appears here).
-  if (taintedClasses.size === 0) {
+  // as a root's sourceId AT ALL (e.g. provenance sourceId left null), treat every
+  // class on the seed strands as tainted — better to over-demote downstream than to
+  // silently let a fraudulent root's derivatives stand — and contradiction is still
+  // bounded to these seed-derived classes (a wholly-unrelated independent class
+  // never appears here). Two deliberate exclusions:
+  //   - the fallback does NOT fire when the disowned source's roots were seen but
+  //     were ALL inherited-class (an empty tainted set is then CORRECT: the
+  //     fraudster originated no class of its own to claw back over);
+  //   - inherited-class roots are skipped inside the fallback too (the marker is
+  //     authoritative that the class belongs to someone else).
+  if (taintedClasses.size === 0 && !sawDisownedSourceRoot) {
     for (const strand of seedStrands) {
-      for (const root of strand.provenance) taintedClasses.add(root.independenceClass);
+      for (const root of strand.provenance) {
+        if (root.inheritedClass === true) continue;
+        taintedClasses.add(root.independenceClass);
+      }
     }
   }
 
@@ -724,16 +749,41 @@ export function downstreamDisownSweep(
   // edge, NOT a DERIVATION edge) cannot be proven to depend on it — so it is queued for
   // a HUMAN to review, never auto-demoted. Deduped by influenced strand (the ledger
   // does this), idempotent across re-sweeps (the ledger's `markReviewed` guard).
+  // TRANSITIVE (multi-hop) CLOSURE: a work that consulted a tainted strand is itself
+  // queued AND becomes a new consulted frontier, so an A→c1→b1 uncited relay (b1
+  // consulted c1, which consulted the tainted A) is reached — closing the one-hop gap
+  // (the "Proxy-Consulted Weak-Influence Launder", where routing the disclosure through
+  // an intermediate proxy dodged `edgesConsulting(seed)`). BFS BACKWARD over
+  // `consultedStrandId` edges: deterministic (the ledger returns stable append order),
+  // cycle-safe (`visitedInfluence` → each influenced work traversed once, so mutual
+  // A↔B consultations terminate), and — as before — NEVER an auto-demotion (uncited
+  // influence is unprovable, so over-tainting is forbidden; every hop is HUMAN review
+  // only). `markReviewed` keeps queue-emission idempotent across sweeps.
   const reviewQueued: ReviewQueueEntry[] = [];
   if (weakInfluence !== undefined) {
-    for (const edge of weakInfluence.edgesConsulting(taintedStrandIds)) {
-      if (!weakInfluence.markReviewed(edge.strandId, String(sourceId))) continue;
-      reviewQueued.push({
-        strandId: edge.strandId,
-        reason: "WEAK_INFLUENCE_REVIEW",
-        disownedSource: sourceId,
-        at: now,
-      });
+    const visitedInfluence = new Set<StrandId>();
+    let frontier: StrandId[] = [...taintedStrandIds];
+    while (frontier.length > 0) {
+      const nextFrontier: StrandId[] = [];
+      for (const edge of weakInfluence.edgesConsulting(frontier)) {
+        if (visitedInfluence.has(edge.strandId)) continue;
+        visitedInfluence.add(edge.strandId);
+        // The influenced work is now itself a consulted frontier: works that consulted
+        // IT are one hop further out and must also be reviewed.
+        nextFrontier.push(edge.strandId);
+        // A tainted (seed / demoted-downstream) strand is already handled by the
+        // demote/contradict/reverse channels — traverse THROUGH it, but do not add a
+        // redundant review entry for it.
+        if (taintedStrandIds.has(edge.strandId)) continue;
+        if (!weakInfluence.markReviewed(edge.strandId, String(sourceId))) continue;
+        reviewQueued.push({
+          strandId: edge.strandId,
+          reason: "WEAK_INFLUENCE_REVIEW",
+          disownedSource: sourceId,
+          at: now,
+        });
+      }
+      frontier = nextFrontier;
     }
   }
 
@@ -750,7 +800,7 @@ export function downstreamDisownSweep(
       if (surviving >= decisiveMargin) continue; // still decisive: do NOT re-open
       if (!adjProvenance.markReopened(rec.contradictionSetId)) continue; // already re-opened
       // Transition the dispute back to PENDING for a human (losers NOT auto-promoted).
-      if (pending !== undefined && systemSigner !== undefined) {
+      if (pending !== undefined && systemSource !== undefined) {
         pending.appendPending(
           {
             contradictionSetId: rec.contradictionSetId,
@@ -759,7 +809,7 @@ export function downstreamDisownSweep(
             reason: "REOPENED_BY_DISOWN",
             createdAt: now,
           },
-          systemSigner,
+          systemSource,
         );
       }
       reopenedDisputes.push(rec.contradictionSetId);

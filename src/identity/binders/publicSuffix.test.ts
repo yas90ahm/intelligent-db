@@ -4,7 +4,8 @@
  * Covers the acceptance cases (subdomain collapse, PRIVATE-section both-directions
  * fix, multi-level ccTLD apex) plus the algorithm edges (deep subdomains, bare
  * suffix fail-safe, unknown-TLD default, normalization, `*`/`!` rule paths), and an
- * integration assertion that the seam fix flows through the async DNS binder.
+ * integration assertion that the seam fix flows through the trust registry's
+ * publisher producer (the crypto-free consumer of this resolver).
  */
 
 import { describe, it, expect } from "vitest";
@@ -14,17 +15,7 @@ import {
   publicSuffixOf,
   pslResolver,
 } from "./publicSuffix.js";
-import { asEpochMs } from "../../core/types.js";
-import { generatePassport, type KeyPair } from "../keys.js";
-import { isRejection } from "../binding.js";
-import {
-  bindDomainViaDns,
-  fakeResolver,
-  createDnsDomainProofChecker,
-  type DnsResolver,
-  type DnsDomainBindDeps,
-} from "./dnsDomainProver.js";
-import { sourceIdFromPublicKey } from "../keys.js";
+import { createTrustRegistry } from "../trustRegistry.js";
 
 // ---------------------------------------------------------------------------
 // Acceptance cases (SPEC §5)
@@ -142,59 +133,22 @@ describe("publicSuffixOf + pslResolver", () => {
 });
 
 // ---------------------------------------------------------------------------
-// Integration: the seam fix flows through the DNS binder → distinct classIds
+// Integration: the seam fix flows through the trust registry's publisher
+// producer → distinct publisher classes for PRIVATE multi-tenant subdomains
 // ---------------------------------------------------------------------------
 
-describe("integration — pslResolver through bindDomainViaDns", () => {
-  const NOW = asEpochMs(1_700_000_000_000);
+describe("integration — pslResolver through registerPublisher", () => {
+  it("mints DISTINCT publisher sources for a.github.io vs b.github.io", () => {
+    const registry = createTrustRegistry();
 
-  function bindDeps(verifier: KeyPair, resolver: DnsResolver): DnsDomainBindDeps {
-    return {
-      verifier,
-      checker: createDnsDomainProofChecker({ resolver }),
-      etld: pslResolver,
-      anchorSalt: "test-salt",
-      resolver,
-    };
-  }
+    const a = registry.registerPublisher("https://a.github.io/some/page");
+    const b = registry.registerPublisher("https://b.github.io/other/page");
 
-  it("mints DISTINCT classIds for a.github.io vs b.github.io", async () => {
-    const verifier = generatePassport();
-    const srcA = sourceIdFromPublicKey(generatePassport().publicKeyPem);
-    const srcB = sourceIdFromPublicKey(generatePassport().publicKeyPem);
-    const nonce = "nonce-xyz";
-
-    const resolver = fakeResolver(
-      new Map<string, string[][]>([
-        ["_iddb-challenge.a.github.io", [[nonce]]],
-        ["_iddb-challenge.b.github.io", [[nonce]]],
-      ]),
-      new Map<string, string[]>([
-        ["a.github.io", ["ns1.github.com"]],
-        ["b.github.io", ["ns1.github.com"]],
-      ]),
-    );
-
-    const a = await bindDomainViaDns(
-      srcA,
-      "a.github.io",
-      nonce,
-      bindDeps(verifier, resolver),
-      NOW,
-    );
-    const b = await bindDomainViaDns(
-      srcB,
-      "b.github.io",
-      nonce,
-      bindDeps(verifier, resolver),
-      NOW,
-    );
-
-    expect(isRejection(a)).toBe(false);
-    expect(isRejection(b)).toBe(false);
-    if (isRejection(a) || isRejection(b)) return;
-    expect(a.classId).toBe("a.github.io");
-    expect(b.classId).toBe("b.github.io");
-    expect(a.classId).not.toBe(b.classId);
+    // The PRIVATE-section fix flows through: two GitHub Pages owners are two
+    // distinct publishers (labels are the resolved eTLD+1s), not one phantom.
+    expect(a.label).toBe("a.github.io");
+    expect(b.label).toBe("b.github.io");
+    expect(a.sourceId).not.toBe(b.sourceId);
+    expect(registry.independentSources(a.sourceId, b.sourceId)).toBe(true);
   });
 });

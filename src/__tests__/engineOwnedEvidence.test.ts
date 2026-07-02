@@ -24,15 +24,14 @@
  */
 
 import { describe, it, expect } from "vitest";
+import { freshSource } from "../testSupport/identityFixtures.js";
 
 import {
   createIntelligentDb,
   createMemoryStore,
   createSourceIdentityLayer,
-  createStakeLedger,
   createPendingLedger,
   createReputationLedger,
-  generatePassport,
   independenceBetween,
   AnchorClass,
   FactState,
@@ -49,13 +48,13 @@ import type {
   Unit,
   AnchorBinding,
   ProvenanceRoot,
-  KeyRegistryPort,
+  SourceRegistryPort,
   AnchorRegistryPort,
   ReputationLedgerPort,
   StakeLedgerPort,
   SourceIdentityLayer,
   ReputationLedger,
-  Passport,
+  SourceRef,
   Strand,
   ContentHash,
   RatificationDeps,
@@ -74,10 +73,10 @@ const CHAL = "src:chal" as SourceId;
 
 // --- minimal pillar ports (mirrors highImpactGateR.test.ts) -----------------
 
-function makeKeyRegistry(): KeyRegistryPort {
+function makeSourceRegistry(): SourceRegistryPort {
   const known = new Set<SourceId>();
   return {
-    register(p: Passport): void {
+    register(p: SourceRef): void {
       known.add(p.sourceId);
     },
     sourceIdOf(s: SourceId): SourceId | null {
@@ -140,17 +139,17 @@ function makeEngine(): {
 } {
   const store = createMemoryStore();
   const reputation = createReputationLedger(() => 0.9 as Unit, undefined, () => NOW);
-  const stake = createStakeLedger();
-  const stakePort: StakeLedgerPort = { postedFor: (s) => stake.posted(s) };
+  // Staking is RETIRED (attribution replaces stake): a constant-zero port.
+  const stakePort: StakeLedgerPort = { postedFor: () => 0 };
   const repPort: ReputationLedgerPort = { scoreOf: (s) => reputation.scoreOf(s) };
   const identity = createSourceIdentityLayer({
-    keys: makeKeyRegistry(),
+    sources: makeSourceRegistry(),
     anchors: makeAnchorRegistry(),
     reputation: repPort,
     stake: stakePort,
   });
   const ledger = createPendingLedger({ reputation });
-  const ratification: RatificationDeps = { ledger, systemSigner: generatePassport() };
+  const ratification: RatificationDeps = { ledger, systemSource: freshSource().sourceId };
   const db = createIntelligentDb(store, identity, null, reputation, ratification);
   return { store, identity, reputation, db };
 }
@@ -197,13 +196,13 @@ function selfStackedScenario(): ReturnType<typeof makeEngine> {
   const eng = makeEngine();
   const { store, identity, reputation } = eng;
 
-  identity.register({ ...generatePassport(), sourceId: WINNER } as Passport, [
+  identity.register({ ...freshSource(), sourceId: WINNER } as SourceRef, [
     bindingOf(AnchorClass.EMAIL_OAUTH, 0.1),
     bindingOf(AnchorClass.PHONE_SIM, 0.2),
     bindingOf(AnchorClass.DOMAIN, 0.35),
     bindingOf(AnchorClass.ORGANIZATION, 0.75),
   ]);
-  identity.register({ ...generatePassport(), sourceId: CHAL } as Passport, []);
+  identity.register({ ...freshSource(), sourceId: CHAL } as SourceRef, []);
 
   for (let i = 0; i < 6; i++) reputation.ratify(WINNER, NOW, 1);
 
@@ -293,13 +292,13 @@ describe("BATCH 1 — OD-8 engine-owned-evidence invariant (junior add-on)", () 
     const eng = makeEngine();
     const { store, identity, reputation, db } = eng;
 
-    identity.register({ ...generatePassport(), sourceId: WINNER } as Passport, [
+    identity.register({ ...freshSource(), sourceId: WINNER } as SourceRef, [
       bindingOf(AnchorClass.DOMAIN, 0.35),
     ]);
-    identity.register({ ...generatePassport(), sourceId: CORROB } as Passport, [
+    identity.register({ ...freshSource(), sourceId: CORROB } as SourceRef, [
       bindingOf(AnchorClass.PHONE_SIM, 0.2),
     ]);
-    identity.register({ ...generatePassport(), sourceId: CHAL } as Passport, []);
+    identity.register({ ...freshSource(), sourceId: CHAL } as SourceRef, []);
     for (let i = 0; i < 6; i++) reputation.ratify(WINNER, NOW, 1);
 
     // BEFORE: only the winner asserts "Berlin" ⇒ #R = 1 ⇒ high-impact DEFERS.

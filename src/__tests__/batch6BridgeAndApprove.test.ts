@@ -20,6 +20,7 @@
  */
 
 import { describe, it, expect } from "vitest";
+import { freshSource } from "../testSupport/identityFixtures.js";
 
 import {
   // B1/B2 — the halting controller + its config
@@ -30,10 +31,8 @@ import {
   createMemoryStore,
   // identity layer wiring for the RC-5 predicate unit test
   createSourceIdentityLayer,
-  createStakeLedger,
   createPendingLedger,
   createReputationLedger,
-  generatePassport,
   independenceBetween,
   // enums / brand helpers
   AnchorClass,
@@ -59,8 +58,8 @@ import type {
   Strand,
   SourceId,
   AnchorBinding,
-  Passport,
-  KeyRegistryPort,
+  SourceRef,
+  SourceRegistryPort,
   AnchorRegistryPort,
   ReputationLedgerPort,
   StakeLedgerPort,
@@ -289,10 +288,10 @@ describe("B2 — bridge-sweep ordering (signal before decoys)", () => {
 
 // ---- minimal identity-layer pillar ports (lean on the REAL anchor math) -----
 
-function makeKeyRegistry(): KeyRegistryPort {
+function makeSourceRegistry(): SourceRegistryPort {
   const known = new Set<SourceId>();
   return {
-    register: (p: Passport) => void known.add(p.sourceId),
+    register: (p: SourceRef) => void known.add(p.sourceId),
     sourceIdOf: (s: SourceId) => (known.has(s) ? s : null),
     has: (s: SourceId) => known.has(s),
   };
@@ -315,10 +314,11 @@ function makeAnchorRegistry(): AnchorRegistryPort {
 
 function makeIdentityLayer(): SourceIdentityLayer {
   return createSourceIdentityLayer({
-    keys: makeKeyRegistry(),
+    sources: makeSourceRegistry(),
     anchors: makeAnchorRegistry(),
     reputation: { scoreOf: () => 0 as Unit } satisfies ReputationLedgerPort,
-    stake: { postedFor: (s: SourceId) => createStakeLedger().posted(s) } satisfies StakeLedgerPort,
+    // Staking is RETIRED (attribution replaces stake): a constant-zero port.
+    stake: { postedFor: () => 0 } satisfies StakeLedgerPort,
   });
 }
 
@@ -336,10 +336,10 @@ const humanAnchor = (): AnchorBinding => ({
 describe("RC-5 — identity facade independence predicates (engine-supplied)", () => {
   it("anchored + anchor-disjoint ⇒ independent; same-class ⇒ NOT; bare-key ⇒ no anchors", () => {
     const id = makeIdentityLayer();
-    const approver = generatePassport();
-    const authorDisjoint = generatePassport();
-    const authorSameClass = generatePassport();
-    const bareKey = generatePassport();
+    const approver = freshSource();
+    const authorDisjoint = freshSource();
+    const authorSameClass = freshSource();
+    const bareKey = freshSource();
 
     id.register(approver, [domainAnchor()]);
     id.register(authorDisjoint, [humanAnchor()]); // disjoint costly anchor
@@ -442,14 +442,14 @@ describe("RC-5 — approve() rejects bare-key / correlated approvers, resolves t
 
   it("(a) a BARE-KEY approver is REJECTED even though class-disjoint (no anchor → no voice)", () => {
     const { byId, a, b } = setup();
-    const sys = generatePassport();
-    const approver = generatePassport();
+    const sys = freshSource();
+    const approver = freshSource();
     const ledger = createPendingLedger();
-    ledger.appendPending(pendingOf([a, b]), sys);
+    ledger.appendPending(pendingOf([a, b]), sys.sourceId);
 
     // independent==true, but hasAnchors==false ⇒ rejected on the precondition.
     expect(() =>
-      ledger.approve(CSID, a, approver, NOW, ctxOver(byId, { hasAnchors: false, independent: true })),
+      ledger.approve(CSID, a, approver.sourceId, NOW, ctxOver(byId, { hasAnchors: false, independent: true })),
     ).toThrow(/no priced anchor/i);
     // No APPROVAL was appended; the dispute remains open (fail-closed, additive).
     expect(ledger.records().map((r) => r.kind)).toEqual(["PENDING"]);
@@ -458,14 +458,14 @@ describe("RC-5 — approve() rejects bare-key / correlated approvers, resolves t
 
   it("(b) an ANCHOR-CORRELATED approver (not independentSources of an author) is REJECTED", () => {
     const { byId, a, b } = setup();
-    const sys = generatePassport();
-    const approver = generatePassport();
+    const sys = freshSource();
+    const approver = freshSource();
     const ledger = createPendingLedger();
-    ledger.appendPending(pendingOf([a, b]), sys);
+    ledger.appendPending(pendingOf([a, b]), sys.sourceId);
 
     // anchored, but NOT MIS-independent of a member author ⇒ rejected.
     expect(() =>
-      ledger.approve(CSID, a, approver, NOW, ctxOver(byId, { hasAnchors: true, independent: false })),
+      ledger.approve(CSID, a, approver.sourceId, NOW, ctxOver(byId, { hasAnchors: true, independent: false })),
     ).toThrow(/not anchor-independent/i);
     expect(ledger.records().map((r) => r.kind)).toEqual(["PENDING"]);
     expect(ledger.listPending().length).toBe(1);
@@ -473,16 +473,16 @@ describe("RC-5 — approve() rejects bare-key / correlated approvers, resolves t
 
   it("(c) a genuinely anchor-INDEPENDENT + ANCHORED approver STILL RESOLVES (anti-over-fix)", () => {
     const { byId, a, b } = setup();
-    const sys = generatePassport();
-    const approver = generatePassport();
+    const sys = freshSource();
+    const approver = freshSource();
     const reputation = createReputationLedger(() => 0.9);
     const ledger = createPendingLedger({ reputation });
-    ledger.appendPending(pendingOf([a, b]), sys);
+    ledger.appendPending(pendingOf([a, b]), sys.sourceId);
 
     const resolved = ledger.approve(
       CSID,
       a,
-      approver,
+      approver.sourceId,
       NOW,
       ctxOver(byId, { hasAnchors: true, independent: true }),
     );
@@ -494,7 +494,7 @@ describe("RC-5 — approve() rejects bare-key / correlated approvers, resolves t
     expect(byId.get(b)!.outranked_by).not.toBeNull();
     expect(resolved.outranksEdges.length).toBe(1);
     // Reputation moved (winner author up, loser author contradicted) and the
-    // signed APPROVAL is appended with a verifying chain.
+    // APPROVAL is appended with a verifying chain.
     expect(reputation.scoreOf("src:a" as SourceId)).toBeGreaterThan(0);
     expect(ledger.records().map((r) => r.kind)).toEqual(["PENDING", "APPROVAL"]);
     expect(ledger.verifyChain()).toEqual({ ok: true, firstBrokenSeq: null });

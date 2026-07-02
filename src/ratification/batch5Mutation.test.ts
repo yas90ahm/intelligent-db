@@ -1,42 +1,36 @@
 /**
- * batch5Mutation.test.ts — A1 (Merkle MUTATION coverage) + A2 (optional wiring).
+ * batch5Mutation.test.ts — A1 (MUTATION audit coverage).
  *
- * V2.md RC-8 / mk-m3 ("hide-a-disown") + mk-m4 ("unwired log"). The audit tree used to
- * commit ONLY doorbell traffic (PENDING/APPROVAL); the undo engine's EFFECT (disown
- * craters, demotions, reputation moves, reverse-credits) had NO leaf, so a disown could
- * be hidden with `verifyChain()` green. This batch journals every control-plane mutation
- * as a content-addressed MUTATION receipt and optionally wires a MerkleLog so a witness
- * detects the hidden disown.
+ * V2.md RC-8 / "hide-a-disown". The audit chain used to commit ONLY doorbell traffic
+ * (PENDING/APPROVAL); the undo engine's EFFECT (disown craters, demotions, reputation
+ * moves, reverse-credits) had NO record, so a disown could be hidden with
+ * `verifyChain()` green. This batch journals every control-plane mutation as a
+ * content-addressed MUTATION receipt in the tamper-evident checksum chain.
  *
  * Matrix:
- *   1. LEDGER UNIT — appendMutation appends a MUTATION leaf, verifyChain stays ok, and a
- *      byte-flip in a MUTATION payload names its seq. MUTATION is inert to the doorbell.
- *   2. LEAF-CACHE — the incremental `#leaves` cache is byte-identical to a fresh log
- *      (the regression contract for the O(n²) anchor() fix).
- *   3. mk-m3 — a disown through the engine produces committed DISOWN_CRATER + DEMOTE
- *      leaves; a witness holding the post-disown STH detects a hidden (rolled-back) tree
- *      as ROLLBACK_OR_DELETION, while an honest extension witnesses ok.
- *   4. A2-OMITTED — with `ratification` but NO `merkle`: the verbs return null, no sink is
- *      written, the A1 MUTATION leaves are still present and verify.
+ *   1. LEDGER UNIT — appendMutation appends a MUTATION record, verifyChain stays ok,
+ *      and a byte-flip in a MUTATION payload names its seq. MUTATION is inert to the
+ *      doorbell.
+ *   2. EFFECT COVERAGE — a disown through the engine produces committed
+ *      DISOWN_CRATER + DEMOTE records in the chain, which verifies end-to-end; the
+ *      chainHead() checkpoint advances past them (the artifact an operator exports
+ *      to access-segregated storage — see pendingLedger.ts's honest disclosure).
  *
- * HONEST LIMIT (carried, not over-claimed): this is COVERAGE + WIRING. It does NOT close
- * mk-m2 (single signer can re-sign a coherent forged tree from genesis) or mk-m5 (no live
- * external witnesses — sinks are in-memory/SQLite test impls).
+ * HONEST LIMIT (carried, not over-claimed): this is COVERAGE. The checksum chain
+ * proves internal consistency AS STORED; an actor with live write access can rewrite
+ * and re-checksum history. Insider-tamper evidence comes from shipping chainHead()
+ * checkpoints to storage the writing process cannot reach.
  */
 
 import { describe, it, expect } from "vitest";
+import { freshSource } from "../testSupport/identityFixtures.js";
 
 import {
   createIntelligentDb,
   createMemoryStore,
   createSourceIdentityLayer,
-  createStakeLedger,
   createPendingLedger,
   createReputationLedger,
-  createMerkleLog,
-  InMemoryPublicationSink,
-  verifyInclusion,
-  generatePassport,
   independenceBetween,
   EdgeType,
   FactState,
@@ -54,19 +48,17 @@ import type {
   Unit,
   AnchorBinding,
   ProvenanceRoot,
-  KeyRegistryPort,
+  SourceRegistryPort,
   AnchorRegistryPort,
   ReputationLedgerPort,
   StakeLedgerPort,
   SourceIdentityLayer,
-  Passport,
+  SourceRef,
   Strand,
   Edge,
   PendingLedger,
-  PendingRatification,
   LedgerRecord,
   MutationPayload,
-  KeyPair,
 } from "../index.js";
 
 const NOW = asEpochMs(1_700_000_000_000);
@@ -75,10 +67,10 @@ const ATTR = "berlin#capital_of" as AttributeKey;
 
 // --- minimal pillar ports (mirrors engineAdjudicate.test.ts) ----------------
 
-function makeKeyRegistry(): KeyRegistryPort {
+function makeSourceRegistry(): SourceRegistryPort {
   const known = new Set<SourceId>();
   return {
-    register: (p: Passport) => void known.add(p.sourceId),
+    register: (p: SourceRef) => void known.add(p.sourceId),
     sourceIdOf: (s: SourceId) => (known.has(s) ? s : null),
     has: (s: SourceId) => known.has(s),
   };
@@ -99,10 +91,10 @@ function makeAnchorRegistry(): AnchorRegistryPort {
 }
 
 function makeIdentity(reputation: ReputationLedgerPort): SourceIdentityLayer {
-  const stake = createStakeLedger();
-  const stakePort: StakeLedgerPort = { postedFor: (s) => stake.posted(s) };
+  // Staking is RETIRED (attribution replaces stake): a constant-zero port.
+  const stakePort: StakeLedgerPort = { postedFor: () => 0 };
   return createSourceIdentityLayer({
-    keys: makeKeyRegistry(),
+    sources: makeSourceRegistry(),
     anchors: makeAnchorRegistry(),
     reputation,
     stake: stakePort,
@@ -167,26 +159,11 @@ function derivationEdge(derived: StrandId, witness: StrandId): Edge {
 
 type StrandId = ReturnType<typeof asStrandId>;
 
-/** A read-only PendingLedger VIEW over a fixed record slice (the attacker's hidden tree). */
-function ledgerView(records: readonly LedgerRecord[]): PendingLedger {
-  const stub = (): never => {
-    throw new Error("ledgerView: write op not supported on a read-only view");
-  };
-  return {
-    records: () => records,
-    appendPending: stub,
-    appendMutation: stub,
-    listPending: () => [],
-    approve: stub,
-    verifyChain: () => ({ ok: true, firstBrokenSeq: null }),
-  } as unknown as PendingLedger;
-}
-
 // ---------------------------------------------------------------------------
-// 1. LEDGER UNIT — appendMutation is a merkle-agnostic chain widening
+// 1. LEDGER UNIT — appendMutation is a plain chain widening
 // ---------------------------------------------------------------------------
 
-describe("A1 — appendMutation widens the signed chain (merkle-agnostic)", () => {
+describe("A1 — appendMutation widens the checksum chain", () => {
   function mut(op: MutationPayload["op"], n: number): MutationPayload {
     return {
       op,
@@ -198,11 +175,11 @@ describe("A1 — appendMutation widens the signed chain (merkle-agnostic)", () =
     };
   }
 
-  it("appendMutation appends a MUTATION leaf and verifyChain stays ok", () => {
-    const signer = generatePassport();
+  it("appendMutation appends a MUTATION record and verifyChain stays ok", () => {
+    const signer = freshSource();
     const ledger = createPendingLedger();
-    ledger.appendMutation(mut("DISOWN_CRATER", 0), signer);
-    ledger.appendMutation(mut("DEMOTE", 1), signer);
+    ledger.appendMutation(mut("DISOWN_CRATER", 0), signer.sourceId);
+    ledger.appendMutation(mut("DEMOTE", 1), signer.sourceId);
     expect(ledger.records().map((r) => r.kind)).toEqual(["MUTATION", "MUTATION"]);
     expect(ledger.verifyChain()).toEqual({ ok: true, firstBrokenSeq: null });
     // MUTATION is inert to the doorbell — never an open pending.
@@ -210,10 +187,10 @@ describe("A1 — appendMutation widens the signed chain (merkle-agnostic)", () =
   });
 
   it("a byte-flip in a MUTATION payload is named at its seq", () => {
-    const signer = generatePassport();
+    const signer = freshSource();
     const ledger = createPendingLedger();
-    ledger.appendMutation(mut("DISOWN_CRATER", 0), signer);
-    ledger.appendMutation(mut("DEMOTE", 1), signer);
+    ledger.appendMutation(mut("DISOWN_CRATER", 0), signer.sourceId);
+    ledger.appendMutation(mut("DEMOTE", 1), signer.sourceId);
     // Mutate the stored payload of seq 1 in place (the chain array is the source).
     const recs = ledger.records() as LedgerRecord[];
     (recs[1] as { payload: MutationPayload }).payload = {
@@ -224,78 +201,43 @@ describe("A1 — appendMutation widens the signed chain (merkle-agnostic)", () =
     expect(v.ok).toBe(false);
     expect(v.firstBrokenSeq).toBe(1);
   });
-});
 
-// ---------------------------------------------------------------------------
-// 2. LEAF-CACHE — incremental #leaves is byte-identical (regression contract)
-// ---------------------------------------------------------------------------
-
-describe("A1 — the incremental leaf-cache is byte-identical to a fresh log", () => {
-  it("a cached log's roots/proofs match a freshly-built log after incremental appends", () => {
-    const signer = generatePassport();
+  it("chainHead() is the exported checkpoint: genesis-anchored when empty, the last record's checksum otherwise", () => {
+    const signer = freshSource();
     const ledger = createPendingLedger();
-    const pendingOf = (n: number): PendingRatification => ({
-      contradictionSetId: ("cset:" + n) as PendingRatification["contradictionSetId"],
-      attribute: ATTR,
-      members: [asStrandId("strand:" + n)],
-      reason: "INDEPENDENT_DISPUTE",
-      createdAt: NOW,
-    });
-    const sinks = [new InMemoryPublicationSink(), new InMemoryPublicationSink()];
-    const cached = createMerkleLog({ ledger, signer, sinks });
-
-    for (let i = 0; i < 9; i++) {
-      // Mix doorbell + mutation records so the cache spans kinds.
-      if (i % 2 === 0) ledger.appendPending(pendingOf(i), signer);
-      else
-        ledger.appendMutation(
-          { op: "DEMOTE", subjectId: "s" + i, subjectHash: "h" + i, beforeHash: "b" + i, afterHash: "a" + i, at: NOW },
-          signer,
-        );
-      // After each append, the cached root must equal a FRESH log's root (no cache drift).
-      const fresh = createMerkleLog({ ledger, signer, sinks: [new InMemoryPublicationSink(), new InMemoryPublicationSink()] });
-      expect(cached.merkleRoot()).toBe(fresh.merkleRoot());
-      // Every inclusion proof verifies against the live root, both logs agreeing.
-      const root = cached.merkleRoot();
-      for (let seq = 0; seq <= i; seq++) {
-        const proof = cached.inclusionProof(seq);
-        expect(verifyInclusion(cached.leafHashAt(seq), proof, root)).toBe(true);
-        expect(fresh.inclusionProof(seq)).toEqual(proof);
-      }
-    }
+    const empty = ledger.chainHead();
+    expect(empty.seq).toBe(-1); // genesis anchor — nothing appended yet
+    ledger.appendMutation(mut("DISOWN_CRATER", 0), signer.sourceId);
+    const one = ledger.chainHead();
+    expect(one.seq).toBe(0);
+    expect(one.headHash).toBe(ledger.records()[0]!.thisHash);
+    expect(one.headHash).not.toBe(empty.headHash);
   });
 });
 
 // ---------------------------------------------------------------------------
-// 3. mk-m3 — a hidden disown is DETECTED by a witness; honest extension is ok
+// 2. EFFECT COVERAGE — a disown's effects earn committed chain records
 // ---------------------------------------------------------------------------
 
 interface Engine {
   store: ReturnType<typeof createMemoryStore>;
   reputation: ReturnType<typeof createReputationLedger>;
   ledger: PendingLedger;
-  signer: KeyPair;
-  merkleSigner: KeyPair;
+  systemSource: SourceId;
   db: ReturnType<typeof createIntelligentDb>;
-  sinkA: InMemoryPublicationSink;
-  sinkB: InMemoryPublicationSink;
 }
 
-function wireEngine(withMerkle: boolean): Engine {
+function wireEngine(): Engine {
   const store = createMemoryStore();
   const reputation = createReputationLedger(() => 0.9 as Unit);
   const identity = makeIdentity({ scoreOf: (s) => reputation.scoreOf(s) });
   const ledger = createPendingLedger({ reputation });
-  const signer = generatePassport();
-  const merkleSigner = generatePassport();
-  const sinkA = new InMemoryPublicationSink();
-  const sinkB = new InMemoryPublicationSink();
+  const systemSource = freshSource().sourceId;
   const db = createIntelligentDb(store, identity, null, reputation, {
     ledger,
-    systemSigner: signer,
-    ...(withMerkle ? { merkle: { signer: merkleSigner, sinks: [sinkA, sinkB] } } : {}),
+    systemSource,
   });
-  return { store, reputation, ledger, signer, merkleSigner, db, sinkA, sinkB };
+  return { store, reputation, ledger, systemSource, db };
 }
 
 /** Seed a disownable chain: a SEED strand (bad source) + a DERIVED child resting on it. */
@@ -314,101 +256,47 @@ function seedDisownChain(e: Engine): { bad: SourceId; seedId: StrandId; derivedI
   return { bad, seedId: seed.id, derivedId: derived.id };
 }
 
-describe("mk-m3 — every trust mutation now has a committed Merkle leaf (hide-a-disown detected)", () => {
-  it("disown produces DISOWN_CRATER + DEMOTE leaves; a hidden rollback is ROLLBACK_OR_DELETION", () => {
-    const e = wireEngine(true);
+describe("A1 — every trust mutation earns a committed chain record (hide-a-disown coverage)", () => {
+  it("disown journals DISOWN_CRATER + DEMOTE records; the chain verifies and the checkpoint advances past them", () => {
+    const e = wireEngine();
     const { bad, derivedId } = seedDisownChain(e);
 
-    // A2: publish the genesis STH to both sinks, then capture the PRE-disown record set
-    // — the tree an attacker would roll back TO in order to hide the disown.
-    expect(e.db.publishGenesis(NOW)).not.toBeNull();
-    const preDisownRecords = [...e.ledger.records()];
+    // Capture the PRE-disown checkpoint — the head an operator would have exported
+    // to external storage before the sweep.
+    const preHead = e.ledger.chainHead();
+    const preLen = e.ledger.records().length;
 
     // The disown crater + demotion run as one atomic op and JOURNAL their effects.
     const result = e.db.disown(bad, { at: NOW });
     expect(result.seedClawedBack.length).toBeGreaterThan(0);
     expect(result.demotedDownstream).toContain(derivedId);
 
-    // (1) Committed MUTATION leaves exist for the crater AND the demotion.
+    // (1) Committed MUTATION records exist for the crater AND the demotion.
     const kinds = e.ledger.records().filter((r) => r.kind === "MUTATION");
     const ops = kinds.map((r) => (r.payload as MutationPayload).op);
     expect(ops).toContain("DISOWN_CRATER");
     expect(ops).toContain("DEMOTE");
     expect(e.ledger.verifyChain()).toEqual({ ok: true, firstBrokenSeq: null });
 
-    // (2) anchorEpoch publishes the post-disown STH to BOTH sinks.
-    const sth = e.db.anchorEpoch(NOW);
-    expect(sth).not.toBeNull();
-    expect(e.sinkA.latest()!.tree_size).toBe(e.ledger.records().length);
-    expect(e.sinkB.latest()!.tree_size).toBe(e.ledger.records().length);
-
-    // Honest paired assert (no false positive): the live tree extends the witness's STH.
-    const honest = e.db.merkleLog()!.witness(e.sinkA, NOW);
-    expect(honest.ok).toBe(true);
-    expect(honest.reason).toBe("OK");
-
-    // (3) HIDE THE DISOWN: the operator presents the PRE-disown tree (the mutation leaves
-    // dropped). A witness holding the post-disown STH₁ checks that hidden tree and the
-    // prior STH cannot be extended → ROLLBACK_OR_DELETION.
-    const hiddenLog = createMerkleLog({
-      ledger: ledgerView(preDisownRecords),
-      signer: e.merkleSigner, // the operator re-signs with the SAME log key (mk-m2 residual)
-      sinks: [new InMemoryPublicationSink(), new InMemoryPublicationSink()],
-    });
-    const caught = hiddenLog.witness(e.sinkA, NOW);
-    expect(caught.ok).toBe(false);
-    expect(caught.reason).toBe("ROLLBACK_OR_DELETION");
-
-    // (4) The disown leaf has an O(log n) inclusion proof against the published root.
-    const craterSeq = e.ledger
-      .records()
-      .findIndex((r) => r.kind === "MUTATION" && (r.payload as MutationPayload).op === "DISOWN_CRATER");
-    const log = e.db.merkleLog()!;
-    const proof = log.inclusionProof(craterSeq);
-    expect(verifyInclusion(log.leafHashAt(craterSeq), proof, sth!.root)).toBe(true);
-    // O(log n): proof path length is bounded by ceil(log2(treeSize)).
-    expect(proof.path.length).toBeLessThanOrEqual(Math.ceil(Math.log2(e.ledger.records().length)) + 1);
-  });
-});
-
-// ---------------------------------------------------------------------------
-// 4. A2-OMITTED — latent A1 journaling stays on; verbs return null; no sinks
-// ---------------------------------------------------------------------------
-
-describe("A2 omitted — back-compatible: null verbs, no sinks, latent A1 leaves present", () => {
-  it("anchorEpoch / publishGenesis / merkleLog return null; disown still journals MUTATION leaves", () => {
-    const e = wireEngine(false);
-    const { bad, derivedId } = seedDisownChain(e);
-
-    expect(e.db.merkleLog()).toBeNull();
-    expect(e.db.anchorEpoch(NOW)).toBeNull();
-    expect(e.db.publishGenesis(NOW)).toBeNull();
-
-    const result = e.db.disown(bad, { at: NOW });
-    expect(result.demotedDownstream).toContain(derivedId);
-
-    // The A1 latent coverage is present even with no merkle layer: the MUTATION leaves
-    // are in the chain and verify (a witness can attach later — V2.md).
-    const ops = e.ledger
-      .records()
-      .filter((r) => r.kind === "MUTATION")
-      .map((r) => (r.payload as MutationPayload).op);
-    expect(ops).toContain("DISOWN_CRATER");
-    expect(ops).toContain("DEMOTE");
-    expect(e.ledger.verifyChain()).toEqual({ ok: true, firstBrokenSeq: null });
-
-    // No sink was ever touched (no STH exists).
-    expect(e.sinkA.latest()).toBeNull();
-    expect(e.sinkB.latest()).toBeNull();
+    // (2) The checkpoint ADVANCED past the disown's records: an operator holding the
+    // exported post-disown head can prove a later chain that lacks these records (a
+    // hide-the-disown rollback) is a rewrite — its head at this seq cannot match.
+    const postHead = e.ledger.chainHead();
+    expect(e.ledger.records().length).toBeGreaterThan(preLen);
+    expect(postHead.seq).toBeGreaterThan(preHead.seq);
+    expect(postHead.headHash).toBe(e.ledger.records()[postHead.seq]!.thisHash);
+    expect(postHead.headHash).not.toBe(preHead.headHash);
   });
 
-  it("an engine with NO ratification at all has no merkle layer and journals nothing", () => {
+  it("an engine with NO ratification wired journals nothing (nowhere to journal)", () => {
     const store = createMemoryStore();
     const reputation = createReputationLedger(() => 0.9 as Unit);
     const identity = makeIdentity({ scoreOf: (s) => reputation.scoreOf(s) });
     const db = createIntelligentDb(store, identity, null, reputation);
-    expect(db.merkleLog()).toBeNull();
-    expect(db.anchorEpoch(NOW)).toBeNull();
-    expect(db.publishGenesis(NOW)).toBeNull();
+    const bad = "src:bad" as SourceId;
+    fileStrand(store, "strand:seed", bad, "class:bad", { v: "Germany" });
+    for (let i = 0; i < 3; i++) reputation.ratify(bad, NOW);
+    const result = db.disown(bad, { at: NOW });
+    expect(result.seedClawedBack.length).toBeGreaterThan(0); // the sweep still runs
   });
 });

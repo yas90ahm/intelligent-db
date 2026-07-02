@@ -14,6 +14,7 @@
  */
 
 import { describe, it, expect } from "vitest";
+import { freshSource } from "../testSupport/identityFixtures.js";
 
 import {
   // engine + store
@@ -21,8 +22,6 @@ import {
   createMemoryStore,
   // identity layer + its pillar wiring
   createSourceIdentityLayer,
-  createStakeLedger,
-  generatePassport,
   repCapFor,
   independenceBetween,
   combineSublinear,
@@ -55,12 +54,12 @@ import type {
   AnchorBinding,
   IdentityStamp,
   ProvenanceRoot,
-  KeyRegistryPort,
+  SourceRegistryPort,
   AnchorRegistryPort,
   ReputationLedgerPort,
   StakeLedgerPort,
   SourceIdentityLayer,
-  Passport,
+  SourceRef,
   WalkSeed,
   Strand,
   Edge,
@@ -76,10 +75,10 @@ import type {
 // compose a stamp). They lean on the REAL, fully-implemented anchor math.
 // ---------------------------------------------------------------------------
 
-function makeKeyRegistry(): KeyRegistryPort {
+function makeSourceRegistry(): SourceRegistryPort {
   const known = new Set<SourceId>();
   return {
-    register(passport: Passport): void {
+    register(passport: SourceRef): void {
       known.add(passport.sourceId);
     },
     sourceIdOf(sourceId: SourceId): SourceId | null {
@@ -131,18 +130,14 @@ function makeReputationLedger(): ReputationLedgerPort {
 }
 
 function makeStakePort(): StakeLedgerPort {
-  const ledger = createStakeLedger();
-  return {
-    postedFor(sourceId: SourceId): number {
-      return ledger.posted(sourceId);
-    },
-  };
+  // Staking is RETIRED (attribution replaces stake): a constant-zero port.
+  return { postedFor: () => 0 };
 }
 
 /** Wire a complete Source-Identity Layer over the in-test pillar ports. */
 function makeIdentityLayer(): SourceIdentityLayer {
   return createSourceIdentityLayer({
-    keys: makeKeyRegistry(),
+    sources: makeSourceRegistry(),
     anchors: makeAnchorRegistry(),
     reputation: makeReputationLedger(),
     stake: makeStakePort(),
@@ -188,7 +183,7 @@ function emailAnchor(): AnchorBinding {
 describe("Intelligent DB scaffold smoke", () => {
   it("registers a source and composes a well-formed identity stamp", () => {
     const identity = makeIdentityLayer();
-    const passport = generatePassport();
+    const passport = freshSource();
     const anchors: AnchorBinding[] = [domainAnchor()];
 
     identity.register(passport, anchors);
@@ -206,7 +201,7 @@ describe("Intelligent DB scaffold smoke", () => {
     const identity = makeIdentityLayer();
     const db = createIntelligentDb(store, identity);
 
-    const passport = generatePassport();
+    const passport = freshSource();
     identity.register(passport, [domainAnchor()]);
     const stamp = identity.stampFor(passport.sourceId);
 
@@ -242,7 +237,7 @@ describe("Intelligent DB scaffold smoke", () => {
     const identity = makeIdentityLayer();
     const db = createIntelligentDb(store, identity);
 
-    const passport = generatePassport();
+    const passport = freshSource();
     identity.register(passport, [domainAnchor()]);
     const stamp = identity.stampFor(passport.sourceId);
 
@@ -311,7 +306,7 @@ describe("Intelligent DB scaffold smoke", () => {
     const identity = makeIdentityLayer();
     const db = createIntelligentDb(store, identity);
 
-    const passport = generatePassport();
+    const passport = freshSource();
     identity.register(passport, [domainAnchor()]);
     const stamp = identity.stampFor(passport.sourceId);
 
@@ -339,7 +334,7 @@ describe("Intelligent DB scaffold smoke", () => {
     const identity = makeIdentityLayer();
     const db = createIntelligentDb(store, identity);
 
-    const passport = generatePassport();
+    const passport = freshSource();
     identity.register(passport, [domainAnchor()]);
     const stamp = identity.stampFor(passport.sourceId);
 
@@ -554,7 +549,7 @@ describe("independentRootCount Stage 2 (cross-source anchor disjointness)", () =
   ): SourceIdentityLayer {
     const identity = makeIdentityLayer();
     for (const [sourceId, anchors] of bindings) {
-      const passport: Passport = { sourceId, publicKeyPem: "pem:" + sourceId };
+      const passport: SourceRef = { sourceId, kind: "OTHER", label: String(sourceId) };
       identity.register(passport, anchors);
     }
     return identity;
@@ -1365,5 +1360,128 @@ describe("below-COLD eviction-permission gates (forgetting/tiers)", () => {
     const idxGrace = d.failedGates.indexOf(EvictionGate.PAST_GRACE_FLOOR);
     expect(idxLuv).toBeLessThan(idxCnt);
     expect(idxCnt).toBeLessThan(idxGrace);
+  });
+});
+
+// ===========================================================================
+// REGRESSION: real writeFact()-minted strands must carry a genuine, discriminating
+// `description_value` — not the old hardcoded sentinel 0 that made LOW_UNIQUE_VALUE
+// dead weight (it always passed regardless of any strand's real uniqueness). This
+// exercises the ACTUAL engine path (`db.writeFact` -> `makeObservedStrand`), not a
+// hand-built fixture, so it would have caught the original bug.
+// ===========================================================================
+
+describe("REGRESSION: description_value is real signal for real writeFact() strands", () => {
+  const cfg = DEFAULT_FORGETTING_CONFIG;
+
+  function wireDb() {
+    const store = createMemoryStore();
+    const identity = makeIdentityLayer();
+    const db = createIntelligentDb(store, identity);
+    const passport = freshSource();
+    identity.register(passport, [domainAnchor()]);
+    const stamp = identity.stampFor(passport.sourceId);
+    return { store, db, stamp, identity };
+  }
+
+  /** An INDEPENDENT witness neighbor view built from a real, independently-anchored strand. */
+  function neighborOf(strand: Strand): ForgettingNeighborView {
+    return {
+      id: strand.id,
+      fact_state: strand.fact_state,
+      origin: strand.origin,
+      provenance: strand.provenance,
+      description_value: strand.description_value,
+      bridgesToSubject: false,
+    };
+  }
+
+  function evidenceFor(count: number): EvictionEvidence {
+    return {
+      stamp: { source_id: "src:x" as SourceId, anchor_set: [], anchor_cost: 0 as Unit, reputation: 0 as Unit, stake_posted: 0 },
+      independentSourceCount: count,
+      outrankerState: null,
+    };
+  }
+
+  /**
+   * `evaluateEviction` only runs the below-COLD gates (including LOW_UNIQUE_VALUE)
+   * once a strand's tier is COLD — freshly-written strands are pinned WARM (grace
+   * window). Age a REAL, engine-minted strand down to COLD (tier only) so the gate
+   * logic actually runs against its genuine, engine-computed `description_value`.
+   */
+  function agedToCold(s: Strand): Strand {
+    return { ...s, tier: Tier.COLD };
+  }
+
+  it("DENIED LOW_UNIQUE_VALUE: a genuinely unique, singly-witnessed real strand is KEPT (not evicted)", () => {
+    const { store, db, stamp } = wireDb();
+
+    const id = db.writeFact({
+      entity: "entity:unique" as EntityId,
+      payload: { note: "a long, information-dense, non-repetitive observation with real content" },
+      stamp,
+    });
+    const strand = store.getStrand(id);
+    expect(strand).not.toBeNull();
+    const s = strand as Strand;
+
+    // The old bug: description_value was hardcoded 0, so LOW_UNIQUE_VALUE always
+    // PASSED (permitted eviction) no matter what. Prove that's no longer true.
+    expect(s.description_value).toBeGreaterThan(0);
+
+    // No independent-class neighbor at all => zero coverage => full unique value
+    // is retained => the gate must DENY eviction (strand kept).
+    const d = evaluateEviction(agedToCold(s), [], evidenceFor(1), asEpochMs(Date.now()), cfg);
+    expect(d.failedGates).toContain(EvictionGate.LOW_UNIQUE_VALUE);
+    expect(d.allowed).toBe(false);
+  });
+
+  it("ALLOWED LOW_UNIQUE_VALUE: identical/highly-overlapping low-uniqueness content fully covered by an independent real neighbor PASSES", () => {
+    const { store, db, stamp, identity } = wireDb();
+
+    // A tiny, low-information payload — its OWN engine-computed description_value
+    // is small (few bits), unlike the genuinely rich payload in the previous test.
+    const id = db.writeFact({
+      entity: "entity:dup" as EntityId,
+      payload: { v: 1 },
+      stamp,
+    });
+    const strand = store.getStrand(id) as Strand;
+    expect(strand.description_value).toBeGreaterThan(0); // real, non-sentinel signal
+
+    // A SECOND source (distinct passport => distinct provenance independence-class,
+    // since `provenanceRootFromStamp` derives one class per source id) reports the
+    // SAME tiny, low-uniqueness content — a genuine independent corroborator, not
+    // an echo. Its real, engine-computed description_value fully covers the
+    // subject's, so nothing unique is lost by evicting the subject.
+    const passport2 = freshSource();
+    // Register the neighbor's source with a REAL costly anchor (VERIFIED_HUMAN —
+    // a different class than the subject's DOMAIN, so the pair stays genuinely
+    // anchor-disjoint). Required since the Phase-3 trust-tiered ingest gate: an
+    // UNREGISTERED filer's facts now land PROVISIONAL, and the LOW_UNIQUE_VALUE
+    // gate deliberately counts only OBSERVED+LIVE neighbors (no echo/ghost
+    // laundering) — this test needs a LIVE independent corroborator, which is
+    // exactly what a real anchored witness is.
+    identity.register(passport2, [verifiedHumanAnchor()]);
+    const neighborStrandId = db.writeFact({
+      entity: "entity:dup-other" as EntityId,
+      payload: { v: 1 },
+      stamp: { ...stamp, source_id: passport2.sourceId },
+    });
+    const neighborStrand = store.getStrand(neighborStrandId) as Strand;
+    // Sanity: the two sources really do land in different independence classes.
+    expect(neighborStrand.provenance[0]?.independenceClass).not.toBe(
+      strand.provenance[0]?.independenceClass,
+    );
+
+    const d = evaluateEviction(
+      agedToCold(strand),
+      [neighborOf(neighborStrand)],
+      evidenceFor(1),
+      asEpochMs(Date.now()),
+      cfg,
+    );
+    expect(d.failedGates).not.toContain(EvictionGate.LOW_UNIQUE_VALUE);
   });
 });
