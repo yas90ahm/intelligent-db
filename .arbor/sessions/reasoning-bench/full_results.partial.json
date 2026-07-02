@@ -1,0 +1,25 @@
+{
+  "model": "gemma3:12b",
+  "rows": [
+    {
+      "model": "gemma3:12b",
+      "benchmark": "math",
+      "arm": "bare",
+      "nItems": 3,
+      "samples": 1,
+      "correctMean": 0.3333333333333333,
+      "accuracy": 0.3333333333333333,
+      "avgGenMs": 14806.4544
+    },
+    {
+      "model": "gemma3:12b",
+      "benchmark": "gpqa",
+      "arm": "bare",
+      "nItems": 3,
+      "samples": 4,
+      "correctMean": 0.8333333333333334,
+      "accuracy": 0.8333333333333334,
+      "avgGenMs": 39526.096991666665
+    }
+  ]
+}

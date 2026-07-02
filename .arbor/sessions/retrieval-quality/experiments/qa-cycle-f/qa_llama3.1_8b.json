@@ -1,0 +1,197 @@
+{
+  "model": "llama3.1:8b",
+  "n": 150,
+  "perArm": {
+    "ID+Rerank": {
+      "f1": 0.12358648964376066,
+      "em": 0.09333333333333334,
+      "n": 150
+    },
+    "MultiSeedID": {
+      "f1": 0.13653709483642035,
+      "em": 0.12,
+      "n": 150
+    },
+    "TunedHybrid": {
+      "f1": 0.14659222604807545,
+      "em": 0.12,
+      "n": 150
+    }
+  },
+  "perCategory": {
+    "ID+Rerank": {
+      "single-hop": {
+        "f1": 0.19159417889576616,
+        "em": 0.15873015873015872,
+        "n": 63
+      },
+      "multi-hop": {
+        "f1": 0.09110516934046346,
+        "em": 0,
+        "n": 22
+      },
+      "temporal": {
+        "f1": 0.06296296296296296,
+        "em": 0.041666666666666664,
+        "n": 24
+      },
+      "open-domain": {
+        "f1": 0.058503401360544216,
+        "em": 0,
+        "n": 7
+      },
+      "adversarial": {
+        "f1": 0.07478210382369757,
+        "em": 0.08823529411764706,
+        "n": 34
+      }
+    },
+    "MultiSeedID": {
+      "single-hop": {
+        "f1": 0.18600565589078724,
+        "em": 0.1746031746031746,
+        "n": 63
+      },
+      "multi-hop": {
+        "f1": 0.13233562402360358,
+        "em": 0.045454545454545456,
+        "n": 22
+      },
+      "temporal": {
+        "f1": 0,
+        "em": 0,
+        "n": 24
+      },
+      "open-domain": {
+        "f1": 0.045351473922902494,
+        "em": 0,
+        "n": 7
+      },
+      "adversarial": {
+        "f1": 0.1627459958342311,
+        "em": 0.17647058823529413,
+        "n": 34
+      }
+    },
+    "TunedHybrid": {
+      "single-hop": {
+        "f1": 0.18317223513756067,
+        "em": 0.15873015873015872,
+        "n": 63
+      },
+      "multi-hop": {
+        "f1": 0.11059986923831318,
+        "em": 0,
+        "n": 22
+      },
+      "temporal": {
+        "f1": 0,
+        "em": 0,
+        "n": 24
+      },
+      "open-domain": {
+        "f1": 0.0582010582010582,
+        "em": 0,
+        "n": 7
+      },
+      "adversarial": {
+        "f1": 0.22377584008513798,
+        "em": 0.23529411764705882,
+        "n": 34
+      }
+    }
+  },
+  "contradiction": {
+    "adjudicated": {
+      "acc": 1,
+      "n": 15
+    },
+    "raw": {
+      "acc": 0.6666666666666666,
+      "n": 15
+    }
+  },
+  "meta": {
+    "cycle": "F (end-task QA: local-LLM reader over the frozen retrieval arms + contradiction E2E)",
+    "dataset": "LoCoMo (snap-research/locomo, locomo10.json)",
+    "embedder": "Xenova/all-MiniLM-L6-v2",
+    "llmHost": "http://localhost:11434",
+    "topK": 8,
+    "requestedN": 150,
+    "strata": {
+      "temporal": 24,
+      "single-hop": 63,
+      "multi-hop": 22,
+      "adversarial": 34,
+      "open-domain": 7
+    },
+    "promptTemplate": "fixed grounded-QA (system + numbered memories + question), identical across arms/models",
+    "scoring": "token-F1 + normalized EM/containment (lowercase, strip punctuation/articles)",
+    "frozenConfigs": {
+      "hybrid": {
+        "s": 5,
+        "h": 1,
+        "k": 10,
+        "alpha": 0.5
+      },
+      "rerankBlend": 0.2,
+      "multiSeedK": 20
+    },
+    "contradiction": {
+      "source": "cycle-A synthetic planted-contradiction pairs (dataset.ts)",
+      "metric": "fraction where the reader answer contains the planted-TRUE value",
+      "adjudicatedContext": "only the LIVE value after engine.adjudicate (true kept, false demoted)",
+      "rawContext": "both planted values including the false one"
+    },
+    "samples": [
+      {
+        "arm": "ID+Rerank",
+        "q": "When did Melanie paint a sunrise?",
+        "gold": "2022",
+        "pred": "Last year.",
+        "f1": 0,
+        "em": 0
+      },
+      {
+        "arm": "MultiSeedID",
+        "q": "When did Melanie paint a sunrise?",
+        "gold": "2022",
+        "pred": "Last year.",
+        "f1": 0,
+        "em": 0
+      },
+      {
+        "arm": "TunedHybrid",
+        "q": "When did Melanie paint a sunrise?",
+        "gold": "2022",
+        "pred": "Last year.",
+        "f1": 0,
+        "em": 0
+      },
+      {
+        "arm": "ID+Rerank",
+        "q": "Did Melanie make the black and white bowl in the photo?",
+        "gold": "Yes",
+        "pred": "No.",
+        "f1": 0,
+        "em": 0
+      },
+      {
+        "arm": "MultiSeedID",
+        "q": "Did Melanie make the black and white bowl in the photo?",
+        "gold": "Yes",
+        "pred": "Yes. (Memory 7)",
+        "f1": 0.5,
+        "em": 1
+      },
+      {
+        "arm": "TunedHybrid",
+        "q": "Did Melanie make the black and white bowl in the photo?",
+        "gold": "Yes",
+        "pred": "No. (From memory 1)",
+        "f1": 0,
+        "em": 0
+      }
+    ]
+  }
+}

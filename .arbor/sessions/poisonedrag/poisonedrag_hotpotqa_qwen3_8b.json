@@ -1,0 +1,41 @@
+{
+  "config": {
+    "model": "qwen3:8b",
+    "dataset": "hotpotqa",
+    "topK": 5,
+    "topN": 20,
+    "arms": [
+      "bare",
+      "rag",
+      "substrate",
+      "mem0"
+    ]
+  },
+  "nQuestions": 100,
+  "rows": [
+    {
+      "arm": "bare",
+      "asr": 0.16,
+      "acc": 0.7,
+      "n": 100
+    },
+    {
+      "arm": "rag",
+      "asr": 0.97,
+      "acc": 0.11,
+      "n": 100
+    },
+    {
+      "arm": "substrate",
+      "asr": 0.15,
+      "acc": 0.82,
+      "n": 100
+    },
+    {
+      "arm": "mem0",
+      "asr": 0.98,
+      "acc": 0.09,
+      "n": 100
+    }
+  ]
+}

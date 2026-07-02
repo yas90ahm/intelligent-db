@@ -1,0 +1,36 @@
+{
+  "config": {
+    "retriever": "contriever-msmarco",
+    "dim": 768,
+    "model": "qwen2.5:7b",
+    "dataset": "msmarco",
+    "topK": 5,
+    "topN": 20,
+    "arms": [
+      "bare",
+      "rag",
+      "substrate"
+    ]
+  },
+  "nQuestions": 100,
+  "rows": [
+    {
+      "arm": "bare",
+      "asr": 0.12,
+      "acc": 0.63,
+      "n": 100
+    },
+    {
+      "arm": "rag",
+      "asr": 0.97,
+      "acc": 0.18,
+      "n": 100
+    },
+    {
+      "arm": "substrate",
+      "asr": 0.1,
+      "acc": 0.85,
+      "n": 100
+    }
+  ]
+}

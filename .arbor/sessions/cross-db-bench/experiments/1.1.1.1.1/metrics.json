@@ -1,0 +1,142 @@
+{
+  "generatedAt": "2026-06-28T17:33:39.399Z",
+  "node": "v24.16.0",
+  "platform": "win32/x64",
+  "config": {
+    "sizes": [
+      1000,
+      10000,
+      100000,
+      1000000
+    ],
+    "writeIters": 600,
+    "recallIters": 250,
+    "mixedMs": 30000,
+    "mixedWriteFraction": 0.05,
+    "clusterSize": 16,
+    "concKs": [
+      1,
+      2,
+      4,
+      8
+    ],
+    "concMs": 3000
+  },
+  "scale": [
+    {
+      "size": 1000,
+      "seedMs": 5.383100000000013,
+      "writeP50Us": 26.599999999973534,
+      "writeP99Us": 401.49999999999864,
+      "recallP50Ms": 1.925100000000043,
+      "recallP99Ms": 2.285199999999975,
+      "recallMeanMs": 1.960033999999997,
+      "litMean": 77,
+      "popMean": 77,
+      "diskBytes": 966656,
+      "bytesPerFact": 966.656,
+      "completed": true
+    },
+    {
+      "size": 10000,
+      "seedMs": 59.56260000000009,
+      "writeP50Us": 25.09999999995216,
+      "writeP99Us": 104.19999999999163,
+      "recallP50Ms": 1.9050999999999476,
+      "recallP99Ms": 2.496800000000121,
+      "recallMeanMs": 1.941335600000004,
+      "litMean": 77,
+      "popMean": 77,
+      "diskBytes": 9134080,
+      "bytesPerFact": 913.408,
+      "completed": true
+    },
+    {
+      "size": 100000,
+      "seedMs": 579.9045999999998,
+      "writeP50Us": 24.699999999938882,
+      "writeP99Us": 118.50000000004002,
+      "recallP50Ms": 1.911899999999605,
+      "recallP99Ms": 2.788000000000011,
+      "recallMeanMs": 1.9410091999999932,
+      "litMean": 77,
+      "popMean": 77,
+      "diskBytes": 91521024,
+      "bytesPerFact": 915.21024,
+      "completed": true
+    },
+    {
+      "size": 1000000,
+      "seedMs": 6224.106200000002,
+      "writeP50Us": 27.099999999336433,
+      "writeP99Us": 183.59999999665888,
+      "recallP50Ms": 2.081399999995483,
+      "recallP99Ms": 3.6577000000033877,
+      "recallMeanMs": 2.256784799999645,
+      "litMean": 77,
+      "popMean": 77,
+      "diskBytes": 921767936,
+      "bytesPerFact": 921.767936,
+      "completed": true
+    }
+  ],
+  "mixed": {
+    "size": 100000,
+    "durationMs": 30015.7609,
+    "ops": 1194,
+    "opsPerSec": 39.77910151862916,
+    "reads": 1127,
+    "writes": 67,
+    "readP50Ms": 26.194799999997485,
+    "readP99Ms": 32.059799999999086,
+    "writeP50Ms": 0.12730000000010477,
+    "writeP99Ms": 0.2484999999996944,
+    "maxLatencyMs": 33.44430000000102,
+    "p99AllMs": 32.059799999999086,
+    "maxOverP99": 1.0431849231748787,
+    "checkpointStallObserved": false
+  },
+  "cold": [
+    {
+      "size": 100000,
+      "reopenMs": 1.9955000000045402,
+      "firstRecallMs": 4.972399999998743
+    },
+    {
+      "size": 1000000,
+      "reopenMs": 1.283000000003085,
+      "firstRecallMs": 2.956500000000233
+    }
+  ],
+  "concurrency": [
+    {
+      "k": 1,
+      "totalReads": 11000000,
+      "elapsedMs": 3004.503099999998,
+      "readsPerSec": 3661171.126766355,
+      "scaleVs1": 1
+    },
+    {
+      "k": 2,
+      "totalReads": 14680000,
+      "elapsedMs": 3008.181500000006,
+      "readsPerSec": 4880024.692658993,
+      "scaleVs1": 1.3329135742882259
+    },
+    {
+      "k": 4,
+      "totalReads": 28080000,
+      "elapsedMs": 3010.4600999999966,
+      "readsPerSec": 9327477.882865822,
+      "scaleVs1": 2.547676019477435
+    },
+    {
+      "k": 8,
+      "totalReads": 50120000,
+      "elapsedMs": 3017.425500000005,
+      "readsPerSec": 16610186.398968231,
+      "scaleVs1": 4.5368505933888965
+    }
+  ],
+  "largestCompleted": 1000000
+}

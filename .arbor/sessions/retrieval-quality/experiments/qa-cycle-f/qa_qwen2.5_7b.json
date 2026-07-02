@@ -1,0 +1,197 @@
+{
+  "model": "qwen2.5:7b",
+  "n": 150,
+  "perArm": {
+    "ID+Rerank": {
+      "f1": 0.08756211227743486,
+      "em": 0.1,
+      "n": 150
+    },
+    "MultiSeedID": {
+      "f1": 0.09043710605863353,
+      "em": 0.07333333333333333,
+      "n": 150
+    },
+    "TunedHybrid": {
+      "f1": 0.09232697398869191,
+      "em": 0.08666666666666667,
+      "n": 150
+    }
+  },
+  "perCategory": {
+    "ID+Rerank": {
+      "single-hop": {
+        "f1": 0.12462780034208605,
+        "em": 0.14285714285714285,
+        "n": 63
+      },
+      "multi-hop": {
+        "f1": 0.07762882279011311,
+        "em": 0.09090909090909091,
+        "n": 22
+      },
+      "temporal": {
+        "f1": 0.016666666666666666,
+        "em": 0,
+        "n": 24
+      },
+      "open-domain": {
+        "f1": 0.05803571428571429,
+        "em": 0,
+        "n": 7
+      },
+      "adversarial": {
+        "f1": 0.08143180349062702,
+        "em": 0.11764705882352941,
+        "n": 34
+      }
+    },
+    "MultiSeedID": {
+      "single-hop": {
+        "f1": 0.14776608552042267,
+        "em": 0.14285714285714285,
+        "n": 63
+      },
+      "multi-hop": {
+        "f1": 0.0735930735930736,
+        "em": 0,
+        "n": 22
+      },
+      "temporal": {
+        "f1": 0.016666666666666666,
+        "em": 0,
+        "n": 24
+      },
+      "open-domain": {
+        "f1": 0.05357142857142858,
+        "em": 0,
+        "n": 7
+      },
+      "adversarial": {
+        "f1": 0.0547722029988466,
+        "em": 0.058823529411764705,
+        "n": 34
+      }
+    },
+    "TunedHybrid": {
+      "single-hop": {
+        "f1": 0.1313959619860241,
+        "em": 0.12698412698412698,
+        "n": 63
+      },
+      "multi-hop": {
+        "f1": 0.045454545454545456,
+        "em": 0.045454545454545456,
+        "n": 22
+      },
+      "temporal": {
+        "f1": 0.016666666666666666,
+        "em": 0,
+        "n": 24
+      },
+      "open-domain": {
+        "f1": 0.048780487804878044,
+        "em": 0,
+        "n": 7
+      },
+      "adversarial": {
+        "f1": 0.11263638466323889,
+        "em": 0.11764705882352941,
+        "n": 34
+      }
+    }
+  },
+  "contradiction": {
+    "adjudicated": {
+      "acc": 1,
+      "n": 15
+    },
+    "raw": {
+      "acc": 1,
+      "n": 15
+    }
+  },
+  "meta": {
+    "cycle": "F (end-task QA: local-LLM reader over the frozen retrieval arms + contradiction E2E)",
+    "dataset": "LoCoMo (snap-research/locomo, locomo10.json)",
+    "embedder": "Xenova/all-MiniLM-L6-v2",
+    "llmHost": "http://localhost:11434",
+    "topK": 8,
+    "requestedN": 150,
+    "strata": {
+      "temporal": 24,
+      "single-hop": 63,
+      "multi-hop": 22,
+      "adversarial": 34,
+      "open-domain": 7
+    },
+    "promptTemplate": "fixed grounded-QA (system + numbered memories + question), identical across arms/models",
+    "scoring": "token-F1 + normalized EM/containment (lowercase, strip punctuation/articles)",
+    "frozenConfigs": {
+      "hybrid": {
+        "s": 5,
+        "h": 1,
+        "k": 10,
+        "alpha": 0.5
+      },
+      "rerankBlend": 0.2,
+      "multiSeedK": 20
+    },
+    "contradiction": {
+      "source": "cycle-A synthetic planted-contradiction pairs (dataset.ts)",
+      "metric": "fraction where the reader answer contains the planted-TRUE value",
+      "adjudicatedContext": "only the LIVE value after engine.adjudicate (true kept, false demoted)",
+      "rawContext": "both planted values including the false one"
+    },
+    "samples": [
+      {
+        "arm": "ID+Rerank",
+        "q": "When did Melanie paint a sunrise?",
+        "gold": "2022",
+        "pred": "Last year.",
+        "f1": 0,
+        "em": 0
+      },
+      {
+        "arm": "MultiSeedID",
+        "q": "When did Melanie paint a sunrise?",
+        "gold": "2022",
+        "pred": "Last year.",
+        "f1": 0,
+        "em": 0
+      },
+      {
+        "arm": "TunedHybrid",
+        "q": "When did Melanie paint a sunrise?",
+        "gold": "2022",
+        "pred": "Melanie painted a sunrise last year.",
+        "f1": 0,
+        "em": 0
+      },
+      {
+        "arm": "ID+Rerank",
+        "q": "Did Melanie make the black and white bowl in the photo?",
+        "gold": "Yes",
+        "pred": "No. unknown. The memories do not provide information about who made the black and white bowl specifically, only that Caroline made it in her pottery class.",
+        "f1": 0,
+        "em": 0
+      },
+      {
+        "arm": "MultiSeedID",
+        "q": "Did Melanie make the black and white bowl in the photo?",
+        "gold": "Yes",
+        "pred": "Yes.",
+        "f1": 1,
+        "em": 1
+      },
+      {
+        "arm": "TunedHybrid",
+        "q": "Did Melanie make the black and white bowl in the photo?",
+        "gold": "Yes",
+        "pred": "No. unknown.",
+        "f1": 0,
+        "em": 0
+      }
+    ]
+  }
+}

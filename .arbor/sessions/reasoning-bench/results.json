@@ -1,0 +1,938 @@
+{
+  "config": {
+    "models": [
+      "qwen2.5:7b",
+      "llama3.1:8b",
+      "gemma3"
+    ],
+    "benchmarks": [
+      "math",
+      "gpqa",
+      "coding"
+    ],
+    "arms": [
+      "bare",
+      "rag",
+      "substrate",
+      "hybrid",
+      "mem0"
+    ],
+    "n": 10,
+    "k": 3,
+    "poisonRate": 0,
+    "host": "http://localhost:11434"
+  },
+  "rows": [
+    {
+      "model": "qwen2.5:7b",
+      "benchmark": "math",
+      "arm": "bare",
+      "n": 10,
+      "correct": 7,
+      "accuracy": 0.7,
+      "avgGenMs": 2540.6378000000004,
+      "totalGenMs": 25406.378000000004
+    },
+    {
+      "model": "qwen2.5:7b",
+      "benchmark": "math",
+      "arm": "rag",
+      "n": 10,
+      "correct": 6,
+      "accuracy": 0.6,
+      "avgGenMs": 2397.953270000001,
+      "totalGenMs": 23979.53270000001
+    },
+    {
+      "model": "qwen2.5:7b",
+      "benchmark": "math",
+      "arm": "substrate",
+      "n": 10,
+      "correct": 6,
+      "accuracy": 0.6,
+      "avgGenMs": 2128.8017999999975,
+      "totalGenMs": 21288.017999999975
+    },
+    {
+      "model": "qwen2.5:7b",
+      "benchmark": "math",
+      "arm": "hybrid",
+      "n": 10,
+      "correct": 6,
+      "accuracy": 0.6,
+      "avgGenMs": 2123.5468900000037,
+      "totalGenMs": 21235.468900000036
+    },
+    {
+      "model": "qwen2.5:7b",
+      "benchmark": "math",
+      "arm": "mem0",
+      "n": 10,
+      "correct": 8,
+      "accuracy": 0.8,
+      "avgGenMs": 2327.218100000003,
+      "totalGenMs": 23272.181000000026
+    },
+    {
+      "model": "llama3.1:8b",
+      "benchmark": "math",
+      "arm": "bare",
+      "n": 10,
+      "correct": 5,
+      "accuracy": 0.5,
+      "avgGenMs": 12508.951120000007,
+      "totalGenMs": 125089.51120000007
+    },
+    {
+      "model": "llama3.1:8b",
+      "benchmark": "math",
+      "arm": "rag",
+      "n": 10,
+      "correct": 6,
+      "accuracy": 0.6,
+      "avgGenMs": 13477.079410000006,
+      "totalGenMs": 134770.79410000006
+    },
+    {
+      "model": "llama3.1:8b",
+      "benchmark": "math",
+      "arm": "substrate",
+      "n": 10,
+      "correct": 6,
+      "accuracy": 0.6,
+      "avgGenMs": 13767.578080000001,
+      "totalGenMs": 137675.7808
+    },
+    {
+      "model": "llama3.1:8b",
+      "benchmark": "math",
+      "arm": "hybrid",
+      "n": 10,
+      "correct": 6,
+      "accuracy": 0.6,
+      "avgGenMs": 13659.771219999995,
+      "totalGenMs": 136597.71219999995
+    },
+    {
+      "model": "llama3.1:8b",
+      "benchmark": "math",
+      "arm": "mem0",
+      "n": 10,
+      "correct": 4,
+      "accuracy": 0.4,
+      "avgGenMs": 9316.31296999998,
+      "totalGenMs": 93163.12969999982
+    },
+    {
+      "model": "gemma3",
+      "benchmark": "math",
+      "arm": "bare",
+      "n": 10,
+      "correct": 7,
+      "accuracy": 0.7,
+      "avgGenMs": 3658.134220000007,
+      "totalGenMs": 36581.34220000007
+    },
+    {
+      "model": "gemma3",
+      "benchmark": "math",
+      "arm": "rag",
+      "n": 10,
+      "correct": 7,
+      "accuracy": 0.7,
+      "avgGenMs": 3211.4776999999885,
+      "totalGenMs": 32114.776999999885
+    },
+    {
+      "model": "gemma3",
+      "benchmark": "math",
+      "arm": "substrate",
+      "n": 10,
+      "correct": 7,
+      "accuracy": 0.7,
+      "avgGenMs": 2659.986269999982,
+      "totalGenMs": 26599.862699999823
+    },
+    {
+      "model": "gemma3",
+      "benchmark": "math",
+      "arm": "hybrid",
+      "n": 10,
+      "correct": 7,
+      "accuracy": 0.7,
+      "avgGenMs": 2657.3270699999994,
+      "totalGenMs": 26573.270699999994
+    },
+    {
+      "model": "gemma3",
+      "benchmark": "math",
+      "arm": "mem0",
+      "n": 10,
+      "correct": 7,
+      "accuracy": 0.7,
+      "avgGenMs": 3098.053249999997,
+      "totalGenMs": 30980.532499999972
+    },
+    {
+      "model": "qwen2.5:7b",
+      "benchmark": "gpqa",
+      "arm": "bare",
+      "n": 10,
+      "correct": 7,
+      "accuracy": 0.7,
+      "avgGenMs": 4940.9663000000055,
+      "totalGenMs": 49409.66300000006
+    },
+    {
+      "model": "qwen2.5:7b",
+      "benchmark": "gpqa",
+      "arm": "rag",
+      "n": 10,
+      "correct": 7,
+      "accuracy": 0.7,
+      "avgGenMs": 4684.918210000009,
+      "totalGenMs": 46849.18210000009
+    },
+    {
+      "model": "qwen2.5:7b",
+      "benchmark": "gpqa",
+      "arm": "substrate",
+      "n": 10,
+      "correct": 5,
+      "accuracy": 0.5,
+      "avgGenMs": 4541.830569999979,
+      "totalGenMs": 45418.30569999979
+    },
+    {
+      "model": "qwen2.5:7b",
+      "benchmark": "gpqa",
+      "arm": "hybrid",
+      "n": 10,
+      "correct": 5,
+      "accuracy": 0.5,
+      "avgGenMs": 4532.635719999974,
+      "totalGenMs": 45326.35719999974
+    },
+    {
+      "model": "qwen2.5:7b",
+      "benchmark": "gpqa",
+      "arm": "mem0",
+      "n": 10,
+      "correct": 3,
+      "accuracy": 0.3,
+      "avgGenMs": 4255.680569999968,
+      "totalGenMs": 42556.80569999968
+    },
+    {
+      "model": "llama3.1:8b",
+      "benchmark": "gpqa",
+      "arm": "bare",
+      "n": 10,
+      "correct": 1,
+      "accuracy": 0.1,
+      "avgGenMs": 35781.15446000001,
+      "totalGenMs": 357811.54460000014
+    },
+    {
+      "model": "llama3.1:8b",
+      "benchmark": "gpqa",
+      "arm": "rag",
+      "n": 10,
+      "correct": 2,
+      "accuracy": 0.2,
+      "avgGenMs": 38189.97083000003,
+      "totalGenMs": 381899.7083000003
+    },
+    {
+      "model": "llama3.1:8b",
+      "benchmark": "gpqa",
+      "arm": "substrate",
+      "n": 10,
+      "correct": 3,
+      "accuracy": 0.3,
+      "avgGenMs": 39621.00924000002,
+      "totalGenMs": 396210.0924000002
+    },
+    {
+      "model": "llama3.1:8b",
+      "benchmark": "gpqa",
+      "arm": "hybrid",
+      "n": 10,
+      "correct": 3,
+      "accuracy": 0.3,
+      "avgGenMs": 39377.820530000005,
+      "totalGenMs": 393778.20530000003
+    },
+    {
+      "model": "llama3.1:8b",
+      "benchmark": "gpqa",
+      "arm": "mem0",
+      "n": 10,
+      "correct": 1,
+      "accuracy": 0.1,
+      "avgGenMs": 40472.66633999986,
+      "totalGenMs": 404726.66339999856
+    },
+    {
+      "model": "gemma3",
+      "benchmark": "gpqa",
+      "arm": "bare",
+      "n": 10,
+      "correct": 2,
+      "accuracy": 0.2,
+      "avgGenMs": 6602.931149999937,
+      "totalGenMs": 66029.31149999937
+    },
+    {
+      "model": "gemma3",
+      "benchmark": "gpqa",
+      "arm": "rag",
+      "n": 10,
+      "correct": 3,
+      "accuracy": 0.3,
+      "avgGenMs": 5791.578309999965,
+      "totalGenMs": 57915.78309999965
+    },
+    {
+      "model": "gemma3",
+      "benchmark": "gpqa",
+      "arm": "substrate",
+      "n": 10,
+      "correct": 3,
+      "accuracy": 0.3,
+      "avgGenMs": 5664.963889999921,
+      "totalGenMs": 56649.638899999205
+    },
+    {
+      "model": "gemma3",
+      "benchmark": "gpqa",
+      "arm": "hybrid",
+      "n": 10,
+      "correct": 3,
+      "accuracy": 0.3,
+      "avgGenMs": 5663.681090000039,
+      "totalGenMs": 56636.81090000039
+    },
+    {
+      "model": "gemma3",
+      "benchmark": "gpqa",
+      "arm": "mem0",
+      "n": 10,
+      "correct": 3,
+      "accuracy": 0.3,
+      "avgGenMs": 5794.175969999982,
+      "totalGenMs": 57941.75969999982
+    },
+    {
+      "model": "qwen2.5:7b",
+      "benchmark": "coding",
+      "arm": "bare",
+      "n": 10,
+      "correct": 7,
+      "accuracy": 0.7,
+      "avgGenMs": 1659.3733099999838,
+      "totalGenMs": 16593.733099999838
+    },
+    {
+      "model": "qwen2.5:7b",
+      "benchmark": "coding",
+      "arm": "rag",
+      "n": 10,
+      "correct": 7,
+      "accuracy": 0.7,
+      "avgGenMs": 1576.271880000038,
+      "totalGenMs": 15762.71880000038
+    },
+    {
+      "model": "qwen2.5:7b",
+      "benchmark": "coding",
+      "arm": "substrate",
+      "n": 10,
+      "correct": 8,
+      "accuracy": 0.8,
+      "avgGenMs": 1427.9544300000184,
+      "totalGenMs": 14279.544300000183
+    },
+    {
+      "model": "qwen2.5:7b",
+      "benchmark": "coding",
+      "arm": "hybrid",
+      "n": 10,
+      "correct": 8,
+      "accuracy": 0.8,
+      "avgGenMs": 1420.0596799998543,
+      "totalGenMs": 14200.596799998544
+    },
+    {
+      "model": "qwen2.5:7b",
+      "benchmark": "coding",
+      "arm": "mem0",
+      "n": 10,
+      "correct": 8,
+      "accuracy": 0.8,
+      "avgGenMs": 1594.9827999999748,
+      "totalGenMs": 15949.827999999747
+    },
+    {
+      "model": "llama3.1:8b",
+      "benchmark": "coding",
+      "arm": "bare",
+      "n": 10,
+      "correct": 6,
+      "accuracy": 0.6,
+      "avgGenMs": 5918.511869999906,
+      "totalGenMs": 59185.11869999906
+    },
+    {
+      "model": "llama3.1:8b",
+      "benchmark": "coding",
+      "arm": "rag",
+      "n": 10,
+      "correct": 5,
+      "accuracy": 0.5,
+      "avgGenMs": 9077.376829999917,
+      "totalGenMs": 90773.76829999918
+    },
+    {
+      "model": "llama3.1:8b",
+      "benchmark": "coding",
+      "arm": "substrate",
+      "n": 10,
+      "correct": 6,
+      "accuracy": 0.6,
+      "avgGenMs": 8849.47259999998,
+      "totalGenMs": 88494.72599999979
+    },
+    {
+      "model": "llama3.1:8b",
+      "benchmark": "coding",
+      "arm": "hybrid",
+      "n": 10,
+      "correct": 6,
+      "accuracy": 0.6,
+      "avgGenMs": 8838.424509999948,
+      "totalGenMs": 88384.24509999948
+    },
+    {
+      "model": "llama3.1:8b",
+      "benchmark": "coding",
+      "arm": "mem0",
+      "n": 10,
+      "correct": 6,
+      "accuracy": 0.6,
+      "avgGenMs": 9033.883449999988,
+      "totalGenMs": 90338.83449999988
+    },
+    {
+      "model": "gemma3",
+      "benchmark": "coding",
+      "arm": "bare",
+      "n": 10,
+      "correct": 5,
+      "accuracy": 0.5,
+      "avgGenMs": 1950.7584300000221,
+      "totalGenMs": 19507.58430000022
+    },
+    {
+      "model": "gemma3",
+      "benchmark": "coding",
+      "arm": "rag",
+      "n": 10,
+      "correct": 5,
+      "accuracy": 0.5,
+      "avgGenMs": 1690.3806199999526,
+      "totalGenMs": 16903.806199999526
+    },
+    {
+      "model": "gemma3",
+      "benchmark": "coding",
+      "arm": "substrate",
+      "n": 10,
+      "correct": 6,
+      "accuracy": 0.6,
+      "avgGenMs": 1685.7610400000588,
+      "totalGenMs": 16857.610400000587
+    },
+    {
+      "model": "gemma3",
+      "benchmark": "coding",
+      "arm": "hybrid",
+      "n": 10,
+      "correct": 6,
+      "accuracy": 0.6,
+      "avgGenMs": 1687.6257100000512,
+      "totalGenMs": 16876.257100000512
+    },
+    {
+      "model": "gemma3",
+      "benchmark": "coding",
+      "arm": "mem0",
+      "n": 10,
+      "correct": 5,
+      "accuracy": 0.5,
+      "avgGenMs": 1634.5280600000638,
+      "totalGenMs": 16345.280600000639
+    }
+  ],
+  "deltaVsBare": [
+    {
+      "model": "qwen2.5:7b",
+      "benchmark": "math",
+      "arm": "bare",
+      "accuracy": 0.7,
+      "baselineBare": 0.7,
+      "deltaVsBare": 0
+    },
+    {
+      "model": "qwen2.5:7b",
+      "benchmark": "math",
+      "arm": "rag",
+      "accuracy": 0.6,
+      "baselineBare": 0.7,
+      "deltaVsBare": -0.09999999999999998
+    },
+    {
+      "model": "qwen2.5:7b",
+      "benchmark": "math",
+      "arm": "substrate",
+      "accuracy": 0.6,
+      "baselineBare": 0.7,
+      "deltaVsBare": -0.09999999999999998
+    },
+    {
+      "model": "qwen2.5:7b",
+      "benchmark": "math",
+      "arm": "hybrid",
+      "accuracy": 0.6,
+      "baselineBare": 0.7,
+      "deltaVsBare": -0.09999999999999998
+    },
+    {
+      "model": "qwen2.5:7b",
+      "benchmark": "math",
+      "arm": "mem0",
+      "accuracy": 0.8,
+      "baselineBare": 0.7,
+      "deltaVsBare": 0.10000000000000009
+    },
+    {
+      "model": "llama3.1:8b",
+      "benchmark": "math",
+      "arm": "bare",
+      "accuracy": 0.5,
+      "baselineBare": 0.5,
+      "deltaVsBare": 0
+    },
+    {
+      "model": "llama3.1:8b",
+      "benchmark": "math",
+      "arm": "rag",
+      "accuracy": 0.6,
+      "baselineBare": 0.5,
+      "deltaVsBare": 0.09999999999999998
+    },
+    {
+      "model": "llama3.1:8b",
+      "benchmark": "math",
+      "arm": "substrate",
+      "accuracy": 0.6,
+      "baselineBare": 0.5,
+      "deltaVsBare": 0.09999999999999998
+    },
+    {
+      "model": "llama3.1:8b",
+      "benchmark": "math",
+      "arm": "hybrid",
+      "accuracy": 0.6,
+      "baselineBare": 0.5,
+      "deltaVsBare": 0.09999999999999998
+    },
+    {
+      "model": "llama3.1:8b",
+      "benchmark": "math",
+      "arm": "mem0",
+      "accuracy": 0.4,
+      "baselineBare": 0.5,
+      "deltaVsBare": -0.09999999999999998
+    },
+    {
+      "model": "gemma3",
+      "benchmark": "math",
+      "arm": "bare",
+      "accuracy": 0.7,
+      "baselineBare": 0.7,
+      "deltaVsBare": 0
+    },
+    {
+      "model": "gemma3",
+      "benchmark": "math",
+      "arm": "rag",
+      "accuracy": 0.7,
+      "baselineBare": 0.7,
+      "deltaVsBare": 0
+    },
+    {
+      "model": "gemma3",
+      "benchmark": "math",
+      "arm": "substrate",
+      "accuracy": 0.7,
+      "baselineBare": 0.7,
+      "deltaVsBare": 0
+    },
+    {
+      "model": "gemma3",
+      "benchmark": "math",
+      "arm": "hybrid",
+      "accuracy": 0.7,
+      "baselineBare": 0.7,
+      "deltaVsBare": 0
+    },
+    {
+      "model": "gemma3",
+      "benchmark": "math",
+      "arm": "mem0",
+      "accuracy": 0.7,
+      "baselineBare": 0.7,
+      "deltaVsBare": 0
+    },
+    {
+      "model": "qwen2.5:7b",
+      "benchmark": "gpqa",
+      "arm": "bare",
+      "accuracy": 0.7,
+      "baselineBare": 0.7,
+      "deltaVsBare": 0
+    },
+    {
+      "model": "qwen2.5:7b",
+      "benchmark": "gpqa",
+      "arm": "rag",
+      "accuracy": 0.7,
+      "baselineBare": 0.7,
+      "deltaVsBare": 0
+    },
+    {
+      "model": "qwen2.5:7b",
+      "benchmark": "gpqa",
+      "arm": "substrate",
+      "accuracy": 0.5,
+      "baselineBare": 0.7,
+      "deltaVsBare": -0.19999999999999996
+    },
+    {
+      "model": "qwen2.5:7b",
+      "benchmark": "gpqa",
+      "arm": "hybrid",
+      "accuracy": 0.5,
+      "baselineBare": 0.7,
+      "deltaVsBare": -0.19999999999999996
+    },
+    {
+      "model": "qwen2.5:7b",
+      "benchmark": "gpqa",
+      "arm": "mem0",
+      "accuracy": 0.3,
+      "baselineBare": 0.7,
+      "deltaVsBare": -0.39999999999999997
+    },
+    {
+      "model": "llama3.1:8b",
+      "benchmark": "gpqa",
+      "arm": "bare",
+      "accuracy": 0.1,
+      "baselineBare": 0.1,
+      "deltaVsBare": 0
+    },
+    {
+      "model": "llama3.1:8b",
+      "benchmark": "gpqa",
+      "arm": "rag",
+      "accuracy": 0.2,
+      "baselineBare": 0.1,
+      "deltaVsBare": 0.1
+    },
+    {
+      "model": "llama3.1:8b",
+      "benchmark": "gpqa",
+      "arm": "substrate",
+      "accuracy": 0.3,
+      "baselineBare": 0.1,
+      "deltaVsBare": 0.19999999999999998
+    },
+    {
+      "model": "llama3.1:8b",
+      "benchmark": "gpqa",
+      "arm": "hybrid",
+      "accuracy": 0.3,
+      "baselineBare": 0.1,
+      "deltaVsBare": 0.19999999999999998
+    },
+    {
+      "model": "llama3.1:8b",
+      "benchmark": "gpqa",
+      "arm": "mem0",
+      "accuracy": 0.1,
+      "baselineBare": 0.1,
+      "deltaVsBare": 0
+    },
+    {
+      "model": "gemma3",
+      "benchmark": "gpqa",
+      "arm": "bare",
+      "accuracy": 0.2,
+      "baselineBare": 0.2,
+      "deltaVsBare": 0
+    },
+    {
+      "model": "gemma3",
+      "benchmark": "gpqa",
+      "arm": "rag",
+      "accuracy": 0.3,
+      "baselineBare": 0.2,
+      "deltaVsBare": 0.09999999999999998
+    },
+    {
+      "model": "gemma3",
+      "benchmark": "gpqa",
+      "arm": "substrate",
+      "accuracy": 0.3,
+      "baselineBare": 0.2,
+      "deltaVsBare": 0.09999999999999998
+    },
+    {
+      "model": "gemma3",
+      "benchmark": "gpqa",
+      "arm": "hybrid",
+      "accuracy": 0.3,
+      "baselineBare": 0.2,
+      "deltaVsBare": 0.09999999999999998
+    },
+    {
+      "model": "gemma3",
+      "benchmark": "gpqa",
+      "arm": "mem0",
+      "accuracy": 0.3,
+      "baselineBare": 0.2,
+      "deltaVsBare": 0.09999999999999998
+    },
+    {
+      "model": "qwen2.5:7b",
+      "benchmark": "coding",
+      "arm": "bare",
+      "accuracy": 0.7,
+      "baselineBare": 0.7,
+      "deltaVsBare": 0
+    },
+    {
+      "model": "qwen2.5:7b",
+      "benchmark": "coding",
+      "arm": "rag",
+      "accuracy": 0.7,
+      "baselineBare": 0.7,
+      "deltaVsBare": 0
+    },
+    {
+      "model": "qwen2.5:7b",
+      "benchmark": "coding",
+      "arm": "substrate",
+      "accuracy": 0.8,
+      "baselineBare": 0.7,
+      "deltaVsBare": 0.10000000000000009
+    },
+    {
+      "model": "qwen2.5:7b",
+      "benchmark": "coding",
+      "arm": "hybrid",
+      "accuracy": 0.8,
+      "baselineBare": 0.7,
+      "deltaVsBare": 0.10000000000000009
+    },
+    {
+      "model": "qwen2.5:7b",
+      "benchmark": "coding",
+      "arm": "mem0",
+      "accuracy": 0.8,
+      "baselineBare": 0.7,
+      "deltaVsBare": 0.10000000000000009
+    },
+    {
+      "model": "llama3.1:8b",
+      "benchmark": "coding",
+      "arm": "bare",
+      "accuracy": 0.6,
+      "baselineBare": 0.6,
+      "deltaVsBare": 0
+    },
+    {
+      "model": "llama3.1:8b",
+      "benchmark": "coding",
+      "arm": "rag",
+      "accuracy": 0.5,
+      "baselineBare": 0.6,
+      "deltaVsBare": -0.09999999999999998
+    },
+    {
+      "model": "llama3.1:8b",
+      "benchmark": "coding",
+      "arm": "substrate",
+      "accuracy": 0.6,
+      "baselineBare": 0.6,
+      "deltaVsBare": 0
+    },
+    {
+      "model": "llama3.1:8b",
+      "benchmark": "coding",
+      "arm": "hybrid",
+      "accuracy": 0.6,
+      "baselineBare": 0.6,
+      "deltaVsBare": 0
+    },
+    {
+      "model": "llama3.1:8b",
+      "benchmark": "coding",
+      "arm": "mem0",
+      "accuracy": 0.6,
+      "baselineBare": 0.6,
+      "deltaVsBare": 0
+    },
+    {
+      "model": "gemma3",
+      "benchmark": "coding",
+      "arm": "bare",
+      "accuracy": 0.5,
+      "baselineBare": 0.5,
+      "deltaVsBare": 0
+    },
+    {
+      "model": "gemma3",
+      "benchmark": "coding",
+      "arm": "rag",
+      "accuracy": 0.5,
+      "baselineBare": 0.5,
+      "deltaVsBare": 0
+    },
+    {
+      "model": "gemma3",
+      "benchmark": "coding",
+      "arm": "substrate",
+      "accuracy": 0.6,
+      "baselineBare": 0.5,
+      "deltaVsBare": 0.09999999999999998
+    },
+    {
+      "model": "gemma3",
+      "benchmark": "coding",
+      "arm": "hybrid",
+      "accuracy": 0.6,
+      "baselineBare": 0.5,
+      "deltaVsBare": 0.09999999999999998
+    },
+    {
+      "model": "gemma3",
+      "benchmark": "coding",
+      "arm": "mem0",
+      "accuracy": 0.5,
+      "baselineBare": 0.5,
+      "deltaVsBare": 0
+    }
+  ],
+  "poison": null,
+  "samples": [
+    {
+      "model": "qwen2.5:7b",
+      "benchmark": "math",
+      "arm": "bare",
+      "id": "math/test/algebra/1004.json",
+      "ok": true,
+      "pred": "\nSince \\(2^8 = 2^{2x}\\), it follows that \\(8 = 2x\\).\n\nStep 4: Solve for \\(x\\).\nDivide both sides by 2 to isolate \\(x\\):\n\\[x = \\frac{8}{2} = 4\\]\n\nFinal answer: 4"
+    },
+    {
+      "model": "qwen2.5:7b",
+      "benchmark": "math",
+      "arm": "bare",
+      "id": "math/test/algebra/101.json",
+      "ok": false,
+      "pred": "ression to be less than or equal to zero, the solution is in the interval where the product is negative or zero:\n\\[ -2 \\le x \\le 7 \\]\n\nFinal answer: \\([-2, 7]\\)"
+    },
+    {
+      "model": "qwen2.5:7b",
+      "benchmark": "math",
+      "arm": "bare",
+      "id": "math/test/algebra/1031.json",
+      "ok": false,
+      "pred": "]\n   \\[\n   x \\geq \\frac{55}{10}\n   \\]\n   \\[\n   x \\geq 5.5\n   \\]\n\nThe smallest real number in the domain of \\( g(x) \\) is therefore \\( 5.5 \\).\n\nFinal answer: 5.5"
+    },
+    {
+      "model": "qwen2.5:7b",
+      "benchmark": "math",
+      "arm": "bare",
+      "id": "math/test/algebra/1035.json",
+      "ok": true,
+      "pred": "first equation:\n\\[ 10T = 3S + (S - 2T) \\]\n\\[ 10T = 4S - 2T \\]\n\\[ 12T = 4S \\]\n\\[ S = 3T \\]\n\nTherefore, one squig weighs as much as three treeks.\n\nFinal answer: 3"
+    },
+    {
+      "model": "qwen2.5:7b",
+      "benchmark": "math",
+      "arm": "bare",
+      "id": "math/test/algebra/1072.json",
+      "ok": false,
+      "pred": " greatest common divisor (GCD) of 2187 and 5625, which is 3:\n\\[ a_8 = \\frac{2187 \\div 3}{5625 \\div 3} = \\frac{729}{1875}. \\]\n\nFinal answer: \\(\\frac{729}{1875}\\)"
+    },
+    {
+      "model": "qwen2.5:7b",
+      "benchmark": "math",
+      "arm": "bare",
+      "id": "math/test/algebra/1078.json",
+      "ok": true,
+      "pred": "t 2, we have:\n\\[ -\\sqrt{3} < x < \\sqrt{3}. \\]\n\nTherefore, the solution to the inequality is:\n\\[ (-\\sqrt{3}, \\sqrt{3}). \\]\n\nFinal answer: $(-\\sqrt{3}, \\sqrt{3})$"
+    },
+    {
+      "model": "qwen2.5:7b",
+      "benchmark": "math",
+      "arm": "bare",
+      "id": "math/test/algebra/1082.json",
+      "ok": true,
+      "pred": "}{6}.\n$$\n\nThus, the expression is in the form $\\dfrac{a\\sqrt{2} + b\\sqrt{3}}{c}$ with $a=9$, $b=8$, and $c=6$. Therefore,\n$$\na+b+c = 9+8+6.\n$$\n\nFinal answer: 23"
+    },
+    {
+      "model": "qwen2.5:7b",
+      "benchmark": "math",
+      "arm": "bare",
+      "id": "math/test/algebra/109.json",
+      "ok": true,
+      "pred": " Subtract 12 from both sides to isolate the term with \\( y \\).\n\\( 2y = 0 \\).\n\nStep 4: Divide both sides by 2 to solve for \\( y \\).\n\\( y = 0 \\).\n\nFinal answer: 0"
+    },
+    {
+      "model": "qwen2.5:7b",
+      "benchmark": "math",
+      "arm": "bare",
+      "id": "math/test/algebra/1098.json",
+      "ok": true,
+      "pred": "\n$(1 + 2i)6 = 1 \\cdot 6 + 2i \\cdot 6 = 6 + 12i$\n\nStep 2: Subtract $3i$ from the result of Step 1.\n$6 + 12i - 3i = 6 + (12i - 3i) = 6 + 9i$\n\nFinal answer: 6 + 9i"
+    },
+    {
+      "model": "qwen2.5:7b",
+      "benchmark": "math",
+      "arm": "bare",
+      "id": "math/test/algebra/114.json",
+      "ok": true,
+      "pred": "\\), so the expression is now \\(64^{\\frac{1}{3}}\\).\n\nStep 5: Evaluate the cube root of 64.\nSince \\(4^3 = 64\\), we have \\(64^{\\frac{1}{3}} = 4\\).\n\nFinal answer: 4"
+    },
+    {
+      "model": "qwen2.5:7b",
+      "benchmark": "math",
+      "arm": "rag",
+      "id": "math/test/algebra/1004.json",
+      "ok": true,
+      "pred": "e same, we can set the exponents equal to each other:\n\\[8 = 2x.\\]\nSolving for \\(x\\), we divide both sides by 2:\n\\[x = \\frac{8}{2} = \\boxed{4}.\\]\nFinal answer: 4"
+    },
+    {
+      "model": "qwen2.5:7b",
+      "benchmark": "math",
+      "arm": "rag",
+      "id": "math/test/algebra/101.json",
+      "ok": false,
+      "pred": "al where the product is less than or equal to zero, which includes the roots themselves. Therefore, the solution is:\n\\[ x \\in [-2, 7]. \\]\n\nFinal answer: [-2, 7]"
+    }
+  ]
+}

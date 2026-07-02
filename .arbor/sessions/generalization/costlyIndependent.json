@@ -1,0 +1,122 @@
+{
+  "config": {
+    "items": 80,
+    "sybilK": 6,
+    "seed": 7
+  },
+  "ragReferenceAsr": 1,
+  "byMode": {
+    "anchors-only": [
+      {
+        "independenceLevel": 1,
+        "mode": "anchors-only",
+        "n": 80,
+        "surfacedRate": 0,
+        "capturedRate": 0,
+        "goldSurvivalRate": 1,
+        "asr": 0
+      },
+      {
+        "independenceLevel": 2,
+        "mode": "anchors-only",
+        "n": 80,
+        "surfacedRate": 1,
+        "capturedRate": 0,
+        "goldSurvivalRate": 1,
+        "asr": 0.5
+      },
+      {
+        "independenceLevel": 3,
+        "mode": "anchors-only",
+        "n": 80,
+        "surfacedRate": 1,
+        "capturedRate": 0,
+        "goldSurvivalRate": 1,
+        "asr": 0.5
+      },
+      {
+        "independenceLevel": 4,
+        "mode": "anchors-only",
+        "n": 80,
+        "surfacedRate": 1,
+        "capturedRate": 0,
+        "goldSurvivalRate": 1,
+        "asr": 0.5
+      },
+      {
+        "independenceLevel": 5,
+        "mode": "anchors-only",
+        "n": 80,
+        "surfacedRate": 1,
+        "capturedRate": 0,
+        "goldSurvivalRate": 1,
+        "asr": 0.5
+      },
+      {
+        "independenceLevel": 6,
+        "mode": "anchors-only",
+        "n": 80,
+        "surfacedRate": 1,
+        "capturedRate": 0,
+        "goldSurvivalRate": 1,
+        "asr": 0.5
+      }
+    ],
+    "anchors+rep": [
+      {
+        "independenceLevel": 1,
+        "mode": "anchors+rep",
+        "n": 80,
+        "surfacedRate": 1,
+        "capturedRate": 0,
+        "goldSurvivalRate": 1,
+        "asr": 0.5
+      },
+      {
+        "independenceLevel": 2,
+        "mode": "anchors+rep",
+        "n": 80,
+        "surfacedRate": 1,
+        "capturedRate": 0,
+        "goldSurvivalRate": 1,
+        "asr": 0.5
+      },
+      {
+        "independenceLevel": 3,
+        "mode": "anchors+rep",
+        "n": 80,
+        "surfacedRate": 1,
+        "capturedRate": 1,
+        "goldSurvivalRate": 0,
+        "asr": 1
+      },
+      {
+        "independenceLevel": 4,
+        "mode": "anchors+rep",
+        "n": 80,
+        "surfacedRate": 1,
+        "capturedRate": 1,
+        "goldSurvivalRate": 0,
+        "asr": 1
+      },
+      {
+        "independenceLevel": 5,
+        "mode": "anchors+rep",
+        "n": 80,
+        "surfacedRate": 1,
+        "capturedRate": 1,
+        "goldSurvivalRate": 0,
+        "asr": 1
+      },
+      {
+        "independenceLevel": 6,
+        "mode": "anchors+rep",
+        "n": 80,
+        "surfacedRate": 1,
+        "capturedRate": 1,
+        "goldSurvivalRate": 0,
+        "asr": 1
+      }
+    ]
+  }
+}

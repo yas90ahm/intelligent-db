@@ -479,6 +479,14 @@ with the model pulled (`ollama pull qwen2.5:7b`), reachable at `OLLAMA_HOST`
 Output roots (repo-relative, created by the runners): `.arbor/sessions/<family>/` for
 results, `.arbor/cache/<family>/` for prepped data.
 
+**The measured result artifacts cited throughout this document are committed** under
+`.arbor/sessions/` (factworld, poisonedrag, verification, generalization,
+reasoning-bench, cross-db-bench, retrieval-quality, transcripts, sybil-redteam) — every
+per-run JSON, report, and raw LLM transcript a number in this document points at, ~3 MB
+total. The `.arbor/cache/` datasets and embeddings (~2.7 GB) are not committed; the
+runners regenerate them. The overnight LLM-scored reasoning sweep is reproducible via
+`scripts/run-full-reasoning-bench.ps1` (local Ollama, qwen2.5:7b + qwen3:8b).
+
 ### 6.1 FactWorld
 ```
 FACTWORLD_BENCH=1 FW_MODEL=qwen2.5:7b FW_ENTITIES=300 \

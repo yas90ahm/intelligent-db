@@ -1,0 +1,41 @@
+{
+  "config": {
+    "model": "qwen3:8b",
+    "dataset": "msmarco",
+    "topK": 5,
+    "topN": 20,
+    "arms": [
+      "bare",
+      "rag",
+      "substrate",
+      "mem0"
+    ]
+  },
+  "nQuestions": 100,
+  "rows": [
+    {
+      "arm": "bare",
+      "asr": 0.1,
+      "acc": 0.6,
+      "n": 100
+    },
+    {
+      "arm": "rag",
+      "asr": 0.94,
+      "acc": 0.24,
+      "n": 100
+    },
+    {
+      "arm": "substrate",
+      "asr": 0.08,
+      "acc": 0.9,
+      "n": 100
+    },
+    {
+      "arm": "mem0",
+      "asr": 0.94,
+      "acc": 0.26,
+      "n": 100
+    }
+  ]
+}

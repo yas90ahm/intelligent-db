@@ -1,0 +1,205 @@
+{
+  "model": "qwen2.5:7b",
+  "rows": [
+    {
+      "model": "qwen2.5:7b",
+      "benchmark": "math",
+      "arm": "bare",
+      "nItems": 500,
+      "samples": 1,
+      "correctMean": 0.524,
+      "accuracy": 0.524,
+      "avgGenMs": 12049.432536799994
+    },
+    {
+      "model": "qwen2.5:7b",
+      "benchmark": "math",
+      "arm": "rag",
+      "nItems": 500,
+      "samples": 1,
+      "correctMean": 0.526,
+      "accuracy": 0.526,
+      "avgGenMs": 11463.913654200009
+    },
+    {
+      "model": "qwen2.5:7b",
+      "benchmark": "math",
+      "arm": "substrate",
+      "nItems": 500,
+      "samples": 1,
+      "correctMean": 0.526,
+      "accuracy": 0.526,
+      "avgGenMs": 11422.049020200002
+    },
+    {
+      "model": "qwen2.5:7b",
+      "benchmark": "math",
+      "arm": "hybrid",
+      "nItems": 500,
+      "samples": 1,
+      "correctMean": 0.526,
+      "accuracy": 0.526,
+      "avgGenMs": 11453.809495999983
+    },
+    {
+      "model": "qwen2.5:7b",
+      "benchmark": "math",
+      "arm": "mem0",
+      "nItems": 500,
+      "samples": 1,
+      "correctMean": 0.53,
+      "accuracy": 0.53,
+      "avgGenMs": 11388.619934599988
+    },
+    {
+      "model": "qwen2.5:7b",
+      "benchmark": "gpqa",
+      "arm": "bare",
+      "nItems": 198,
+      "samples": 4,
+      "correctMean": 0.33080808080808083,
+      "accuracy": 0.33080808080808083,
+      "avgGenMs": 16554.811267171717
+    },
+    {
+      "model": "qwen2.5:7b",
+      "benchmark": "gpqa",
+      "arm": "rag",
+      "nItems": 198,
+      "samples": 4,
+      "correctMean": 0.3181818181818182,
+      "accuracy": 0.3181818181818182,
+      "avgGenMs": 15141.587914772732
+    },
+    {
+      "model": "qwen2.5:7b",
+      "benchmark": "gpqa",
+      "arm": "substrate",
+      "nItems": 198,
+      "samples": 4,
+      "correctMean": 0.3207070707070707,
+      "accuracy": 0.3207070707070707,
+      "avgGenMs": 15141.819530176688
+    },
+    {
+      "model": "qwen2.5:7b",
+      "benchmark": "gpqa",
+      "arm": "hybrid",
+      "nItems": 198,
+      "samples": 1,
+      "correctMean": 0.35858585858585856,
+      "accuracy": 0.35858585858585856,
+      "avgGenMs": 15836.31590252536
+    },
+    {
+      "model": "qwen2.5:7b",
+      "benchmark": "gpqa",
+      "arm": "mem0",
+      "nItems": 198,
+      "samples": 1,
+      "correctMean": 0.29797979797979796,
+      "accuracy": 0.29797979797979796,
+      "avgGenMs": 16069.24325505061
+    },
+    {
+      "model": "qwen2.5:7b",
+      "benchmark": "coding",
+      "arm": "bare",
+      "nItems": 164,
+      "samples": 1,
+      "correctMean": 0.8048780487804879,
+      "accuracy": 0.8048780487804879,
+      "avgGenMs": 4393.603714634051
+    },
+    {
+      "model": "qwen2.5:7b",
+      "benchmark": "coding",
+      "arm": "rag",
+      "nItems": 164,
+      "samples": 1,
+      "correctMean": 0.823170731707317,
+      "accuracy": 0.823170731707317,
+      "avgGenMs": 3024.92866219512
+    },
+    {
+      "model": "qwen2.5:7b",
+      "benchmark": "coding",
+      "arm": "substrate",
+      "nItems": 164,
+      "samples": 1,
+      "correctMean": 0.8353658536585366,
+      "accuracy": 0.8353658536585366,
+      "avgGenMs": 2831.329151829273
+    },
+    {
+      "model": "qwen2.5:7b",
+      "benchmark": "coding",
+      "arm": "hybrid",
+      "nItems": 164,
+      "samples": 1,
+      "correctMean": 0.8353658536585366,
+      "accuracy": 0.8353658536585366,
+      "avgGenMs": 2824.1850603658295
+    },
+    {
+      "model": "qwen2.5:7b",
+      "benchmark": "coding",
+      "arm": "mem0",
+      "nItems": 164,
+      "samples": 1,
+      "correctMean": 0.7987804878048781,
+      "accuracy": 0.7987804878048781,
+      "avgGenMs": 3070.9667896340125
+    },
+    {
+      "model": "qwen2.5:7b",
+      "benchmark": "aime",
+      "arm": "bare",
+      "nItems": 60,
+      "samples": 16,
+      "correctMean": 0.065625,
+      "accuracy": 0.065625,
+      "avgGenMs": 23762.011438124864
+    },
+    {
+      "model": "qwen2.5:7b",
+      "benchmark": "aime",
+      "arm": "rag",
+      "nItems": 60,
+      "samples": 16,
+      "correctMean": 0.05625,
+      "accuracy": 0.05625,
+      "avgGenMs": 20840.175390520893
+    },
+    {
+      "model": "qwen2.5:7b",
+      "benchmark": "aime",
+      "arm": "substrate",
+      "nItems": 60,
+      "samples": 16,
+      "correctMean": 0.0625,
+      "accuracy": 0.0625,
+      "avgGenMs": 20920.81079645831
+    },
+    {
+      "model": "qwen2.5:7b",
+      "benchmark": "aime",
+      "arm": "hybrid",
+      "nItems": 60,
+      "samples": 1,
+      "correctMean": 0.05,
+      "accuracy": 0.05,
+      "avgGenMs": 22816.398850000154
+    },
+    {
+      "model": "qwen2.5:7b",
+      "benchmark": "aime",
+      "arm": "mem0",
+      "nItems": 60,
+      "samples": 1,
+      "correctMean": 0.016666666666666666,
+      "accuracy": 0.016666666666666666,
+      "avgGenMs": 22360.481253333513
+    }
+  ]
+}

@@ -1,0 +1,149 @@
+{
+  "config": {
+    "model": "qwen2.5:7b",
+    "benchmarks": [
+      "coding"
+    ],
+    "arms": [
+      "bare",
+      "substrate",
+      "mem0"
+    ],
+    "thesisArms": [
+      "substrate"
+    ],
+    "k": 3,
+    "concurrency": 2,
+    "studyCap": 80,
+    "dedup": 0.92,
+    "poison": 0.5,
+    "temp": 0.7,
+    "samples": {
+      "math": 1,
+      "coding": 1,
+      "gpqa": 4,
+      "aime": 16
+    },
+    "host": "http://localhost:11434"
+  },
+  "rows": [
+    {
+      "model": "qwen2.5:7b",
+      "benchmark": "coding",
+      "arm": "bare",
+      "nItems": 3,
+      "samples": 1,
+      "correctMean": 1,
+      "accuracy": 1,
+      "avgGenMs": 1984.7708666666665
+    },
+    {
+      "model": "qwen2.5:7b",
+      "benchmark": "coding",
+      "arm": "substrate",
+      "nItems": 3,
+      "samples": 1,
+      "correctMean": 1,
+      "accuracy": 1,
+      "avgGenMs": 1688.8644000000004
+    },
+    {
+      "model": "qwen2.5:7b",
+      "benchmark": "coding",
+      "arm": "mem0",
+      "nItems": 3,
+      "samples": 1,
+      "correctMean": 1,
+      "accuracy": 1,
+      "avgGenMs": 2249.2976999999987
+    }
+  ],
+  "deltaVsBare": [
+    {
+      "benchmark": "coding",
+      "arm": "bare",
+      "accuracy": 1,
+      "baselineBare": 1,
+      "deltaVsBare": 0
+    },
+    {
+      "benchmark": "coding",
+      "arm": "substrate",
+      "accuracy": 1,
+      "baselineBare": 1,
+      "deltaVsBare": 0
+    },
+    {
+      "benchmark": "coding",
+      "arm": "mem0",
+      "accuracy": 1,
+      "baselineBare": 1,
+      "deltaVsBare": 0
+    }
+  ],
+  "samples": [
+    {
+      "benchmark": "coding",
+      "arm": "bare",
+      "id": "coding/HumanEval/0",
+      "ok": true,
+      "pred": "# Test cases\nprint(has_close_elements([1.0, 2.0, 3.0], 0.5))  # Output: False\nprint(has_close_elements([1.0, 2.8, 3.0, 4.0, 5.0, 2.0], 0.3))  # Output: True\n```"
+    },
+    {
+      "benchmark": "coding",
+      "arm": "bare",
+      "id": "coding/HumanEval/1",
+      "ok": true,
+      "pred": " stack:  # If stack is empty, a group is complete\n                result.append(current_group)\n                current_group = \"\"\n    \n    return result\n```\n```"
+    },
+    {
+      "benchmark": "coding",
+      "arm": "bare",
+      "id": "coding/HumanEval/10",
+      "ok": true,
+      "pred": "ng[i:]):\n            return string + string[:i][::-1]\n            \n    return string + string[:-1][::-1]  # Fallback, should not reach here with valid input\n```"
+    },
+    {
+      "benchmark": "coding",
+      "arm": "substrate",
+      "id": "coding/HumanEval/0",
+      "ok": true,
+      "pred": " bool:\n    numbers.sort()\n    for i in range(len(numbers) - 1):\n        if numbers[i + 1] - numbers[i] < threshold:\n            return True\n    return False\n```"
+    },
+    {
+      "benchmark": "coding",
+      "arm": "substrate",
+      "id": "coding/HumanEval/1",
+      "ok": true,
+      "pred": "f not stack:  # Group is complete when stack is empty\n                result.append(current_group)\n                current_group = ''\n    \n    return result\n```"
+    },
+    {
+      "benchmark": "coding",
+      "arm": "substrate",
+      "id": "coding/HumanEval/10",
+      "ok": true,
+      "pred": "dromic suffix.\n    \"\"\"\n    for i in range(len(string)):\n        if is_palindrome(string[i:]):\n            return string + string[:i][::-1]\n    return string\n```"
+    },
+    {
+      "benchmark": "coding",
+      "arm": "mem0",
+      "id": "coding/HumanEval/0",
+      "ok": true,
+      "pred": "# Test cases\nprint(has_close_elements([1.0, 2.0, 3.0], 0.5))  # Output: False\nprint(has_close_elements([1.0, 2.8, 3.0, 4.0, 5.0, 2.0], 0.3))  # Output: True\n```"
+    },
+    {
+      "benchmark": "coding",
+      "arm": "mem0",
+      "id": "coding/HumanEval/1",
+      "ok": true,
+      "pred": ".append(current_group)\n                current_group = \"\"\n        else:\n            raise ValueError(\"Invalid character in input string\")\n\n    return result\n```"
+    },
+    {
+      "benchmark": "coding",
+      "arm": "mem0",
+      "id": "coding/HumanEval/10",
+      "ok": true,
+      "pred": "st cases\nprint(make_palindrome(''))       # Output: ''\nprint(make_palindrome('cat'))    # Output: 'catac'\nprint(make_palindrome('cata'))   # Output: 'catac'\n```"
+    }
+  ]
+}

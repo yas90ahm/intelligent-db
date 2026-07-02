@@ -1,0 +1,141 @@
+{
+  "config": {
+    "N": 5000,
+    "RECALLS": 250,
+    "H": 3,
+    "A_VALUES": [
+      5,
+      50,
+      200
+    ],
+    "TRIALS_PER_A": 8,
+    "node": "v24.16.0",
+    "platform": "win32"
+  },
+  "adapters": [
+    {
+      "name": "node:sqlite (builtin)",
+      "write_hz": 1006522.2642724962,
+      "recall_ms": 0.005699999999933425,
+      "poison_correct_rate": 0,
+      "footprint_bytes": 345896,
+      "footprint_source": "on-disk file",
+      "bytes_per_fact_disk": 69.1792,
+      "bytes_per_fact_heap": 333.6128,
+      "poison_trials": 24,
+      "poison_correct": 0
+    },
+    {
+      "name": "better-sqlite3",
+      "write_hz": 832514.6938843474,
+      "recall_ms": 0.005299999999920146,
+      "poison_correct_rate": 0,
+      "footprint_bytes": 345896,
+      "footprint_source": "on-disk file",
+      "bytes_per_fact_disk": 69.1792,
+      "bytes_per_fact_heap": 345.2688,
+      "poison_trials": 24,
+      "poison_correct": 0
+    },
+    {
+      "name": "lmdb",
+      "write_hz": 8090.500991329085,
+      "recall_ms": 0.00479999999993197,
+      "poison_correct_rate": 0,
+      "footprint_bytes": 262144,
+      "footprint_source": "on-disk file",
+      "bytes_per_fact_disk": 52.4288,
+      "bytes_per_fact_heap": 1665.3776,
+      "poison_trials": 24,
+      "poison_correct": 0
+    },
+    {
+      "name": "duckdb (@duckdb/node-api)",
+      "write_hz": 88263.74619583249,
+      "recall_ms": 0.9074000000000524,
+      "poison_correct_rate": 0,
+      "footprint_bytes": 536576,
+      "footprint_source": "on-disk file",
+      "bytes_per_fact_disk": 107.3152,
+      "bytes_per_fact_heap": 773.224,
+      "poison_trials": 24,
+      "poison_correct": 0
+    },
+    {
+      "name": "vector-bruteforce (in-proc)",
+      "write_hz": 6777822.963262989,
+      "recall_ms": 0.44879999999989195,
+      "poison_correct_rate": 0,
+      "footprint_bytes": 1348900,
+      "footprint_source": "in-memory estimate",
+      "bytes_per_fact_disk": null,
+      "bytes_per_fact_heap": 353.9568,
+      "poison_trials": 24,
+      "poison_correct": 0
+    },
+    {
+      "name": "IntelligentDB (engine)",
+      "write_hz": 98910.79433280707,
+      "recall_ms": 0.003400000000056025,
+      "poison_correct_rate": 1,
+      "footprint_bytes": 11338136,
+      "footprint_source": "on-disk file",
+      "bytes_per_fact_disk": 2267.6272,
+      "bytes_per_fact_heap": 0,
+      "poison_trials": 24,
+      "poison_correct": 24
+    },
+    {
+      "name": "Qdrant (docker)",
+      "write_hz": 12215.677062452156,
+      "recall_ms": 48.05199999999968,
+      "poison_correct_rate": 0,
+      "footprint_bytes": 621025521,
+      "footprint_source": "db-reported size",
+      "bytes_per_fact_disk": 124205.1042,
+      "bytes_per_fact_heap": 1545.8096,
+      "poison_trials": 24,
+      "poison_correct": 0
+    },
+    {
+      "name": "Postgres+pgvector (docker)",
+      "write_hz": 75430.026581542,
+      "recall_ms": 0.6160999999992782,
+      "poison_correct_rate": 0,
+      "footprint_bytes": 9829399,
+      "footprint_source": "db-reported size",
+      "bytes_per_fact_disk": 1965.8798,
+      "bytes_per_fact_heap": 727.1936,
+      "poison_trials": 24,
+      "poison_correct": 0
+    },
+    {
+      "name": "Redis-Stack (docker)",
+      "write_hz": 137032.47943827085,
+      "recall_ms": 0.6503999999986263,
+      "poison_correct_rate": 0,
+      "footprint_bytes": 8152792,
+      "footprint_source": "db-reported size",
+      "bytes_per_fact_disk": 1630.5584,
+      "bytes_per_fact_heap": 2277.4416,
+      "poison_trials": 24,
+      "poison_correct": 0
+    }
+  ],
+  "skipped": [
+    {
+      "name": "hnswlib-node",
+      "reason": "No prebuilt binary for win32-x64 / Node 24; npm install falls back to `node-gyp rebuild`, which needs an MSVC toolchain (absent on this box) — the native module never built (Cannot find module 'hnswlib-node')."
+    },
+    {
+      "name": "faiss-node",
+      "reason": "Not attempted by directive (requires MSVC to build) — would fail identically to hnswlib-node."
+    }
+  ],
+  "blocked": [
+    {
+      "name": "Mem0 (mem0ai, Python)",
+      "reason": "mem0ai 2.0.10 installs and the local sentence-transformers embedder works, but Memory.from_config eagerly builds an LLM at init: default ⇒ OpenAIError 'Missing credentials' (no OPENAI_API_KEY); llm.provider=ollama ⇒ needs the `ollama` package + a running local LLM server. No way to run with NO LLM / NO key, and no key was supplied."
+    }
+  ]
+}

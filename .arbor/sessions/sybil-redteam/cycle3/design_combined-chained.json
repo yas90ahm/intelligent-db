@@ -1,0 +1,92 @@
+[
+  {
+    "id": "c3-01",
+    "name": "Reputation-Farm → Class-Stacked High-Impact Silent Flip",
+    "family": "attack/multi-stage-chained",
+    "chains": ["cycle1:self-stacked-anchor-classes", "cycle2:global-attribute-agnostic-reputation", "cycle2:high-impact-gate-counts-classes-not-roots", "cycle1:silent-permanent-flip"],
+    "novelty": "Composes three independently-verified single-mechanism breaches into ONE operator kill-chain that clears BOTH the decisive-or-defer gate AND the high-impact (irreversible) gate without any second real witness. Prior cycles broke each gate alone; this proves they do not compose into a barrier because every gate reads CLASS-cardinality or GLOBAL reputation, never independent ROOT count.",
+    "construction": "Stage A (cap setup): one operator mints key K1 and binds 2 disjoint anchor CLASSES it controls (DOMAIN d1 + EMAIL e1@d1). Bron-Kerbosch MIS sees 2 class-disjoint roots → clears the high-impact gate's '≥2 anchor classes'. Stage B (farm): K1 asserts ~40 cheap, true, easily-ratifiable claims on unrelated low-stakes attributes; each independent ratify lifts global Beta(α,β) until LCB ≥ 0.20 and (vs fresh challengers) gap ≥ 0.30. Because reputation is attribute-agnostic and global, this earned trust is spendable on ANY attribute. Stage C (corroboration prop): operator mints a SECOND key K2 bound to a THIRD class (PHONE p1) — class-disjoint from K1, so MIS counts it as an independent root; K1 and K2 each file the target false claim → '≥2 corroborations' + '≥2 disjoint anchor classes' both satisfied by ONE operator. Stage D (spend): K1 issues the high-impact irreversible flip of an incumbent canonical. Gap≥0.30 (incumbent has no incumbency floor + symmetric decay has eroded its lead during the farm window), top≥0.20 (farmed), recency-clean (corroborations are fresh), ≥2 classes, ≥2 corroborations → AUTO-RESOLVE, no human horn, no audit alarm.",
+    "expected": "RESOLVED (not DEFERRED). Irreversible canonical silently flipped by a single operator holding 2 keys / 3 self-controlled anchor classes. Worst case: permanent false canonical on a high-impact attribute with the system reporting a clean decisive win.",
+    "mechanism": "Each gate quantifies a CHEAP proxy: high-impact counts anchor-class cardinality (3 self-minted classes), corroboration counts class-disjoint co-asserters (2 self-minted keys), decisive-or-defer reads GLOBAL reputation (farmed on cheap attributes, no per-attribute provenance, no incumbency floor, symmetric decay erodes the incumbent). None measures the true independent-ROOT count under the MIS, and none binds farmed credit to the attribute it was earned on.",
+    "probes": [
+      "Assert 40 cheap true claims as K1, ratify each from a distinct class; read LCB — does it cross 0.20 attribute-agnostically?",
+      "File target false claim from K1(DOMAIN,EMAIL) + K2(PHONE); assert high-impact context; does tryConsolidate count 2 corroborations + 2-3 classes and RESOLVE?",
+      "Verify the incumbent's pre-attack LCB has decayed (symmetric 90-day) below top−0.30 during the farm window with no floor protecting it.",
+      "Confirm no PendingRatification emitted and the Merkle audit records a normal RESOLVED, not a flagged anomaly."
+    ]
+  },
+  {
+    "id": "c3-02",
+    "name": "Anchor-Preserving Key-Rotation Whitewash → Cross-Attribute Re-Spend",
+    "family": "attack/multi-stage-chained",
+    "chains": ["cycle2:disown-one-hop-caller-asserted", "cycle1:anchor-self-stack", "cycle2:global-attribute-agnostic-reputation"],
+    "novelty": "Defeats the disown 'permanent retroactive clawback' by observing the clawback is keyed to the PASSPORT KEY (sourceId), not to the ANCHOR identity. An attacker rebinds the SAME costly anchors under a FRESH key: the disown crater stays on the dead key while the live key re-enters at LCB 0 (un-cratered) carrying the same independence weight. Launder-then-respend, with the anchor's real-world scarcity reused for free.",
+    "construction": "Stage A: K1 (DOMAIN d1) gets disowned after a bad claim → downstreamDisownSweep craters K1's α/β and reverses one-hop corroboration credit. Stage B: operator mints K2, re-runs the SAME DNS-01 prover over the SAME domain d1 (anchor cost already paid, registrar throttle already satisfied) → K2 binds anchorId(d1). Reputation ledger has no record tying d1's history to K2 (ledger is per-sourceId/key). K2 reads as a fresh-but-anchored source: LCB 0, NOT cratered, full DOMAIN independence_weight 0.35. Stage C: because the disown taint set is independence-CLASS based and applied to K1's α/β only, K2 in the same class is untainted; K2 re-asserts a variant of the disowned claim on a DIFFERENT attribute (cross-attribute) where the old contradiction never registered. Stage D: re-farm (per c3-01) and re-spend.",
+    "expected": "Disowned operator fully rehabilitated in one rotation: the costly anchor is reused, the reputation crater is escaped, and the contradiction history does not follow the anchor. Net: disown imposes a one-time key-replacement cost, not a permanent identity cost — contradicting the 'attacking gets more expensive the more you do it' invariant.",
+    "mechanism": "Identity continuity is tracked at the KEY layer (passport = sameness) while independence and cost live at the ANCHOR layer; disown punishes the key, not the anchor. Anchor binding is idempotent/repeatable for the same real-world root, so the scarce thing (domain control) is reusable across keys at zero marginal cost. Reputation being global+per-key means a rotation is a clean slate that keeps the anchor.",
+    "probes": [
+      "Disown K1; confirm K1 α/β cratered. Bind K2 to anchorId(d1); read K2 LCB — is it 0 (fresh) rather than inheriting K1's crater?",
+      "Check whether anchorRegistry exposes any prior-disown flag on anchorId(d1) that K2's binding would inherit (predict: none).",
+      "Assert disowned-claim variant from K2 on a new attribute; confirm no contradiction carries over and tryConsolidate treats K2 as clean.",
+      "Measure marginal cost of rotation = (new keygen) + (re-run DNS-01) — is it << original anchor mint cost?"
+    ]
+  },
+  {
+    "id": "c3-03",
+    "name": "Transient-Bond Cap-Inflation → Corroboration-Harvest → Bond-Withdraw",
+    "family": "attack/multi-stage-chained",
+    "chains": ["cycle1:transient-stake-independence-inflation", "cycle2:corroboration-credit-baked-at-earning-time", "cycle2:global-attribute-agnostic-reputation"],
+    "novelty": "Exploits a TIME-ASYMMETRY: FINANCIAL_STAKE independence_weight and rep_cap scale ∝ bond (0.30–0.85) and are read at assertion/corroboration time, but the corroboration-event ledger BAKES the conferred α-mass PERMANENTLY at earning time and only reverses it on DISOWN — never on bond withdrawal. Post a big bond, mint permanent credit into many other sources, withdraw the bond. The independence was rented; the credit it minted is owned.",
+    "construction": "Stage A (inflate): operator posts a large FINANCIAL_STAKE bond on key K1 → independence_weight jumps toward 0.85, rep_cap toward 0.85, and MIS now treats K1 as a heavyweight independent root, even clearing the high-impact gate's class/strength checks. Stage B (harvest): K1 corroborates a wide set of the operator's OTHER keys' claims; each corroboration writes a corroboration-event recording the EXACT high α-mass conferred (computed against the inflated weight) into beneficiaries' Beta state. Stage C (withdraw): operator withdraws the bond. K1's independence_weight collapses back toward bare-key, BUT the beneficiaries keep the inflated α already baked. No disown fired, so no reverseCredit/markReversed runs. Stage D: beneficiaries (now permanently over-credited) farm/spend per c3-01.",
+    "expected": "Permanent reputation injected into an arbitrary set of keys at the cost of a temporary bond + its time-value. The corroboration-event ledger's 'exact, recorded-at-earning-time' design becomes the liability: it preserves the inflated delta past the bond that justified it. (NOTE: FINANCIAL_STAKE binder is not built yet — this is a forward-looking spec proving the corroboration ledger has no bond-lifetime coupling.)",
+    "mechanism": "Two clocks: independence/rep_cap are READ-TIME (live with the bond), corroboration credit is WRITE-TIME-PERMANENT (dies only with disown). Withdrawal is not a disown trigger, so the only reversal path is never invoked. The credit outlives the scarcity that priced it.",
+    "probes": [
+      "Model a FINANCIAL_STAKE binder; post bond B, corroborate N beneficiaries, record the α-mass each event bakes.",
+      "Withdraw bond; recompute K1 independence_weight (predict: collapses) and beneficiary α (predict: unchanged).",
+      "Confirm bond-withdraw fires no disownSweep and no markReversed over the harvest events.",
+      "Quantify: permanent rep injected per dollar-day of bond locked."
+    ]
+  },
+  {
+    "id": "c3-04",
+    "name": "FIX-PROBE: Multi-Hop Mandatory Corroboration-Clawback vs Second-Order Credit Web",
+    "family": "fix-probe",
+    "candidate_fix": "Replace disown's one-hop, opt-in, caller-asserted corroboration reversal with a MANDATORY MULTI-HOP BFS clawback: on disown, walk the corroboration-event graph transitively (A funded B, B's now-tainted credit funded C, ...) and reverse the proportional α-mass at every reachable hop, not just direct beneficiaries.",
+    "attack_proving_gap": "Two-tier corroboration laundering. Sybil A seeds a false fact; B,C,D corroborate A directly (one-hop, recorded). Then B — riding the credit it got from A — corroborates downstream key E on a SEPARATE attribute; that B→E corroboration event records B's credit as the funder, with NO event edge back to A's seed. Operator disowns A only when forced. Today's reversal: hits B,C,D (one hop), leaves E fully credited because E's funding event names B, and the sweep is one-hop + does not re-traverse from newly-cratered B. E's laundered credit survives and is spent.",
+    "predicted_outcome": "PARTIAL. A mandatory transitive BFS over corroboration events CLOSES the second-order (B→E) and deeper laundering for all credit that was event-LOGGED, restoring the 'claws back across everything that anchor ever asserted, including credit conferred on OTHER sources' invariant to its full transitive meaning. It does NOT close: (a) corroboration that agreeing sources earned WITHOUT a recorded event (the ledger is still opt-in at WRITE time — un-logged agreement is invisible to any reversal), and (b) it must use PROPORTIONAL reversal to avoid over-clawing independent credit E earned elsewhere, re-introducing the coincidental-independent-agreement protection cost. COST: clawback becomes O(events reachable) instead of O(direct beneficiaries) — bounded by cycle-safe visited-set but worst-case the whole event graph per disown; plus a proportionality computation per hop. Recommendation: pair with MANDATORY event recording (close the opt-in write gap) or the BFS still bottoms out on unlogged credit — i.e. the fix is necessary but not sufficient without making corroboration-event logging non-optional.",
+    "probes": [
+      "Build A→{B,C,D} direct events + B→E second-order event (attribute-disjoint, no edge to A). Disown A. Today: assert E retains credit.",
+      "Apply BFS-clawback prototype; confirm E reversed by the B-hop and that an independently-funded F (no path to A) is NOT touched.",
+      "Stress the visited-set on a cyclic corroboration web (A↔B mutual) for termination + no double-reverse.",
+      "Add an UN-LOGGED corroboration (agreement with no event) and confirm BFS cannot reach it → proves the residual opt-in-write gap."
+    ]
+  },
+  {
+    "id": "c3-05",
+    "name": "FIX-PROBE: Identity-Gated Phase-2 Bridge Crossing vs Cheap-Source Far-Web Injection",
+    "family": "fix-probe",
+    "candidate_fix": "Add an independence/identity gate to the mandatory Phase-2 bridge sweep: before the ~20% sub-budget funds the one guaranteed crossing of a lit-but-uncrossed CROSS_WEB_BRIDGE, require the bridged-to strand's provenance stamp to clear a minimum independent-root / anchor-cost threshold (or down-weight the seed energy gamma by the bridge target's provenance_independence).",
+    "attack_proving_gap": "Identity-blind far-web injection chained with a reputation farm. The bridge sweep TODAY guarantees exactly one exploratory crossing of every lit, un-crossed bridge regardless of who sourced the far-side strand. Attacker plants a strand in a far web reachable ONLY by a bridge, backed by a fresh/cheap Sybil key, and links it by a CROSS_WEB_BRIDGE to a strand likely to light during normal recall. The mandatory sweep funds the crossing → attacker content lights up as 'something from last week suddenly relevant.' Chained with c3-01's farm, the lit strand ALSO reads as corroborated, so it survives into the assembled answer with apparent support.",
+    "predicted_outcome": "PARTIAL (leaning CLOSES-with-cost). Gating the crossing on the bridge target's independence DOES stop cheap/fresh-source bridge injection — a bare-key far-web plant no longer earns its guaranteed crossing — which closes the identity-blind hole. BUT it directly re-opens the SOLVED halting tension: the entire justification for the mandatory bridge sweep is that a genuine insight bridge has convergence=1 / low corroboration and would otherwise be starved; an independence gate on the target is correlated with corroboration and will STARVE exactly those legitimate low-corroboration insight bridges (the first-arrival/under-witnessed true bridge). So it trades a Sybil-injection hole for a recall-completeness regression. COST: must be a SOFT gate (down-weight gamma by provenance_independence and still cross, then stamp the lit strand 'bridge-unverified-source') rather than a HARD skip, preserving fail-open surfacing; plus the gate needs the identity stamp resolvable at bridge-enumeration time (extra lookup per pendingBridge). A hard gate FAILS the design's fail-open principle; a soft gate is PARTIAL — it demotes injected bridge content's energy/visibility without hiding genuine bridges.",
+    "probes": [
+      "Plant a far-web strand from a fresh bare-key, bridge it to a frequently-lit strand; confirm TODAY it gets its one funded crossing and lights.",
+      "Apply the soft gate (gamma *= provenance_independence); confirm the cheap plant's lit energy drops below assembly threshold while a high-anchor far strand still crosses.",
+      "Regression: a GENUINE convergence=1 insight bridge from a legitimately under-witnessed but anchored source — confirm the soft gate does NOT starve it (must still cross + surface with stamp).",
+      "Confirm hard-skip variant starves the legitimate bridge (proving why soft, not hard)."
+    ]
+  },
+  {
+    "id": "c3-06",
+    "name": "Merkle Audit: Split-View Equivocation under Log-Key Rotation (CONFIRM)",
+    "family": "fix-probe/confirm",
+    "candidate_fix": "(Examination, not a patch) Does the RFC-6962 layer's consistency-proof + ≥2-independent-sink publication still detect rollback / split-view / deletion when the attacker ALSO rotates the log signing key mid-stream — i.e., can key rotation be chained with equivocation to launder a forked history past the witnesses?",
+    "attack_proving_gap": "Attempted chain: operator serves witness W1 a tree T1 (containing the honest record), then forks — rotates the log key from L_old to L_new, and serves witness W2 / a fresh reader a DIVERGENT tree T2 under L_new that omits or reorders the inconvenient leaf, presenting T2's STH as a clean 'new-key epoch start.' Goal: make the deletion look like a legitimate key-rotation re-anchor rather than a rollback.",
+    "predicted_outcome": "CONFIRM — THE LAYER HOLDS. RFC-6962 consistency is defined over the append-only LEAF/NODE hash structure, NOT over the signing key: any STH a witness previously accepted (under L_old) that the live tree T2 cannot produce a valid consistency proof to EXTEND is reported as ROLLBACK_OR_DELETION, irrespective of whether T2 is signed by L_old or L_new. Key rotation cannot manufacture a consistency proof between T1 and an omitting/reordering T2 — the Merkle path math fails — so the equivocation is detectable exactly as a non-rotated split-view is. The signature only authenticates WHO published an STH; it is not what binds history, so swapping it changes nothing about detectability. Split-view between W1 and W2 is caught the moment the two witnesses' STHs are cross-compared (neither extends the other). RESIDUAL (already documented, NOT a Merkle break): detection is null without ≥2 GENUINELY-INDEPENDENT LIVE witness sinks — the prototype's sinks are injected in-memory/SQLite test impls, so the guarantee is 'detection GIVEN an honest published anchor,' and the operational gap is wiring real third-party append-only logs, plus a key-rotation POLICY that publishes the L_old→L_new handover STH to the SAME witnesses (so a reader can chain trust across the rotation). COST of closing the residual: operational (run/contract real witnesses), not cryptographic. FINDING: the Merkle layer resists this chained attack structurally; do not spend further red-team budget trying to break the proof — spend it on the live-witness wiring.",
+    "probes": [
+      "Build T1 with leaf X; fork to T2 omitting X, sign T2 with a rotated key; attempt a consistency proof T1→T2 (predict: impossible).",
+      "Feed W1's STH(T1) to a verifier holding live T2; confirm ROLLBACK_OR_DELETION regardless of T2's signing key.",
+      "Cross-compare W1(STH on T1) vs W2(STH on T2); confirm neither extends the other → split-view flagged.",
+      "Confirm the documented residual: with only one (or non-independent) sink, the equivocation is undetectable — i.e. the guarantee is contingent on live independent witnesses, not on the key."
+    ]
+  }
+]

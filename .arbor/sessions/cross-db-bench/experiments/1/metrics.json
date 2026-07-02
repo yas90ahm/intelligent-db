@@ -1,0 +1,93 @@
+{
+  "config": {
+    "N": 5000,
+    "RECALLS": 250,
+    "H": 3,
+    "A_VALUES": [
+      5,
+      50,
+      200
+    ],
+    "TRIALS_PER_A": 8,
+    "node": "v24.16.0",
+    "platform": "win32"
+  },
+  "adapters": [
+    {
+      "name": "node:sqlite (builtin)",
+      "write_hz": 1062541.1734704769,
+      "recall_ms": 0.005699999999990268,
+      "poison_correct_rate": 0,
+      "bytes_per_fact": 69.1792,
+      "footprint_bytes": 345896,
+      "footprint_source": "on-disk file",
+      "poison_trials": 24,
+      "poison_correct": 0
+    },
+    {
+      "name": "better-sqlite3",
+      "write_hz": 845551.5532782126,
+      "recall_ms": 0.005299999999920146,
+      "poison_correct_rate": 0,
+      "bytes_per_fact": 69.1792,
+      "footprint_bytes": 345896,
+      "footprint_source": "on-disk file",
+      "poison_trials": 24,
+      "poison_correct": 0
+    },
+    {
+      "name": "lmdb",
+      "write_hz": 9146.571800863034,
+      "recall_ms": 0.004599999999982174,
+      "poison_correct_rate": 0,
+      "bytes_per_fact": 52.4288,
+      "footprint_bytes": 262144,
+      "footprint_source": "on-disk file",
+      "poison_trials": 24,
+      "poison_correct": 0
+    },
+    {
+      "name": "duckdb (@duckdb/node-api)",
+      "write_hz": 92690.77615548355,
+      "recall_ms": 0.8632000000000062,
+      "poison_correct_rate": 0,
+      "bytes_per_fact": 107.3152,
+      "footprint_bytes": 536576,
+      "footprint_source": "on-disk file",
+      "poison_trials": 24,
+      "poison_correct": 0
+    },
+    {
+      "name": "vector-bruteforce (in-proc)",
+      "write_hz": 7905138.339918902,
+      "recall_ms": 0.4537000000000262,
+      "poison_correct_rate": 0,
+      "bytes_per_fact": 269.78,
+      "footprint_bytes": 1348900,
+      "footprint_source": "in-memory estimate",
+      "poison_trials": 24,
+      "poison_correct": 0
+    },
+    {
+      "name": "IntelligentDB (engine)",
+      "write_hz": 306006.91575629526,
+      "recall_ms": 0.0030999999999039574,
+      "poison_correct_rate": 1,
+      "bytes_per_fact": 1445.4256,
+      "footprint_bytes": 7227128,
+      "footprint_source": "heap delta",
+      "poison_trials": 24,
+      "poison_correct": 24
+    }
+  ],
+  "skipped": [
+    {
+      "name": "hnswlib-node",
+      "reason": "No prebuilt binary for win32-x64 / Node 24; npm install falls back to `node-gyp rebuild`, which needs an MSVC toolchain (absent on this box) — the native module never built (Cannot find module 'hnswlib-node')."
+    },
+    {
+      "name": "faiss-node",
+      "reason": "Not attempted by directive (requires MSVC to build) — would fail identically to hnswlib-node."
+    }
+  ]
+}

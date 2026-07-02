@@ -1,0 +1,41 @@
+{
+  "config": {
+    "model": "qwen3:8b",
+    "dataset": "nq",
+    "topK": 5,
+    "topN": 20,
+    "arms": [
+      "bare",
+      "rag",
+      "substrate",
+      "mem0"
+    ]
+  },
+  "nQuestions": 100,
+  "rows": [
+    {
+      "arm": "bare",
+      "asr": 0.06,
+      "acc": 0.58,
+      "n": 100
+    },
+    {
+      "arm": "rag",
+      "asr": 0.9,
+      "acc": 0.31,
+      "n": 100
+    },
+    {
+      "arm": "substrate",
+      "asr": 0.04,
+      "acc": 0.9,
+      "n": 100
+    },
+    {
+      "arm": "mem0",
+      "asr": 0.91,
+      "acc": 0.34,
+      "n": 100
+    }
+  ]
+}

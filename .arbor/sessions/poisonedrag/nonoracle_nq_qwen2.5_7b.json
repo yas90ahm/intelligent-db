@@ -1,0 +1,63 @@
+{
+  "config": {
+    "model": "qwen2.5:7b",
+    "dataset": "nq",
+    "topK": 5,
+    "topN": 20,
+    "arms": [
+      "bare",
+      "rag",
+      "substrate",
+      "substrate-nonoracle",
+      "substrate-nonoracle-exclude"
+    ],
+    "nonOracle": true
+  },
+  "nQuestions": 100,
+  "rows": [
+    {
+      "arm": "bare",
+      "asr": 0.04,
+      "acc": 0.5,
+      "n": 100
+    },
+    {
+      "arm": "rag",
+      "asr": 0.93,
+      "acc": 0.21,
+      "n": 100
+    },
+    {
+      "arm": "substrate",
+      "asr": 0.06,
+      "acc": 0.86,
+      "n": 100
+    },
+    {
+      "arm": "substrate-nonoracle",
+      "asr": 0.69,
+      "acc": 0.47,
+      "n": 100
+    },
+    {
+      "arm": "substrate-nonoracle-exclude",
+      "asr": 0.17,
+      "acc": 0.74,
+      "n": 100
+    }
+  ],
+  "collapse": {
+    "collapsedIsPoison": 381,
+    "collapsedIsGold": 20,
+    "collapsedTotal": 412,
+    "queries": 100,
+    "purity": 0.9247572815533981
+  },
+  "exclude": {
+    "collapsedIsPoison": 480,
+    "collapsedIsGold": 24,
+    "collapsedTotal": 518,
+    "queries": 100,
+    "purity": 0.9266409266409267
+  }
+}
