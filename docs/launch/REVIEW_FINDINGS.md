@@ -1,10 +1,8 @@
-# The Honest Record — every disclosed defect, who caught it, and what changed
+# Review Findings — every disclosed defect, who caught it, and what changed
 
-This project's security thesis is "priced, not prevented" — and the same standard is
-applied to its own defects. Bugs are not quietly fixed and forgotten; each one is recorded
-with who caught it, what changed, and the regression test that would catch its return. The
-table below is that record, in rough chronological order, with every row sourced from the
-document that first disclosed it.
+Every adversarial review this project has commissioned is recorded here: each finding, its
+fix, and the regression test that would catch its return. The table is in rough
+chronological order, with every row sourced from the document that first reported it.
 
 | What could have gone wrong | Who caught it | What changed | Where it's proven |
 |---|---|---|---|
@@ -17,16 +15,12 @@ document that first disclosed it.
 | **`description_value` hardcoded to 0**: the `LOW_UNIQUE_VALUE` below-COLD eviction gate was dead weight — it permitted eviction regardless of a strand's actual uniqueness. | External launch code review (`CODE_REVIEW_TRAVERSAL_FORGETTING_STORE.md`). | A real, zero-dependency order-0 Shannon-entropy estimate is now computed over the fact's payload at write time (documented as a heuristic with a named residual, not oversold). | [`BUGFIX_REPORT.md`](./BUGFIX_REPORT.md) Bug C; two regression tests in `src/__tests__/smoke.test.ts` (unique payload denied eviction; duplicate payload permitted) |
 | **MCP boundary softness**: recalled facts crossed the tool boundary without their belief-state labels, and untrusted fact text could forge the structure of a reviewer's approval message. | Phase-4 adversarial review of the dispute horn. | Recall rendering now labels non-LIVE states (`[DEMOTED]` / `[PROVISIONAL]`), and both renderers escape control characters + quote-delimit untrusted payload text. | [`REBUILD_SUMMARY.md`](./REBUILD_SUMMARY.md) §3; injection-resistance cases in `src/__tests__/disputeHorn.test.ts` (see `CLAUDE.md`, Phase 4) |
 | **Two-step-relay review-queue gap**: the consulted-but-uncited influence review queue looked exactly one hop deep, so an A→c1→b1 relay escaped human review — a standing red-team breach. | Phase-5 red-team triage. | The queue is now a transitive backward BFS over consulted-strand edges (cycle-safe, deterministic — and still human-review-only; it never auto-punishes). BREACHED → DEFENDED. | [`REBUILD_SUMMARY.md`](./REBUILD_SUMMARY.md) §3; [`docs/ARCHITECTURE_BENCHMARKS.md`](../ARCHITECTURE_BENCHMARKS.md) §10.2 Bucket B; regression in `src/ratification/disownHardening.test.ts` |
-| **Subdomain-seam bookkeeping error**: a red-team attack kept scoring as a breach because the *test harness* modeled a no-PSL system that no longer exists — the shipped code already collapses subdomains to eTLD+1. | Phase-5 independent external audit — of the benchmark, not the code. | The spec was corrected to attack the real shipped Public Suffix List resolver (so it regresses to BREACHED if the PSL is ever unwired). Reclassified honestly as a harness artifact — **not** counted as a new defense. | [`REBUILD_SUMMARY.md`](./REBUILD_SUMMARY.md) §3; `ARCHITECTURE_BENCHMARKS.md` §10.2 Bucket B; regression in `src/identity/binders/publicSuffix.bothDirections.test.ts` |
+| **Subdomain-seam bookkeeping error**: a red-team attack kept scoring as a breach because the *test harness* modeled a no-PSL system that no longer exists — the shipped code already collapses subdomains to eTLD+1. | Phase-5 independent external audit — of the benchmark, not the code. | The spec was corrected to attack the real shipped Public Suffix List resolver (so it regresses to BREACHED if the PSL is ever unwired). Reclassified as a harness artifact — **not** counted as a new defense. | [`REBUILD_SUMMARY.md`](./REBUILD_SUMMARY.md) §3; `ARCHITECTURE_BENCHMARKS.md` §10.2 Bucket B; regression in `src/identity/binders/publicSuffix.bothDirections.test.ts` |
 
-## Why keep this table
+## Why this log exists
 
-Three of these rows were found in code this project's own documentation had already
-described as "adversarially verified." CLAUDE.md's gap list states the lesson verbatim:
-
-> Worth stating plainly: these three were real, exploitable gaps in code this document
-> previously described as "adversarially verified" and "CRITICAL: none remain." That claim
-> should be read as *strong, not exhaustive* — a second independent review found what the
-> first one's own test suite didn't cover. Nothing here changes the "none remain" CRITICAL
-> verdict going forward (all three are now fixed and tested), but the discovery process
-> itself is part of the honest record.
+Three of these findings were in code an earlier review pass had already cleared — a second
+independent review found what the first one's test suite didn't cover. That is the expected
+behavior of layered review, and it is why verification claims in this project are stated as
+*strong, not exhaustive*: each review pass raises confidence; none is treated as final. All
+findings above are fixed and regression-tested.

@@ -7,7 +7,7 @@
 > (the Source-Identity Layer). See `CLAUDE.md` and `docs/ARCHITECTURE_ENGINE.md` for the
 > full current design (the crypto-era design is preserved at `docs/history/ARCHITECTURE.md`).
 > This document describes who that design is for and why, grounded in what is actually
-> implemented today (see `CLAUDE.md`'s "Status" and "HONEST GAP LIST" — this is a
+> implemented today (see `CLAUDE.md`'s "Status" and "KNOWN LIMITATIONS" — this is a
 > **single-process prototype**; claims below are scoped accordingly, and each persona
 > section notes the current-prototype caveats that matter to it).
 
@@ -173,7 +173,7 @@ concurrent writer rather than coordinating with it).
 
 *Every capability claim above is grounded in `CLAUDE.md` (canonical status + design) and
 `docs/ARCHITECTURE_ENGINE.md` (the current engine architecture, with file/line citations);
-most caveats are drawn from `CLAUDE.md`'s "HONEST GAP LIST." The launch code review's two
+most caveats are drawn from `CLAUDE.md`'s "KNOWN LIMITATIONS." The launch code review's two
 findings an earlier draft cited as open (persona 2 and persona 3) are fixed and
 regression-tested — `docs/launch/BUGFIX_REPORT.md` is the closing record. No benchmark
 numbers appear in this document; for those, with correct historical and oracle-conditional

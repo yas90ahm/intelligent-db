@@ -136,7 +136,7 @@ $env:REASON_POISON="0.5"   # then run as normal
 
 > Faithful limit (matches the project's hard theorem): ID catches **contradictions/identity**,
 > not arbitrary *novel* plausible falsehoods. Poison with no legit twin to contradict is out of
-> scope for this variant by design — that's the honest boundary of what the layer can defend.
+> scope for this variant by design — that's the designed boundary of what the layer can defend.
 
 ## Scale / time
 
@@ -167,5 +167,5 @@ $env:REASON_POISON="0.5"   # then run as normal
 - `substrate` Δ **> 0** consistently → ID memory makes the model better (thesis supported).
 - `substrate` ≈ `rag` ≈ `hybrid` → memory helps, but not ID-specifically (any retrieval does).
 - All arms ≈ `bare` → on these self-contained problems, studied exemplars don't move the
-  needle (an honest null — these benchmarks reward raw reasoning, not recall). ID's designed
+  needle (a true null — these benchmarks reward raw reasoning, not recall). ID's designed
   edge (resisting *poisoned/contradictory* memory) isn't exercised by clean benchmarks.

@@ -22,7 +22,7 @@ Standard [SemVer 2.0.0](https://semver.org/) applies to the published package
 - **`0.x.y` (current and initial public phase): no stability guarantee, by SemVer's own
   rules.** A `0.x` minor bump (`0.1.0` → `0.2.0`) MAY contain breaking API changes.
   This is not a loophole to abuse — see "What can break pre-1.0" below — but it is the
-  honest state given the project's own **GAP LIST** (CLAUDE.md): cross-process
+  state given the project's own **GAP LIST** (CLAUDE.md): cross-process
   concurrency, real external anchor/witness services, encryption-at-rest, and the
   HARDWARE/KYC/STAKE binders are explicitly unbuilt. Advertising `1.0.0` while those gaps
   are open would misrepresent stability the project doesn't have.
@@ -74,7 +74,7 @@ description of something already done):
    findings across `identity/`, `ratification/`, and `traversal/`/`forgetting/`/`api.ts` —
    see the semver policy note above for two examples). Each finding should be either
    fixed, or consciously accepted and added to CLAUDE.md's gap list so `0.1.0` ships with
-   an honest, current gap list rather than a stale "none remain" claim.
+   a current gap list rather than a stale "none remain" claim.
 2. **Flip `private: true` → remove it (or set `false`)** in `package.json` — required
    before `npm publish` will do anything but refuse.
 3. **Bump `version` to `0.1.0`** (not `1.0.0` — see semver policy above) in
@@ -84,7 +84,7 @@ description of something already done):
    what `npm install -g` / `npx` would expose.
 5. **Add a `CHANGELOG.md`** (see policy below) with an initial `0.1.0` entry summarizing
    what ships (the four pillars, per CLAUDE.md's status section) and linking the GAP LIST
-   for honesty about what doesn't.
+   for accuracy about what doesn't.
 6. **Push to a real remote and tag the release** (`git tag v0.1.0`) once a remote exists —
    none is configured in this local repo today.
 7. **`npm publish`** (public, since there's no indication this should be a private/scoped

@@ -3,7 +3,7 @@
 Thanks for your interest in Intelligent DB — a memory substrate for AI agents built on
 spreading activation over a provenance graph, not nearest-neighbor vector search. Before
 diving into code, please read [CLAUDE.md](./CLAUDE.md); it is the canonical design and
-status document (architecture, the four implemented pillars, and the honest gap list) and
+status document (architecture, the four implemented pillars, and the known-limitations list) and
 everything below assumes you've skimmed it. For the current roadmap built on that gap
 list, see `docs/product/ROADMAP.md`.
 
@@ -67,7 +67,7 @@ This codebase has an explicit, hard-won ethos — please write to it, not around
 
 - **No loud `TODO` stubs land on `main`.** CLAUDE.md's history is blunt about this: "The
   'loud `TODO(crack-A/B)` stub' era is over." If a piece of behavior isn't implemented,
-  either implement it, or explicitly scope it out in the code and in the honest gap list —
+  either implement it, or explicitly scope it out in the code and in the known-limitations list —
   never leave a silently-incomplete stub pretending to be done. A partial implementation
   with a clearly labeled limitation is fine; a `// TODO: fix this later` guarding a real
   correctness gap is not mergeable.

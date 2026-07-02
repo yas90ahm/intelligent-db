@@ -3,7 +3,7 @@
 > Status note: Intelligent DB is a production-grade **single-process prototype** (TypeScript,
 > Node ≥20, zero runtime dependencies). It is not a hosted product or a managed service. This
 > document positions the project as it exists in this repository today; see
-> [`../../CLAUDE.md`](../../CLAUDE.md) for the full design and the honest gap list, and
+> [`../../CLAUDE.md`](../../CLAUDE.md) for the full design and the known-limitations list, and
 > [`../ARCHITECTURE_BENCHMARKS.md`](../ARCHITECTURE_BENCHMARKS.md) for the measured evidence
 > behind every benchmark claim referenced below.
 
@@ -67,7 +67,7 @@ and can't afford silent poisoning of that memory:
 
 Not (yet) the right fit for: teams that need a hosted/managed multi-tenant service, encryption
 at rest, cross-process concurrent writers, or fuzzy semantic search as the primary retrieval
-mode (see "What this is not," below, and the honest gap list in `CLAUDE.md`).
+mode (see "What this is not," below, and the known-limitations list in `CLAUDE.md`).
 
 ## Key differentiators
 
@@ -107,7 +107,7 @@ mode (see "What this is not," below, and the honest gap list in `CLAUDE.md`).
 7. **Empirically validated, not just argued.** A benchmark suite (FactWorld, a faithful
    PoisonedRAG reproduction on NQ/HotpotQA/MS-MARCO, a label-free "non-oracle" structural
    defense, and a disclosed failure-mode boundary) measures the claim instead of asserting it —
-   see the Comparison doc and `docs/ARCHITECTURE_BENCHMARKS.md` for the numbers and the honest
+   see the Comparison doc and `docs/ARCHITECTURE_BENCHMARKS.md` for the numbers and the
    caveats attached to each.
 8. **Zero runtime dependencies.** The engine itself (`dependencies: {}`) ships on Node
    built-ins only; SQLite/WAL persistence with atomic compound writes. The heavy packages in
@@ -122,8 +122,8 @@ mode (see "What this is not," below, and the honest gap list in `CLAUDE.md`).
   It is a deliberate *inversion* of that architecture, built for a different failure mode.
 - Not Sybil-proof — it is Sybil-*priced*. A patient, well-funded attacker who buys genuinely
   distinct, disjoint real-world anchors (and reputation) can still eventually win; the project
-  states this residual honestly rather than claiming an impossible guarantee (see the
-  "costly-independent boundary" benchmark and the GAP LIST in `CLAUDE.md`).
+  states this residual explicitly rather than claiming an impossible guarantee (see the
+  "costly-independent boundary" benchmark and KNOWN LIMITATIONS in `CLAUDE.md`).
 - Not yet a multi-process / multi-tenant service: single-process SQLite/WAL is the current
   durability model; no encryption-at-rest, and the access-segregated destination for audit
   shipping/checkpoints (a SIEM, an append-only account) is a deployment decision, not shipped

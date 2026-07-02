@@ -87,7 +87,7 @@ CLAUDE.md's "hard theorem" section), please treat as in-scope anything that:
   injection-style query construction — though the store uses parameterized queries by
   design).
 
-Explicitly **out of scope for this pre-1.0 prototype** (see CLAUDE.md's honest gap list —
+Explicitly **out of scope for this pre-1.0 prototype** (see CLAUDE.md's KNOWN LIMITATIONS —
 these are known, documented trade-offs rather than hidden gaps):
 
 - **Asserted attribution.** `signerSourceId` on audit records — and source identity

@@ -82,7 +82,7 @@ zero ground-truth labels touched in the decision path):
 | HotpotQA | 99 / 97 | **23 / 22** | 18 / 15 |
 | MS-MARCO | 93 / 94 | **22 / 22** | 7 / 8 |
 
-The honest two-tier claim (per `ARCHITECTURE_BENCHMARKS.md §1.7, §2.2`): structural
+The precise two-tier claim (per `ARCHITECTURE_BENCHMARKS.md §1.7, §2.2`): structural
 near-duplicate detection alone — no identity oracle — already cuts ASR from 93–99% down to
 14–23%; the external Source-Identity Layer closes most of the remaining gap. Both numbers are
 reported here deliberately, rather than only the more favorable oracle figure.
@@ -99,7 +99,7 @@ to *pay for*, and reports the no-LLM ASR proxy read directly from post-adjudicat
 | L=2 (matches the truth's independence depth) | 50% (contaminates — defers, survives alongside truth) | 50% |
 | L≥3 (out-depths and out-earns the truth) | rising | 100% (full capture) |
 
-This is presented in the project's own docs as the honest boundary of "priced, not
+This is presented in the project's own docs as the disclosed boundary of "priced, not
 prevented": an attacker who genuinely buys enough independent, disjoint real-world anchors —
 and enough earned reputation — eventually wins, exactly as the design's threat model states.
 A flat vector DB / RAG arm has no such floor at all: it is at the undefended ASR ceiling

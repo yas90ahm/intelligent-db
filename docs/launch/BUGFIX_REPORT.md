@@ -161,7 +161,7 @@ unrelated to the three fixes), `src/api.ts`, `src/identity/index.ts`, and three 
 
 ## 5. Note on CLAUDE.md
 
-This pass did **not** edit `CLAUDE.md`. Its "HONEST GAP LIST" and status/pillar
+This pass did **not** edit `CLAUDE.md`. Its "KNOWN LIMITATIONS" (then titled "HONEST GAP LIST") and status/pillar
 descriptions still describe the pre-fix state of `ratify()` atomicity, RC-5
 independence fail-open/closed behavior, and `description_value`; the maintainer should
 manually review and update those sections to reflect the three fixes above.

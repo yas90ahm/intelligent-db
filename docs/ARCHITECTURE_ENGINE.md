@@ -572,7 +572,7 @@ Runs as ONE atomic transaction (`withSweepTxn` `:380-393`):
    drops below the decisive threshold once tainted contributors are removed transitions
    back to PENDING (`REOPENED_BY_DISOWN`).
 
-`CORROBORATION_CREDIT_SUBSTRATE_SPEC` (`:301-309`) documents the honest boundary:
+`CORROBORATION_CREDIT_SUBSTRATE_SPEC` (`:301-309`) documents the boundary:
 reversal is BOUNDED (exact over the recorded DERIVATION + corroboration closure);
 re-observation / uncited influence is a priced-not-prevented residual, reported
 SAFE-DEFER, not DEFENDED.

@@ -52,7 +52,7 @@ New top-level files (repo root):
 - `CODE_OF_CONDUCT.md` — Contributor Covenant v2.1, enforcement contact `1290yasir@gmail.com`.
 - `SECURITY.md` — pre-1.0 single-maintainer supported-version table, private reporting via
   GitHub Security Advisories or email, an in-scope/out-of-scope threat-model section
-  grounded in "identity is priced, not prevented" and CLAUDE.md's honest gap list.
+  grounded in "identity is priced, not prevented" and CLAUDE.md's known-limitations list.
 - `LICENSE` (Apache-2.0) and `NOTICE` (copyright "2026 Yasir") — **these already existed
   before this pass**; not newly added by it, listed here only for completeness of the root
   directory.
@@ -204,7 +204,7 @@ The analysis first establishes that `identity/anchors.ts` and `identity/reputati
 already mechanism-agnostic pure arithmetic (no crypto imports at all) and `identity/keys.ts`
 is where Ed25519 actually lives — contributing zero independence value on its own, making it
 the lowest-regret removal target. It then walks six concrete swaps, each scored on what it
-keeps / gives up / its new trust assumption / an honest verdict on whether crypto is
+keeps / gives up / its new trust assumption / a clear verdict on whether crypto is
 eliminated or merely relocated:
 
 - **(A)** OAuth/SSO passport, **(B)** symmetric bearer tokens — replace only the "sameness"

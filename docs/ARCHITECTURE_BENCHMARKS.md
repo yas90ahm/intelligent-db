@@ -7,7 +7,7 @@ benchmark families (FactWorld, PoisonedRAG, generalization, reasoning), the data
 the metrics + Wilson CIs, and exactly how to reproduce each run.
 
 Companion docs already in the tree (read alongside this one):
-- `src/__bench__/COVERAGE.md` — attack-vector coverage matrix + honest-scope notes.
+- `src/__bench__/COVERAGE.md` — attack-vector coverage matrix + scope notes.
 - `src/__bench__/FIDELITY.md` — parameter-by-parameter fidelity vs the published PoisonedRAG paper.
 - `src/__bench__/VERIFICATION.md` — four reviewer checks (CIs, spot-check, ablation, dual-metric).
 - `src/__bench__/reports/confidence_intervals.md` — the measured Wilson CI table.
@@ -23,7 +23,7 @@ witness overturn a planted false canonical AND stops two fake sources overturnin
 incumbent. The Source-Identity Layer answers this by measuring independence against **scarce
 external anchors**. The benchmark suite's job is to **empirically demonstrate that this
 substrate collapses retrieval/memory-poisoning attacks that undefended RAG and an external
-memory framework (mem0) fall to** — and, just as importantly, to **draw the honest boundary**
+memory framework (mem0) fall to** — and, just as importantly, to **draw the measured boundary**
 where the priced-not-prevented defense degrades once an attacker actually pays for real
 independent anchors. Every arm shares the same embeddings, questions, prompt, and reader LLM;
 the only variable is *how each arm adjudicates provenance*.
@@ -152,7 +152,7 @@ inside `if(stats)` measurement blocks, never in the drop decision
   oracle arm filtering the demoted poison, but *inferred* from structure).
 - **Result is a two-tier claim** (numbers in §2.2): structural detection alone cuts ASR
   93–99%→14–23%; the external identity layer (the oracle `substrate`) closes the residual gap
-  and restores accuracy. The middle result — not a suspicious 0% — is the honest signature of a
+  and restores accuracy. The middle result — not a suspicious 0% — is the expected signature of a
   real no-oracle defense.
 
 ---
@@ -227,7 +227,7 @@ the reply**; **acc = the correct answer is a substring** (`poisonedrag/runner.te
 mem0 96/98/92 ASR. RAG-vs-IDB ASR 95% CIs are **disjoint on every dataset** (§4).
 
 **Non-oracle result** (`nonOracleRunner.test.ts`, `[NONORACLE_BENCH]`, n=100/dataset). The full
-honest spectrum — from undefended, through label-free structural detection, to the oracle upper
+full spectrum — from undefended, through label-free structural detection, to the oracle upper
 bound — ASR (nq / hotpotqa / msmarco):
 
 | arm | qwen2.5:7b | qwen3:8b (thinking) |
@@ -263,7 +263,7 @@ questions, emitting KB + questions in the **exact schema the existing runner con
   `:229-237`). Guards skip a returned "incorrect" that equals the correct answer (`:214-218`).
 - gold = supporting-facts paragraphs (each its own class); poison = 5 sharing `cls:sybil:<qid>`;
   negatives = the non-supporting context paragraphs.
-- **Honesty caveat** (`FIDELITY.md §2-4`, `COVERAGE.md #2c`): this is PoisonedRAG-*style*
+- **Scope caveat** (`FIDELITY.md §2-4`, `COVERAGE.md #2c`): this is PoisonedRAG-*style*
   (self-generated, temp 0, no V=30-word cap, no L=50 regen loop, single-shot pad-to-5), a
   **scale/generalization** test, NOT the faithful reproduction. The cache materializes ~332
   question rows, so "n=1000" is aspirational vs what is built.
@@ -284,7 +284,7 @@ difference is that retrieval vectors are loaded from the precomputed `.f32` file
 (`:59-74`) instead of embedded with MiniLM. Question vectors are embedded before the `has_gold`
 filter, so they are re-aligned by original question id (`:127-138`).
 
-### 2.5 Generalization — the honest boundary + durability
+### 2.5 Generalization — the measured boundary + durability
 
 **Costly-independent boundary** (`generalization/costlyIndependent.*`). The deliberate exhibition
 of "priced, not prevented." Same structural world as FactWorld
@@ -338,7 +338,7 @@ contrast `bare` vs `substrate`, with `rag`/`hybrid`/`mem0` controls (`reasoning/
   (`reasoning/arms.ts:220-236`) — a poison source is not an independent witness. Two measures:
   model-independent **poison-recall rate** (validated rag ≈17–23%, mem0 ≈25%, **substrate = 0%**)
   and downstream accuracy.
-- **Honest limit** (matches the hard theorem): ID catches contradictions/identity, not arbitrary
+- **Known limit** (matches the hard theorem): ID catches contradictions/identity, not arbitrary
   *novel* plausible falsehoods with no legit twin to contradict — explicitly out of scope.
 
 ---
@@ -602,7 +602,7 @@ Reads the completed FactWorld + PoisonedRAG JSONs; writes
   never better (`COVERAGE.md`).
 - **The boundary is disclosed, not hidden.** The costly-independent curve is presented as a
   **failure mode** — ID's ASR rises monotonically to the undefended ceiling as the attacker pays
-  for real anchors + reputation. That is the central honesty of "priced, not prevented."
+  for real anchors + reputation. That is the core of "priced, not prevented."
 - **The oracle assumption is disclosed AND removed.** The headline `substrate` arm is
   oracle-conditional (trust partition from the label — §1.7). The `substrate-nonoracle` arm
   removes the oracle entirely (independence inferred from text structure, zero labels) and still
@@ -652,7 +652,7 @@ src/__bench__/
 │   └── qa/ollama.ts                 zero-dep local-LLM client (temp 0, fail-loud)
 ├── verification/wilsonCI.mjs        Wilson 95% CIs + RAG-vs-IDB overlap test
 ├── reports/confidence_intervals.md  measured CI table (NO OVERLAP on all 4 datasets)
-├── COVERAGE.md                      attack-vector coverage matrix + honesty notes
+├── COVERAGE.md                      attack-vector coverage matrix + scope notes
 ├── FIDELITY.md                      parameter-by-parameter PoisonedRAG fidelity
 └── VERIFICATION.md                  four reviewer checks
 ```
@@ -741,7 +741,7 @@ decomposes into three buckets:
      attack through the SHIPPED resolver (so it regresses to BREACHED if the PSL is ever
      unwired) and a default-suite regression case was added to
      `src/identity/binders/publicSuffix.bothDirections.test.ts`. This was a stale-harness
-     artifact reclassified honestly, not a defense added. BREACHED → DEFENDED.
+     artifact reclassified, not a defense added. BREACHED → DEFENDED.
 - **Bucket C — documented residuals (the 18 that remain).** Each maps to a named,
   deliberate boundary: **priced-not-prevented** (Confederate Launder, Transient Bond
   Cap-Inflation, Anchor-Preserving Key-Rotation, Dormancy Beta-Decay Wash,

@@ -7,8 +7,9 @@ AI agents fail two ways: they **forget** (context evaporates across sessions) an
 a zero-dependency TypeScript memory substrate built against both — and the poisoning-resistance
 claim is **measured, not argued**.
 
-The most unusual artifact in this repo isn't a benchmark — it's the paper trail of our own
-bugs: [The Honest Record](./docs/launch/HONEST_RECORD.md).
+Every security claim traces to a benchmark, a regression test, or a documented limitation —
+including the project's own review history: [Review Findings](./docs/launch/REVIEW_FINDINGS.md)
+records each adversarial-review finding, its fix, and the test that guards it.
 
 ## Measured results
 
@@ -113,11 +114,11 @@ The deletion was the upgrade.
 
 ## Project docs
 
-- [**CLAUDE.md**](./CLAUDE.md) — the canonical design + status document (full mechanics, honest gap list).
+- [**CLAUDE.md**](./CLAUDE.md) — the canonical design + status document (full mechanics, known limitations).
 - [`docs/ARCHITECTURE_ENGINE.md`](./docs/ARCHITECTURE_ENGINE.md) — the current engine architecture, with file/line citations.
 - [**CONTRIBUTING.md**](./CONTRIBUTING.md) — dev setup, required checks, code philosophy.
 - [**SECURITY.md**](./SECURITY.md) — supported versions, private vulnerability reporting, threat model.
-- [`docs/launch/`](./docs/launch/) — the rebuild summary, the honest record, code-review findings.
+- [`docs/launch/`](./docs/launch/) — the rebuild summary, review findings, code-review reports.
 - [`docs/marketing/`](./docs/marketing/) — positioning and comparison-vs-alternatives docs.
 - [`docs/product/`](./docs/product/) — roadmap and use cases.
 - [`docs/project-management/`](./docs/project-management/) — governance and release process.
@@ -155,7 +156,7 @@ builtins; the heavy packages in `devDependencies` serve the benchmark harness on
 The remaining gaps are deliberately out-of-scope operational/social items — cross-process
 concurrency, encryption-at-rest, access-segregated checkpoint storage, and the
 asserted-attribution trade-off (audit attribution is asserted, not signed; an exported
-checkpoint is the insider-tamper detector) — enumerated honestly in the **GAP LIST** in
+checkpoint is the insider-tamper detector) — enumerated in **Known Limitations** in
 [CLAUDE.md](./CLAUDE.md), which is the canonical status document.
 
 ## Module map

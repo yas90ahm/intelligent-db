@@ -58,10 +58,10 @@ deployments route each dispute to the right owning group from the company's dire
 
 **Phase 5 — re-measurement and closeout (this pass).** Every benchmark that can run
 locally was re-run against the rebuilt system; every red-team breach was triaged and
-classified honestly; two real fixes came out of it (section 3); the documentation was
+classified accurately; two real fixes came out of it (section 3); the documentation was
 updated to separate fresh numbers from historical ones.
 
-## 3. What the hostile reviewers caught — the honest record
+## 3. What the hostile reviewers caught — the review findings
 
 Every phase was reviewed adversarially, and every finding is listed here, including the
 ones found in this final pass.
@@ -92,7 +92,7 @@ ones found in this final pass.
   scoring as a breach because the *test harness* modeled the old system without a Public
   Suffix List — the rebuilt system actually ships and wires exactly that defense. The
   test was corrected to attack the real shipped mechanism, which defends it. This was a
-  bookkeeping error in the benchmark, reclassified honestly — not a new defense.
+  bookkeeping error in the benchmark, reclassified — not a new defense.
 
 The pattern worth stating plainly: at every stage, an independent second look found
 something the stage's own tests had not. That is why the process keeps using them.
@@ -146,7 +146,7 @@ the suite keeps growing, and `CLAUDE.md`'s Status line is canonical for the curr
   executable test that fools the local verifier completely and is still caught). Both
   need a destination the writer cannot reach — a deployment step, not shipped code.
   Third-party non-repudiation ("prove to an outsider who wrote this") is gone — though
-  honestly, the removed signing key lived in the same writing process, so it never truly
+  notably, the removed signing key lived in the same writing process, so it never truly
   provided that against an insider either; the guarantee always came from segregation.
 - **Registry claims are configuration, not proof.** Trust weights now rest on what the
   deployment's configuration asserts (which SSO tenants have verified domains, which
@@ -213,7 +213,7 @@ re-verified (typecheck clean; full suite green at the count in `CLAUDE.md`).
 - `content_hash` now uses canonical (key-order-independent) JSON, so the same claim
   serialized in a different key order is recognized as the same claim (corroboration,
   relay class inheritance, and disown dedupe all depended on this).
-- A recall whose seed ids all fail to resolve now returns an honest
+- A recall whose seed ids all fail to resolve now returns an explicit
   `NO_SEEDS_RESOLVED` degraded stamp instead of looking like a healthy empty answer.
 - MCP boundary hardened: `remember` accepts an `origin` (web/document/tool input is
   quarantined PROVISIONAL instead of inheriting owner trust), all inputs have named
@@ -222,7 +222,7 @@ re-verified (typecheck clean; full suite green at the count in `CLAUDE.md`).
 - The audit-mirror reader survives torn (crash-truncated) final lines and names the
   exact line on mid-file corruption.
 - README rewritten around the measured story with a verified runnable quickstart;
-  `docs/launch/HONEST_RECORD.md` added (the paper trail of disclosed defects); the
+  `docs/launch/REVIEW_FINDINGS.md` added (each review finding, its fix, and its regression test); the
   four crypto-era root docs moved to `docs/history/` with HISTORICAL banners and
   every live doc reconciled to the crypto-free design; test counts single-sourced
   to `CLAUDE.md`.

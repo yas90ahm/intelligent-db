@@ -6,8 +6,8 @@
 > quarantine ingest, per-tier dispute horn, and the re-measurement pass. The codebase
 > builds and owns zero cryptographic machinery; the full Vitest suite is green (see
 > `CLAUDE.md` for the current count — its Status line is the single canonical number).
-> This document does not restate what ships — it is the honest list of what is **not yet
-> built or decided**, drawn from `CLAUDE.md`'s "HONEST GAP LIST" and
+> This document does not restate what ships — it is the list of what is **not yet
+> built or decided**, drawn from `CLAUDE.md`'s "KNOWN LIMITATIONS" and
 > `docs/launch/REBUILD_SUMMARY.md` §7 ("What remains open"). Nothing here should read as
 > a capability claim; every item is a gap in the shipped prototype today.
 
@@ -155,7 +155,7 @@ reads as a decision, not an omission:
 
 ---
 
-*Source of truth for every gap-list claim above: `CLAUDE.md`, section "HONEST GAP LIST",
+*Source of truth for every gap-list claim above: `CLAUDE.md`, section "KNOWN LIMITATIONS",
 and `docs/launch/REBUILD_SUMMARY.md` §7. If this roadmap and `CLAUDE.md` ever disagree,
 `CLAUDE.md` is canonical. For process/maturity context (single-maintainer status,
 semver-`0.0.0`), see `docs/project-management/GOVERNANCE.md` and `RELEASE_PROCESS.md`; for
