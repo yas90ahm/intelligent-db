@@ -4,6 +4,10 @@
   "private": true,
   "description": "A memory substrate for AI agents: latent memory surfaced by spreading activation, with first-class provenance and an external source-identity layer.",
   "license": "Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/yas90ahm/intelligent-db.git"
+  },
   "type": "module",
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",

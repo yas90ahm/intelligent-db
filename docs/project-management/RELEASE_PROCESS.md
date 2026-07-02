@@ -128,8 +128,7 @@ applicable. Practical notes given this repo's actual history:
 
 ## Branch strategy
 
-Current repo state: a single long-lived branch, `master` (there is no `main` branch in
-this repo despite that being the common default elsewhere — don't assume it exists), plus
+Current repo state: a single long-lived branch, `main`, plus
 ad-hoc experimental branches (e.g. `exp/sybil-redteam`) that get merged back with real
 (non-squash) merge commits — `git log --merges` shows genuine two-parent merges, not
 rebased/squashed history. Recommended policy, formalizing what's already the de facto
@@ -151,12 +150,7 @@ pattern:
   `release/*` branch line is needed at this project's current size — introduce one only
   if patch releases for an older minor are needed concurrently with `master` moving ahead
   (not a problem yet at pre-0.1.0).
-- **Renaming `master` → `main`:** not required by anything in this repo, but worth doing
-  once, before publishing, rather than after — CLAUDE.md's own git-status preamble already
-  assumes the target name is `main`, and a companion launch-prep doc (repo-structure /
-  GitHub hygiene) recommends the rename as a prerequisite to adding any CI workflow with
-  `branches: [main]` triggers, since those would silently never fire against a still-`master`
-  default. There is no remote configured yet (confirmed via `git remote -v`), so this is a
-  zero-risk local `git branch -m master main` today; it gets riskier (needs a remote
-  default-branch update too) once a remote and clones exist. Don't assume it's already
-  done — it isn't.
+- **Renaming `master` → `main`:** done — the default branch is `main`, renamed locally
+  before the first push so no remote default-branch update or clone migration was ever
+  needed. The CI workflow triggers on both names, so historical references to `master`
+  in older docs are harmless.
