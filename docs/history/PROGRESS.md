@@ -1,3 +1,6 @@
+> **HISTORICAL (pre crypto-free rebuild, superseded 2026-07).** Describes deleted machinery (Ed25519/Merkle/staking);
+> the current design is [CLAUDE.md](../../CLAUDE.md) + [docs/ARCHITECTURE_ENGINE.md](../ARCHITECTURE_ENGINE.md).
+
 # PROGRESS — Intelligent DB: empirical validation & benchmark suite
 
 _Last updated: 2026-07-01._

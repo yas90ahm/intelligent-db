@@ -1,3 +1,6 @@
+> **HISTORICAL (pre crypto-free rebuild, superseded 2026-07).** Describes deleted machinery (Ed25519/Merkle/staking);
+> the current design is [CLAUDE.md](../../CLAUDE.md) + [docs/ARCHITECTURE_ENGINE.md](../ARCHITECTURE_ENGINE.md).
+
 # Intelligent DB — Target Architecture
 
 > Produced by an architecture council (4 specialist architects + a Sybil/gaming red-teamer + a chief architect) in response to four feedback points: Sybil detection, retroactive-undo depth, the trust-scoring algorithm, and the tamper-evidence guarantee. This is the **target**; the "Enforceable Today vs Needs Building" table is the honest split against the current prototype (~138 passing tests, SQLite-persistent, crash-consistent). See `CLAUDE.md` for what is implemented.

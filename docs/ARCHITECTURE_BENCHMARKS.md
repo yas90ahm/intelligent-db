@@ -659,6 +659,11 @@ src/__bench__/
 
 ## 9. Headline measured results (for reference)
 
+> **HISTORICAL (pre-rebuild).** Every number in this section was measured against the
+> crypto-era (V2) system, BEFORE the crypto-free rebuild. They are preserved unchanged
+> as the historical baseline. For what was and was not re-measured against the rebuilt
+> system, see §10.
+
 | benchmark | substrate ASR | substrate acc | rag ASR | mem0 ASR |
 |---|---|---|---|---|
 | factworld (n_pois=601) | **0.0%** | **99.8%** | 98.7% | 79.4% |
@@ -678,3 +683,123 @@ the oracle `substrate` upper bound (qwen2.5:7b / qwen3:8b):
 Costly-independent boundary (no-LLM proxy): anchors-only L=1 → 0%, L≥2 → 50%; anchors+rep L≥3 →
 100% (the disclosed failure mode). Source: `reports/confidence_intervals.md`, `COVERAGE.md`,
 `nonOracleRunner.test.ts`.
+
+## 10. Crypto-free rebuild re-run (2026-07-02) — what was re-measured, what was not
+
+Dated section, appended after the five-phase crypto-free rebuild (relay fix; crypto-free
+trust registry replacing Ed25519 passports/binders/Merkle/staking; trust-tiered quarantine
+ingest; per-tier dispute horn; this re-measurement pass). Nothing in §9 was edited — those
+remain the pre-rebuild baselines. Everything below was measured against the REBUILT system,
+on this machine, pure-node, no external services.
+
+### 10.1 What ran (exact commands)
+
+```
+REDTEAM=1 npx vitest run src/__bench__/redteam/redteam.test.ts
+REDTEAM=1 npx vitest run src/__bench__/redteam/redteam2.test.ts
+REDTEAM=1 npx vitest run src/__bench__/redteam/redteam3.test.ts
+npx vitest run src/__bench__/factworld/substrate.validate.test.ts
+npx vitest run src/__bench__/capability/sybilPoisoning.capability.test.ts
+```
+
+### 10.2 Red-team results (rebuilt system, after the two triage fixes below)
+
+| Cycle | total | defended | breached | deferred |
+|---|---|---|---|---|
+| 1 | 36 | 6 | 1 | 29 |
+| 2 | 36 | 13 | 10 | 13 |
+| 3 | 25 | 16 | 7 | 2 |
+| **Σ** | **97** | **35** | **18** | **44** |
+
+Baseline comparison: **V1 (crypto era) = 59 breaches; V2 (crypto era, hardened) = 25
+breaches** (all 25 classified as documented thesis-boundary residuals); **rebuilt = 18
+breaches**. Every one of the 18 is byte-identical in id/name/mechanism to its V2
+counterpart — **zero new breaches, zero regressions**. The improvement from 25 → 18
+decomposes into three buckets:
+
+- **Bucket A — retired attack surface (5).** Keyholder Forge-From-Genesis, Hide-A-Disown
+  Below the Audit Horizon, Unscheduled/Pre-Anchor Window, Split-View With No Collector,
+  and the Tamper-Evidence Coverage Boundary all targeted the Ed25519/Merkle/STH layer the
+  rebuild deleted. They are out of the spec set entirely — *removed, not defended*. Their
+  history-rewrite goal is now covered by the checksum chain's ASSERTED-attribution model,
+  a documented trade-off (see 10.5). Caveat: this makes the cycle-3 count not
+  apples-to-apples with V2's cycle 3 (36 specs incl. the merkle-audit family vs 25 without
+  it); comparing only the surviving non-Merkle attacks, the sets match one-for-one.
+- **Bucket B — genuine fixes made during this pass (2).**
+  1. *Proxy-Consulted Weak-Influence Launder* (cycle 2): the uncited-influence review
+     queue consumed `weakInfluence.edgesConsulting` exactly ONE hop, so an A→c1→b1 relay
+     escaped review. Fixed in `src/ratification/disown.ts`: the queue is now a transitive
+     backward BFS over consulted-strand edges (cycle-safe, deterministic, idempotent, and
+     — unchanged — never auto-demotes; every hop is human review only). Regression test in
+     `src/ratification/disownHardening.test.ts`. BREACHED → DEFENDED.
+  2. *Mega-Provider Subdomain Seam, ce-c3-02* (cycle 3): an external audit caught that the
+     red-team spec still hand-assigned per-FQDN independence classes — modeling a no-PSL
+     system that no longer exists. The rebuilt system SHIPS a PSL eTLD+1 resolver
+     (`src/identity/binders/publicSuffix.ts`) wired into the trust registry's DOMAIN /
+     publisher class derivation, and it collapses `sub*.evilcorp.com` to ONE witness while
+     keeping `a1/a2.github.io` (PSL PRIVATE section) distinct. The spec now routes the
+     attack through the SHIPPED resolver (so it regresses to BREACHED if the PSL is ever
+     unwired) and a default-suite regression case was added to
+     `src/identity/binders/publicSuffix.bothDirections.test.ts`. This was a stale-harness
+     artifact reclassified honestly, not a defense added. BREACHED → DEFENDED.
+- **Bucket C — documented residuals (the 18 that remain).** Each maps to a named,
+  deliberate boundary: **priced-not-prevented** (Confederate Launder, Transient Bond
+  Cap-Inflation, Anchor-Preserving Key-Rotation, Dormancy Beta-Decay Wash,
+  Penance-by-Dormancy, the cc-c3 kill-chain composites, Registrar Carousel);
+  **offline class-assignment / count-vs-weight** (EMAIL Mega-Provider Tenant Seam —
+  defended on weight, breached only on integer count; Null-Source Laundromat, reachable
+  only by planting raw strands that bypass `writeFact`); **traversal-fails-open by
+  design** (Bridgehead Beacon, Bridge-Sweep Eclipse, the identity-gated-bridge fix-probes
+  — halting deliberately surfaces low-corroboration strands WITH a stamp, and a hard gate
+  provably starves genuine convergence=1 insight bridges); and the **theorem boundary**
+  (WINDOW-FORGERY: source-identity independence ≠ content-provenance independence — the
+  web cannot witness content causality).
+
+### 10.3 Poisoning arms re-run (pure engine, locally runnable)
+
+- **FactWorld substrate arm** (`substrate.validate.test.ts`, no LLM): poison rate 1.0,
+  sybilK 8 — after adjudication the only LIVE value per (entity, attribute) is the true
+  current value for every question ⇒ **adjudication-level ASR = 0%**. 2/2 tests pass.
+- **Sybil-poisoning capability benchmark** (`sybilPoisoning.capability.test.ts`): the
+  Intelligent DB arm stays TRUE (**ASR 0%**) at every cheap-fleet size
+  A ∈ {1,2,3,5,10,50,200,500} — the fleet collapses to independent-count 1 — while the
+  vanilla-RAG and passport-only arms flip FALSE at A ≥ 3. Honesty control: an EXPENSIVE
+  fleet of A distinct PAID anchor classes DOES flip the substrate for A > 3 (DEFER at the
+  A = 3 tie) — priced-not-prevented, exactly as designed. 6/6 tests pass.
+
+Rule-2 verdict (rebuild must stay ≥ mem0/Zep on poisoning): **holds** on every locally
+re-runnable arm — 0% ASR against cheap Sybil flooding, vs the historical mem0 79.4% / RAG
+98.7% on the same construct.
+
+### 10.4 NOT re-run (external dependencies unavailable) — historical numbers still §9
+
+The following need Ollama-served LLMs / embedding models / a mem0 Python sidecar /
+disk-scale sweeps, none of which were available for this pass. Their §9 numbers are
+**HISTORICAL (pre-rebuild)** and should be cited as such until re-run:
+
+- `factworld/runner.test.ts` — the LLM-scored end-to-end ASR (historical: ID **0.0%** vs
+  RAG 98.7% / mem0 79.4%, n_pois=601).
+- All of `poisonedrag/` (historical: ID 6/18/7% vs RAG 93/99/93% on NQ/HotpotQA/MSMARCO;
+  non-oracle exclude 17/23/22%).
+- All of `retrieval/` (LoCoMo / QA / librarian runners), `crossdb/` (needs adapters +
+  Docker services), `deployment/` (disk-scale sweeps), `generalization/` LLM arms.
+
+### 10.5 Named trade-offs carried by the rebuilt numbers
+
+- **Asserted attribution (the headline trade-off):** with Ed25519 signing removed, who
+  wrote an audit record is asserted by the writing process and committed into a SHA-256
+  checksum chain — internally consistent and byte-flip-detecting (`verifyChain` names the
+  first broken seq), but an actor with live write access can rewrite history and re-verify
+  green. Mitigation: exported `chainHead()` checkpoints a rewrite cannot reproduce, IF
+  stored where the writer can't touch (operational, not shipped). Third-party
+  non-repudiation is gone; that is the price of the crypto-free constraint, stated plainly.
+- **Registry claims are configuration, not proof:** DOMAIN/ORG-grade weight now rests on
+  what the deployment's registry config asserts (e.g. a config-verified SSO custom
+  domain), not on DNS-01 proofs this codebase runs. A misconfigured registry silently
+  mis-weights independence — same liability family as offline class assignment.
+- **The Merkle detection layer is deleted, not replaced:** it was
+  detection-given-live-witnesses, and the witness sinks were never built, so nothing
+  currently delivered was lost — but the *capability* of efficient third-party
+  inclusion/consistency proofs is foreclosed.
+- **Staking retired:** attribution + the disown clawback is the deterrent; the
+  FINANCIAL_STAKE row is inert data with no producer.

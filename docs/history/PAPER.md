@@ -1,3 +1,6 @@
+> **HISTORICAL (pre crypto-free rebuild, superseded 2026-07).** Describes deleted machinery (Ed25519/Merkle/staking);
+> the current design is [CLAUDE.md](../../CLAUDE.md) + [docs/ARCHITECTURE_ENGINE.md](../ARCHITECTURE_ENGINE.md).
+
 # Intelligent DB: Trustworthy Memory for AI Agents via External Priced-Identity Adjudication
 
 *A proof-of-concept study, grounded in a five-part audit of the repository (git history, design documents, source code, test suite, and benchmark artifacts) rather than authorial recollection. Single-process TypeScript/Node prototype; benchmarks on commodity hardware (Node 24.16, SQLite/WAL, Dockerised vector DBs, local 7–8B LLM readers via Ollama). Repository genesis 2026-06-24 (`0b7cfcc`); evaluation campaign 2026-06-28 (HEAD `16102a5`).*
