@@ -31,7 +31,7 @@ that don't fit the project's direction. Use the issue templates under
 
 ## Development setup
 
-Requires Node `>=20` (developed and tested on Node 24, per README). The library itself is
+Requires Node `>=22.13` (`node:sqlite` unflagged; developed and tested on Node 24, per README). The library itself is
 **zero-runtime-dependency** — only `node:` builtins ship in `dist/`; the packages in
 `devDependencies` (better-sqlite3, duckdb, qdrant client, transformers, pg, redis, lmdb)
 exist solely to power the competitive benchmark harness under `src/__bench__/` and are

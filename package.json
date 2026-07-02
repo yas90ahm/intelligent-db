@@ -24,7 +24,7 @@
     "NOTICE"
   ],
   "engines": {
-    "node": ">=20"
+    "node": ">=22.13"
   },
   "bin": {
     "intelligent-db-mcp": "dist/mcp/server.js"

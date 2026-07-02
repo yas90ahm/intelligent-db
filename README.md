@@ -180,7 +180,7 @@ checkpoint is the insider-tamper detector) — enumerated in **Known Limitations
 
 ## Install / build / test
 
-Requires Node `>=20` (developed and tested on Node 24).
+Requires Node `>=22.13` — the first release line with `node:sqlite` unflagged, which the durable store uses (developed and tested on Node 24).
 
 ```sh
 npm install        # install dev deps (typescript, vitest, @types/node, + bench-only DB clients)
