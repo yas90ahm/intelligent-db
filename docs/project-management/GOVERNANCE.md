@@ -105,12 +105,11 @@ code, adversarial-quality review) are the bar, not raw activity.
 
 ## What this document does not (yet) cover
 
-- **Code of Conduct.** None is adopted yet. Recommended next step: adopt the Contributor
-  Covenant (or equivalent) verbatim as `CODE_OF_CONDUCT.md` before the project actively
-  solicits outside contributions — this document does not substitute for one.
+- **Code of Conduct.** Adopted: [`CODE_OF_CONDUCT.md`](../../CODE_OF_CONDUCT.md) at the
+  repo root governs conduct; this document does not substitute for it.
 - **Trademark / naming.** Not addressed; revisit if "Intelligent DB" needs protecting.
-- **Security disclosure process.** Not addressed here; if a `SECURITY.md` is added later,
-  it supersedes this document for vulnerability reports.
+- **Security disclosure process.** Governed by [`SECURITY.md`](../../SECURITY.md) at the
+  repo root, which supersedes this document for vulnerability reports.
 - **Funding / CLA.** No contributor license agreement is required today (Apache-2.0's
   inbound=outbound licensing is relied on as-is); revisit only if a foundation/CLA
   requirement arises.

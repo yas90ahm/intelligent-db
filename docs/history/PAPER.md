@@ -92,12 +92,12 @@ Methodology and discipline (artifact audit): deterministic seeds; baselines grid
 
 All eight trust-blind stores answer the false majority; only Intelligent DB resists. An honesty control confirms the bound is priced, not absolute (a genuinely-paid distinct-anchor fleet does overturn the truth).
 
-![Figure 1: Sybil-corroboration resistance across nine systems — all eight databases score 0/24, Intelligent DB 24/24.](figures/fig1_sybil_resistance.png) *(Mem0 blocked offline; hnswlib/faiss skipped — no Node-24 prebuilt. The committed `metrics.json` records write_hz 98,911; the prose REPORT cites a post-batching 104,464 — we use the committed figure.)*
+![Figure 1: Sybil-corroboration resistance across nine systems — all eight databases score 0/24, Intelligent DB 24/24.](../../figures/fig1_sybil_resistance.png) *(Mem0 blocked offline; hnswlib/faiss skipped — no Node-24 prebuilt. The committed `metrics.json` records write_hz 98,911; the prose REPORT cites a post-batching 104,464 — we use the committed figure.)*
 
 ### 6.2 Deployment profile (on-disk SQLite/WAL, to 1M strands)
 Recall p50 is **1.93→2.08 ms across a 1000× data increase** (lit-set fixed at 77) — recall is O(local web), not O(total memory). Write p50 ~25 µs (p99 ~100–400 µs); cold-start (reopen + first recall) ~4 ms at 1M; concurrent readers scale **4.5× at K=8**; no WAL-checkpoint stalls. A `writeFactsBatch` verb reaches ~100k facts/s, the residual floor being per-fact provenance minting (CPU, not I/O).
 
-![Figure 2: Recall latency stays flat (~2 ms p50) as stored facts grow 1k→1M — recall is O(local web), not O(total memory).](figures/fig2_flat_recall.png)
+![Figure 2: Recall latency stays flat (~2 ms p50) as stored facts grow 1k→1M — recall is O(local web), not O(total memory).](../../figures/fig2_flat_recall.png)
 
 ### 6.3 Retrieval quality (synthetic + LoCoMo)
 *Synthetic (53 test queries):* recall@10 ID **0.862** vs hybrid 0.925; but ID is the only system to reach 3-hop targets (multi-hop recall@10 **1.000 vs 0.750**) and the only one to adjudicate contradictions (correct-LIVE **1.000**), while losing pure paraphrase (0.333 vs 1.000 — structurally blind to semantic-only relevance).
@@ -133,7 +133,7 @@ Raw QA accuracy follows retrieval — the hybrid wins on both readers; **Intelli
 
 Fed the raw poisoned context, both LLMs answered the false majority. Routing the *same memory* through Intelligent DB — Sybils collapse via MIS, the trusted source structurally outranks them — recovered 95–100% correct answers. No vector or graph store provides this.
 
-![Figure 3: Answer integrity under a Sybil flood — raw retrieval lets both readers answer the false majority (0.00 / 0.15); Intelligent DB's adjudicated memory recovers 0.95 / 1.00.](figures/fig3_contradiction_integrity.png)
+![Figure 3: Answer integrity under a Sybil flood — raw retrieval lets both readers answer the false majority (0.00 / 0.15); Intelligent DB's adjudicated memory recovers 0.95 / 1.00.](../../figures/fig3_contradiction_integrity.png)
 
 ---
 

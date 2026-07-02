@@ -102,22 +102,15 @@ This codebase has an explicit, hard-won ethos — please write to it, not around
   add `any`, non-null assertions, or `// @ts-expect-error` to route around a real type
   error — fix the type.
 
-## A note on current known issues
+## A note on review findings
 
-An internal code-review pass of `src/identity/` and `src/ratification/` flagged two
-candidate high-severity findings worth triaging early, since they touch exactly the
-invariants this file asks contributors to protect: (1) the facade's standalone
-`SourceIdentityLayer.independentSources` reportedly fails **open** (returns `true`) for a
-source that was never `identity.register()`-ed, diverging from `independentRootCount`'s
-fail-closed predicate and potentially weakening the `approve()` distinct-approver gate;
-(2) `api.ts`'s `ratify()` reportedly performs its strand-promotion, reputation-credit, and
-corroboration-record writes **outside** the atomic-compound-write transaction the other
-compound ops use, so a crash mid-`ratify` could leave a half-applied state. Neither claim
-has been independently re-verified as part of this docs-only pass — treat them as
-reviewer-flagged, not confirmed-fixed — but they are exactly the class of report
-`SECURITY.md` asks for, so if you're picking up early post-launch work, these are a
-reasonable place to start (open an issue first per the policy above, or report privately
-per `SECURITY.md` if you'd rather it not be public before a fix lands).
+Past adversarial-review findings — including two high-severity ones (a fail-open
+`independentSources` predicate and a non-atomic `ratify()`) — are all fixed and
+regression-tested; the full log of each finding, its fix, and the guarding test lives in
+[`docs/launch/REVIEW_FINDINGS.md`](./docs/launch/REVIEW_FINDINGS.md). If you find something
+in the same class, that is exactly the report `SECURITY.md` asks for: open an issue per
+the policy above, or report privately per `SECURITY.md` if it shouldn't be public before a
+fix lands.
 
 ## Tests
 

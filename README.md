@@ -110,12 +110,11 @@ the red-team breach count went **down**, 25 to 18, with zero new breaches.
 
 The deletion was the upgrade.
 
-<!-- optional: personal authorship line, owner's call -->
 
 ## Project docs
 
 - [**CLAUDE.md**](./CLAUDE.md) — the canonical design + status document (full mechanics, known limitations).
-- [`docs/ARCHITECTURE_ENGINE.md`](./docs/ARCHITECTURE_ENGINE.md) — the current engine architecture, with file/line citations.
+- [`docs/ARCHITECTURE_ENGINE.md`](./docs/ARCHITECTURE_ENGINE.md) — the current engine architecture, module by module.
 - [**CONTRIBUTING.md**](./CONTRIBUTING.md) — dev setup, required checks, code philosophy.
 - [**SECURITY.md**](./SECURITY.md) — supported versions, private vulnerability reporting, threat model.
 - [`docs/launch/`](./docs/launch/) — the rebuild summary, review findings, code-review reports.

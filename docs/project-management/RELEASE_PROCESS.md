@@ -9,7 +9,7 @@
 "private": true
 ```
 
-There is no `CHANGELOG.md`, no `.github/workflows` (no CI configured in this repo), and no
+There is no `CHANGELOG.md` yet, and no
 git remote configured locally — `git branch -a` shows only local `master` and
 `exp/sybil-redteam`. This document describes the policy to adopt *when* the project
 starts cutting real releases; it does not claim any of this infrastructure exists yet.
@@ -89,22 +89,20 @@ description of something already done):
    none is configured in this local repo today.
 7. **`npm publish`** (public, since there's no indication this should be a private/scoped
    package) once the above are in place.
-8. Only after this, consider wiring CI (typecheck + test on every PR) — see "CI" below.
-   Not a hard prerequisite for `0.1.0` but strongly recommended before accepting outside
-   contributions per `GOVERNANCE.md`.
+8. CI is already wired (`.github/workflows/ci.yml` runs `npm run typecheck` + `npm test`
+   on every push and PR to `master`/`main`); it activates the moment the repo is pushed to
+   GitHub — see "CI" below.
 
 Nothing about this sequence is urgent to do *right now* — it's the recipe for whenever
 "public launch" is actually decided, since the repo currently has no remote and is marked
 private.
 
-## CI (not yet present)
+## CI
 
-There is no `.github/workflows` directory in this repo. Before or shortly after the first
-public release, add a workflow that runs `npm run typecheck` and `npm test` on every PR
-and push to `master` — both are already fast, deterministic commands (see CLAUDE.md:
-"Must stay green"). Until CI exists, the maintainer is the enforcement mechanism; that's
-an acceptable stopgap for a single-maintainer project but should not be the permanent
-state once `GOVERNANCE.md`'s contributor path starts admitting outside maintainers.
+`.github/workflows/ci.yml` runs `npm run typecheck` and `npm test` on every PR and push
+to `master`/`main` — both fast, deterministic commands (see CLAUDE.md: "Must stay
+green"). It takes effect automatically once the repo is pushed to GitHub; until then the
+maintainer is the enforcement mechanism.
 
 ## Changelog policy
 

@@ -476,8 +476,8 @@ its own env flag and reads the shared Ollama client. Prerequisite for every LLM 
 with the model pulled (`ollama pull qwen2.5:7b`), reachable at `OLLAMA_HOST`
 (default `http://localhost:11434`).
 
-Output roots (hardcoded in the runners): `D:\Intelligent DB\.arbor\sessions\<family>\` for
-results, `D:\Intelligent DB\.arbor\cache\<family>\` for prepped data.
+Output roots (repo-relative, created by the runners): `.arbor/sessions/<family>/` for
+results, `.arbor/cache/<family>/` for prepped data.
 
 ### 6.1 FactWorld
 ```

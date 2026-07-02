@@ -13,7 +13,7 @@ Closes #
 - [ ] Traversal / activation walk / halting (`src/traversal/`)
 - [ ] Forgetting / tiers / consolidation (`src/forgetting/`)
 - [ ] Source-Identity Layer (`src/identity/`)
-- [ ] Ratification / Merkle audit / disown / reputation ledger (`src/ratification/`)
+- [ ] Ratification / checksum-chain audit / disown / reputation ledger (`src/ratification/`)
 - [ ] Engine facade (`src/api.ts`, `src/index.ts`)
 - [ ] Benchmarks (`src/__bench__/`)
 - [ ] Docs / project scaffolding only (no `src/` changes)
