@@ -1,3 +1,5 @@
+> **HISTORICAL (crypto era).** This documents the pre-rebuild engine — Ed25519 keys, Merkle audit log, staking — all deleted in the crypto-free rebuild. The current architecture is [`docs/ARCHITECTURE_ENGINE.md`](../ARCHITECTURE_ENGINE.md).
+
 # Intelligent DB — Engine Architecture
 
 > A memory substrate for AI agents that resists the two failure modes of stateless
