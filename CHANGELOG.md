@@ -8,11 +8,68 @@ Dates are the day of the commit(s), not a release date. Commit hashes refer to `
 
 ## [Unreleased]
 
-- 2026-07-06 — full benchmark re-verification in progress: a fresh, from-scratch re-run of
-  the FactWorld / PoisonedRAG / retrieval-quality / cross-db / Sybil red-team benchmark suite
-  against the current crypto-free engine, to replace the `HISTORICAL` (pre-rebuild) numbers
-  called out in `docs/ARCHITECTURE_BENCHMARKS.md`. Tracked in `BENCH_RERUN_2026-07-06.md` and
-  `.arbor/sessions/*`; not yet committed as of this writing.
+- 2026-07-06 — **Phase 1 (retrieval win)**, spec `docs/specs/PHASE1_RETRIEVAL_SPEC.md`:
+  embeddings are wired in strictly as a *seeding* accelerator, never a belief source (the
+  non-negotiable thesis constraint — similarity may propose where to look, never influence
+  edge weights, `fact_state`, adjudication, independence counting, reputation, or eviction).
+  - `EmbedderPort` (`core/types.ts`): an optional, injected embedding interface —
+    `createIntelligentDb(..., { embedder? })` — absent by default (bit-for-bit unchanged
+    behavior). No embedder ships in core (zero runtime deps preserved); reference Ollama
+    (nomic-embed-text) and hashing-trick implementations ship in `src/examples/embedders.ts`,
+    not exported from the barrel.
+  - A `strand_vectors` sidecar table (SQLite) / in-memory map, keyed by `content_hash` so
+    echoes share one vector; populated inside `writeFact`'s existing transaction boundary
+    (embed before the txn opens; an embedder failure writes the fact without a vector rather
+    than blocking ingest).
+  - Seed selection: cosine top-K over the sidecar is **unioned** with (never replaces)
+    existing lexical/entity seeds; an embedding-proposed seed's energy is capped at the
+    lexical seed energy, so similarity can never outrank an exact entity hit.
+  - Two flagged, default-off walk improvements on `WalkConfig`: `reinforcement:
+    'dominance' | 'summation'` (summation sums incoming path deliveries under a per-strand
+    cap, preserving the monotone-non-increasing termination proof) and graded novelty
+    (`1 - exp(-newIndependentRoots / tau)` replacing the old 0/1 signal in the halting EWMA
+    only — ordering/stopping contract unchanged).
+  - Adversarial gate re-run with the embedder configured: crossdb Sybil defense and
+    FactWorld ASR unchanged; a new adversarial embedding-stuffing test (near-duplicate
+    payloads at cosine ~1.0) confirms a LIVE, independently-provenanced incumbent still
+    outranks a stuffed challenger in the rendered answer.
+- 2026-07-06 — **Phase 2 (extreme durability)**, spec
+  `docs/specs/PHASE2_DURABILITY_SPEC.md`, zero new runtime dependencies (`node:sqlite` /
+  `node:crypto` / `node:fs` only):
+  - **Schema migration ladder** (`store/migrations.ts`): `PRAGMA user_version`-tracked,
+    ordered migrations applied in one transaction on open; refuses to open a DB whose
+    stamped version is newer than the running code knows about. Today's shipped schema is
+    retroactively `v1`; Phase 1's `strand_vectors` table lands as `v2`. Tested against a
+    checked-in `v1` fixture DB (migrates once, data + audit chain intact, idempotent reopen).
+  - **Online snapshot + WAL archiving + point-in-time restore**: `db.snapshot(destPath)`
+    (`VACUUM INTO`, plus a fsynced sidecar manifest); optional `walArchive` config copies
+    each WAL segment out before checkpoint-truncation; `restoreToTimestamp(...)` replays
+    archived segments up to a timestamp and **refuses to complete** unless `integrity_check`
+    and `verifyChain()` both pass post-restore.
+  - **Value-level AES-256-GCM encrypted store adapter** (`store/encryptedStore.ts`):
+    `createEncryptedStore(inner, keyProvider)` wraps either backend and encrypts strand
+    payloads / edge annotations / ledger payloads (random IV + GCM tag per value, AAD-bound
+    to the row's stable id so ciphertexts can't be swapped between rows); ids, content
+    hashes, index keys, tier/state enums, and the audit chain stay plaintext by design (the
+    chain hashes ciphertext, so `verifyChain()` still works without the key). Wrong key or a
+    flipped ciphertext byte surfaces as a named, typed integrity error — never a crash or a
+    silent wrong read.
+  - **Optional embedder port + seed-only integration** and **summation
+    reinforcement / graded novelty** land together with Phase 1 above (the two phases meet
+    at the `strand_vectors` migration).
+  - **Crash-torture suite** (`src/__torture__/`, env-gated `TORTURE=1`; CI smoke at 50
+    kill-cycles in `torture-smoke`): a child process runs randomized compound ops
+    (`writeFact` batches, `adjudicate`, `approve`, `disown`, `ratify`) while the parent
+    SIGKILLs it at a random 5-50ms delay; on reopen a dedicated cross-op invariant checker
+    asserts no loser demoted without its `OUTRANKS` edge, no `APPROVAL` record without its
+    demotions, and no half-applied disown, in addition to `integrity_check` /
+    `verifyChain()` / `reconcileLedger`.
+- 2026-07-06 — full benchmark re-verification: a fresh, from-scratch re-run of the
+  FactWorld / PoisonedRAG / retrieval-quality / cross-db / Sybil red-team benchmark suite
+  against the current crypto-free engine (plus the new `EmbedSeeded` LoCoMo arm above),
+  replacing the `HISTORICAL` (pre-rebuild) numbers called out in
+  `docs/ARCHITECTURE_BENCHMARKS.md`. Full report in `BENCH_RERUN_2026-07-06.md` and
+  `.arbor/sessions/*`.
 - Repo hygiene pass: `package.json` metadata (description, keywords, repository/homepage/bugs,
   author), this changelog.
 
