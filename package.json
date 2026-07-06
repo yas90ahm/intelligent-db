@@ -3,10 +3,31 @@
   "version": "0.0.0",
   "private": true,
   "description": "A memory substrate for AI agents: latent memory surfaced by spreading activation, with first-class provenance and an external source-identity layer.",
+  "keywords": [
+    "ai-agents",
+    "memory",
+    "agent-memory",
+    "knowledge-graph",
+    "provenance",
+    "spreading-activation",
+    "mcp",
+    "model-context-protocol",
+    "anti-poisoning",
+    "sybil-resistance",
+    "trust-registry",
+    "rag-alternative",
+    "sqlite",
+    "typescript"
+  ],
   "license": "Apache-2.0",
+  "author": "Yasir <1290yasir@gmail.com>",
   "repository": {
     "type": "git",
     "url": "git+https://github.com/yas90ahm/intelligent-db.git"
+  },
+  "homepage": "https://github.com/yas90ahm/intelligent-db#readme",
+  "bugs": {
+    "url": "https://github.com/yas90ahm/intelligent-db/issues"
   },
   "type": "module",
   "main": "./dist/index.js",
