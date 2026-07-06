@@ -1,0 +1,27 @@
+{
+  "meta": {
+    "experiment": "1.1.1.1.3.blend-coverage — Phase 1b Measurement: Blend arm coverage diagnostic (frozen config)",
+    "frozenEmbedSeedK": 16,
+    "frozenReinforcement": "dominance",
+    "frozenBlendWeights": {
+      "wCos": 0.9,
+      "wWalk": 0.3,
+      "wState": 0.1
+    },
+    "frozenUnionTopN": 128,
+    "devQuestions": 662,
+    "testQuestions": 1319
+  },
+  "dev": {
+    "embedSeededCoverage": 0.3919687814702921,
+    "blendCoverage": 0.8390414721230431,
+    "embedSeededRecall20": 0.3919687814702921,
+    "blendRecall20": 0.4431940248405504
+  },
+  "test": {
+    "embedSeededCoverage": 0.36209959412809173,
+    "blendCoverage": 0.8193655423217057,
+    "embedSeededRecall20": 0.36209959412809173,
+    "blendRecall20": 0.4186043723292249
+  }
+}

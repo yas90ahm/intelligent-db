@@ -11,13 +11,19 @@
  * diagnostic-flagged primary lever: widening `unionTopN` widens coverage).
  */
 
-import { describe, it, expect } from "vitest";
+import { rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+
+import { describe, it, expect, afterEach } from "vitest";
 
 import {
   FactState,
   asStrandId,
   createMemoryStore,
   createMemoryVectorSidecar,
+  createSqliteStore,
+  createSqliteVectorSidecar,
   buildUnionCandidateSet,
   scorePresentation,
   rankForPresentation,
@@ -34,6 +40,8 @@ import type {
   RecallResult,
   WalkLitCandidate,
   CosineCandidate,
+  StrandStore,
+  VectorSidecar,
 } from "../index.js";
 import { makeStrand } from "../__bench__/fixtures.js";
 
@@ -394,4 +402,73 @@ describe("cosineTopNCandidates / rankRecallResult — real store + VectorSidecar
     expect(blended.unresolvedSeeds).toEqual(baseResult.unresolvedSeeds);
     expect(blended.seedsResolved).toBe(baseResult.seedsResolved);
   });
+});
+
+// ---------------------------------------------------------------------------
+// 6) STORE MATRIX — blend forced on, both backends (Phase 1b gate §1: "ALSO run
+//    the store matrix once with blend forced on via test config"). Re-runs the
+//    same rankRecallResult union/never-drop invariant over BOTH createMemoryStore()
+//    and a real createSqliteStore()/createSqliteVectorSidecar() (WAL, on-disk),
+//    proving blend mode's store integration is backend-agnostic, not just an
+//    in-memory-store artifact.
+// ---------------------------------------------------------------------------
+
+describe("store matrix — rankRecallResult in blend mode over both backends", () => {
+  function vec(...xs: number[]): Float32Array {
+    return Float32Array.from(xs);
+  }
+
+  const tmpPaths: string[] = [];
+  afterEach(() => {
+    for (const p of tmpPaths.splice(0)) {
+      try {
+        rmSync(p, { force: true });
+        rmSync(`${p}-wal`, { force: true });
+        rmSync(`${p}-shm`, { force: true });
+      } catch {
+        /* best-effort cleanup */
+      }
+    }
+  });
+
+  function backends(): Array<{ name: string; store: StrandStore; vectors: VectorSidecar }> {
+    const dbPath = join(tmpdir(), `idb-presentationrank-matrix-${Date.now()}-${Math.random().toString(36).slice(2)}.sqlite`);
+    tmpPaths.push(dbPath);
+    return [
+      { name: "memory", store: createMemoryStore(), vectors: createMemoryVectorSidecar() },
+      { name: "sqlite", store: createSqliteStore(dbPath), vectors: createSqliteVectorSidecar(dbPath) },
+    ];
+  }
+
+  for (const { name, store, vectors } of backends()) {
+    it(`[${name}] rankMode='blend' widens the lit set without ever dropping the walk-lit strand`, () => {
+      const modelId = "test-model";
+      const cue = vec(1, 0);
+
+      const lit = makeStrand("mlit1", "entity:x" as EntityId, "src:1" as never, "cls:1", { text: "walk-lit" });
+      store.putStrand(lit);
+      vectors.put(lit.content_hash, modelId, vec(0, 1)); // weak cosine to the cue
+
+      const strong = makeStrand("mstrong1", "entity:y" as EntityId, "src:2" as never, "cls:2", { text: "cosine-only" });
+      store.putStrand(strong);
+      vectors.put(strong.content_hash, modelId, vec(1, 0)); // walk never lit this one
+
+      const baseResult: RecallResult = {
+        lit: [{ strandId: lit.id, activation: 0.9 }],
+        halt: { reason: "CONVERGED", popCount: 1, bridgesCrossed: 0, bridgeSeedsDownweighted: 0, degraded: false } as never,
+        unresolvedSeeds: [],
+        seedsResolved: 1,
+      };
+
+      // Forced-on test config: rankMode is NOT left to default — blend is
+      // explicit, matching the gate's "blend forced on via test config" wording.
+      const blended = rankRecallResult(store, baseResult, { vectors, modelId, cueVector: cue }, { rankMode: "blend" });
+
+      const ids = blended.lit.map((l) => String(l.strandId));
+      expect(ids).toContain("mlit1"); // union never removes the walk-lit strand
+      expect(ids).toContain("mstrong1"); // union-added candidate present
+      expect(blended.halt).toEqual(baseResult.halt);
+      expect(blended.seedsResolved).toBe(baseResult.seedsResolved);
+    });
+  }
 });
