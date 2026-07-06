@@ -401,12 +401,34 @@ export function activationWalk(
 
   // Fired strands = the refractory lock. Best-first guarantees the FIRST candidate
   // popped for a strand carries the maximum energy any path can deliver (energy is
-  // monotone non-increasing), so a strand fires ONCE, at that dominating energy,
-  // and every later candidate for it is skipped. This kills the A→B→A echo AND
-  // bounds the walk (each strand expands at most once). Reinforcement-by-summation
-  // across paths is a deliberate later refinement; dominance keeps the
-  // monotone-non-increasing termination proof intact for this first body.
+  // monotone non-increasing), so a strand fires ONCE, at that dominating energy.
+  // FIRING (which strand expands its out-edges, and when) is IDENTICAL in both
+  // reinforcement modes — every later candidate for an already-fired strand is
+  // still skipped for RE-EXPANSION purposes, which is what bounds the walk (each
+  // strand expands at most once) and keeps termination provable regardless of mode.
   const fired = new Set<StrandId>();
+
+  // -- Reinforcement-by-summation bookkeeping (WalkConfig.reinforcement, spec §4a) --
+  // "dominance" (default) leaves the walk BYTE-FOR-BYTE unchanged: these maps are
+  // simply never read. "summation" tracks, for every strand ANY energy delivery was
+  // computed for (seed energy, a materialized-edge child, or a virtual-sibling
+  // child) — including deliveries that arrive AFTER the strand already fired — the
+  // running SUM of all deliveries and the running MAX of any single delivery. The
+  // strand's REPORTED (lit) activation is then `min(sum, max * summationCap)`,
+  // computed once at the end of the local phase: the clamp is what keeps a cycle
+  // from amplifying energy without bound (a cycle can only ever re-deliver ENERGY
+  // THAT WAS ALREADY MONOTONE-DECREASING along its path, and the cap ties the
+  // ceiling to the single largest delivery actually observed).
+  const reinforcement = config.reinforcement ?? "dominance";
+  const summationCap = config.summationCap ?? 2.0;
+  const maxSingleDelivery = new Map<StrandId, number>();
+  const summedEnergy = new Map<StrandId, number>();
+  function recordDelivery(id: StrandId, energy: number): void {
+    if (reinforcement !== "summation") return;
+    const prevMax = maxSingleDelivery.get(id) ?? 0;
+    if (energy > prevMax) maxSingleDelivery.set(id, energy);
+    summedEnergy.set(id, (summedEnergy.get(id) ?? 0) + energy);
+  }
 
   // Final activation per lit strand — assembled into the answer at the end.
   const litMap = new Map<StrandId, Activation>();
@@ -450,6 +472,7 @@ export function activationWalk(
       continue;
     }
     seedsResolved += 1;
+    recordDelivery(seed.strandId, seed.energy);
     frontier.push({
       strandId: seed.strandId,
       energy: seed.energy,
@@ -495,7 +518,7 @@ export function activationWalk(
     const ctx: HaltContext = {
       strandId: cand.strandId,
       activation: cand.energy,
-      newIndependentCorroboration: noveltyOf(strand, seenClasses),
+      newIndependentCorroboration: gradeNovelty(noveltyOf(strand, seenClasses), config),
       now: asEpochMs(Date.now()),
       store: view,
     };
@@ -548,10 +571,18 @@ export function activationWalk(
       // so the local expansion SKIPS bridges entirely (CLAUDE.md "Resolved:
       // traversal halting").
       if (nv.edge.edgeType === EdgeType.CROSS_WEB_BRIDGE) continue;
-      if (fired.has(nv.edge.to)) continue; // already fired at ≥ energy; nothing to add
+      const alreadyFired = fired.has(nv.edge.to);
+      // DOMINANCE (default): an already-fired target gets nothing further —
+      // byte-for-byte the original fast path. SUMMATION: still compute the
+      // delivery and record it (below) so a strand's REPORTED activation
+      // reflects every path that reached it, even after it first fired; it is
+      // never re-pushed/re-expanded either way (bounds the walk identically).
+      if (alreadyFired && reinforcement === "dominance") continue;
       const share = effectiveOutSum > 0 ? nv.edge.w / effectiveOutSum : 0;
       const childEnergy = cand.energy * share * config.gamma;
       if (childEnergy <= 0) continue; // weightless / hub-starved thread
+      recordDelivery(nv.edge.to, childEnergy);
+      if (alreadyFired) continue; // summation: tracked, but no re-expansion
       frontier.push({
         strandId: nv.edge.to,
         energy: childEnergy,
@@ -589,6 +620,10 @@ export function activationWalk(
         for (const sib of siblings) {
           if (pushed >= VIRTUAL_SIBLING_FANOUT_CAP) break;
           if (sib.id === cand.strandId) continue;
+          // No-op in dominance mode (recordDelivery short-circuits immediately);
+          // in summation mode this is what lets an ALREADY-FIRED sibling's later
+          // delivery still count toward its reported (clamped) activation.
+          recordDelivery(sib.id, siblingEnergy);
           if (fired.has(sib.id)) continue;
           frontier.push({
             strandId: sib.id,
@@ -598,6 +633,21 @@ export function activationWalk(
           pushed += 1;
         }
       }
+    }
+  }
+
+  // REINFORCEMENT-BY-SUMMATION finalization (spec §4a): only in "summation" mode,
+  // overwrite each LOCALLY-fired strand's reported activation with
+  // `min(Σ deliveries, summationCap × max single delivery)` — computed HERE, once,
+  // after every delivery this walk will ever compute for these strands has been
+  // recorded (later deliveries during the bridge sweep target NEW, not-yet-fired
+  // strands only, so they cannot retroactively change this set). Dominance mode's
+  // `litMap` entries (set at fire time, above) are left completely untouched.
+  if (reinforcement === "summation") {
+    for (const id of fired) {
+      const cap = (maxSingleDelivery.get(id) ?? 0) * summationCap;
+      const sum = summedEnergy.get(id) ?? 0;
+      litMap.set(id, Math.min(sum, cap) as Activation);
     }
   }
 
@@ -622,7 +672,7 @@ export function activationWalk(
     if (target !== null && !fired.has(crossing.target)) {
       fired.add(crossing.target);
       litMap.set(crossing.target, crossing.seedActivation);
-      yieldCorroboration = noveltyOf(target, seenClasses);
+      yieldCorroboration = gradeNovelty(noveltyOf(target, seenClasses), config);
     }
     halting.recordCrossingYield({
       bridgeEdge: crossing.bridgeEdge,
@@ -688,17 +738,14 @@ export function orderingKeyFor(strand: Strand): number {
 // ===========================================================================
 
 /**
- * How much NEW independent corroboration a popped strand contributes, in the shape
- * PHASE-1 halting consumes. A strand that introduces at least one previously unseen
- * independent-provenance CLASS is novel (`1`); one that adds only already-seen
- * classes is an echo (`0`). `seenClasses` is mutated to fold in this strand's
- * classes so later pops see them as seen.
+ * The RAW count of NEW independent-provenance CLASSES a popped strand
+ * contributes (`seenClasses` is mutated to fold them in so later pops see them
+ * as seen). This is the count {@link gradeNovelty} shapes into the signal
+ * PHASE-1 halting actually consumes — kept separate so the "how many NEW
+ * classes" fact and the "how do we grade that into [0,1]" policy don't conflate.
  *
  * Deliberately reads PROVENANCE CLASSES, never `convergence_factor`: ordering is
  * convergence, stopping is novelty (CLAUDE.md "Separate ordering from stopping").
- * A finer-grained saturating map (e.g. a log of the new-class count) is a later
- * tuning knob; the 0/1 signal already drives the controller's EWMA toward
- * saturation as repeated/echoed classes accumulate.
  */
 function noveltyOf(strand: Strand, seenClasses: Set<string>): number {
   let added = 0;
@@ -709,7 +756,31 @@ function noveltyOf(strand: Strand, seenClasses: Set<string>): number {
       added += 1;
     }
   }
-  return added > 0 ? 1 : 0;
+  return added;
+}
+
+/**
+ * Shape a raw new-independent-root COUNT (from {@link noveltyOf}) into the [0,1]
+ * signal PHASE-1 halting's EWMA consumes (Phase-1 retrieval spec §4b).
+ *
+ * `config.noveltyMode` omitted or `"binary"` (the DEFAULT): TODAY's 0/1 signal —
+ * `added > 0 ? 1 : 0` — byte-for-byte unchanged from the pre-graded behavior.
+ *
+ * `"graded"`: the saturating curve `1 - exp(-added / tau)` (`config.noveltyTau`,
+ * default 1.0), so 2 new independent roots register MORE novelty than 1 without
+ * ever reaching a hard ceiling (approaches but never reaches 1). `added === 0`
+ * still maps to exactly 0 in both modes (no novelty is no novelty).
+ *
+ * Affects ONLY the halting EWMA input — ordering (convergence_factor) is
+ * untouched, and the ReasonCode / stop CONTRACT this feeds into is unchanged;
+ * only how "saturated" the local phase LOOKS after any given pop differs.
+ */
+function gradeNovelty(added: number, config: WalkConfig): number {
+  if (added <= 0) return 0;
+  if (config.noveltyMode !== "graded") return 1; // DEFAULT: today's binary signal
+  const tau = config.noveltyTau ?? 1.0;
+  if (!(tau > 0)) return 1; // fail-safe: a non-positive tau degrades to binary
+  return 1 - Math.exp(-added / tau);
 }
 
 /**

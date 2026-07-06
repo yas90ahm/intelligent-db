@@ -609,6 +609,45 @@ export interface WalkConfig {
    * ceiling beyond the dynamic per-cue clamp) when omitted.
    */
   readonly embedSeedEnergyCap?: number;
+
+  // -- Phase-1 retrieval spec §4a: reinforcement mode (FLAGGED) -------------
+  /**
+   * Reinforcement mode for the activation walk. `"dominance"` (the default when
+   * omitted) is TODAY's best-first-dominance body, byte-for-byte unchanged: a
+   * strand fires once at the max single-path energy any path delivers.
+   * `"summation"` sums ALL incoming path deliveries per strand (including
+   * deliveries that arrive after the strand has already fired/expanded),
+   * clamped to `summationCap` × that strand's max single-path delivery — this
+   * preserves the monotone-non-increasing termination bound (a cycle cannot
+   * amplify energy without limit) while letting genuinely convergent evidence
+   * (many independent paths agreeing) reinforce a strand's reported activation.
+   * Firing (which strand expands its out-edges, and when) is UNCHANGED between
+   * modes; only the REPORTED activation of a lit strand differs.
+   */
+  readonly reinforcement?: "dominance" | "summation";
+  /**
+   * Per-strand summation clamp multiplier — only consulted when
+   * `reinforcement === "summation"`. Default 2.0 when omitted.
+   */
+  readonly summationCap?: number;
+
+  // -- Phase-1 retrieval spec §4b: graded novelty (FLAGGED) -----------------
+  /**
+   * Novelty signal shape fed into the halting EWMA. `"binary"` (the default
+   * when omitted) is TODAY's 0/1 signal (`noveltyOf`'s "did this pop contribute
+   * at least one previously-unseen independence class" test), unchanged.
+   * `"graded"` replaces it with the saturating curve
+   * `novelty = 1 - exp(-newIndependentRoots / noveltyTau)`, so 2 new
+   * independent roots register more novelty than 1 without ever reaching a
+   * hard ceiling. Affects ONLY the halting EWMA input — ordering (convergence
+   * is unchanged), the stop CONTRACT, and the ReasonCode mapping are unchanged.
+   */
+  readonly noveltyMode?: "binary" | "graded";
+  /**
+   * Tau knob for graded novelty — only consulted when `noveltyMode ===
+   * "graded"`. Default 1.0 when omitted.
+   */
+  readonly noveltyTau?: number;
 }
 
 /** Default walk configuration grounded in CLAUDE.md's resolved halting design. */
