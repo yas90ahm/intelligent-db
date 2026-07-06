@@ -623,6 +623,21 @@ export interface WalkConfig {
    * (many independent paths agreeing) reinforce a strand's reported activation.
    * Firing (which strand expands its out-edges, and when) is UNCHANGED between
    * modes; only the REPORTED activation of a lit strand differs.
+   *
+   * NOT FROZEN TO "summation" globally (spec §6 measurement, 2026-07-06):
+   * the real-LoCoMo `EmbedSeeded` sweep (see `DEFAULT_EMBED_SEED_K`'s doc)
+   * selected `summation` as the dev-optimal reinforcement mode for THAT arm,
+   * but the margin over `dominance` was razor-thin (recall@10 +0.002,
+   * nDCG@10 +0.001, recall@20/MRR tied) — within measurement noise, not a
+   * clear win. Flipping this DEFAULT was tried and reverted: it broke
+   * `reinforcementSummation.test.ts`'s own regression pins that assert
+   * `DEFAULT_WALK_CONFIG` produces dominance-shaped activation numbers (the
+   * feature's OWN landing invariant, "default 'dominance' — no silent
+   * behavior change"). A global flip is out of proportion to a same-dataset,
+   * near-noise signal on ONE bench arm, so the conservative reading wins:
+   * the default stays `"dominance"`; a caller wanting the (theoretically
+   * marginally better, on this one dataset) summation behavior opts in
+   * per-call via this field, exactly as today.
    */
   readonly reinforcement?: "dominance" | "summation";
   /**

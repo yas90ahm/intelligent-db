@@ -318,13 +318,30 @@ export function createLexicalCueResolver(
 // Embedding-augmented resolver (Phase-1 retrieval spec §3) — the seed-UNION seam
 // ---------------------------------------------------------------------------
 
-/** Default cosine top-K candidates pulled from the vector sidecar (spec §3). */
+/**
+ * Default cosine top-K candidates pulled from the vector sidecar (spec §3).
+ *
+ * FROZEN TUNED DEFAULT (spec §6 measurement, 2026-07-06): the real-LoCoMo
+ * `EmbedSeeded` sweep (`src/__bench__/retrieval/locomoEmbedSeededRunner.test.ts`,
+ * artifact `.arbor/sessions/retrieval-quality/experiments/1.1.1.1.1.embedseeded/`)
+ * swept `embedSeedK` in {8, 16, 32} x `reinforcement` in {dominance, summation} on
+ * TunedHybrid-with-embedder-seeding and selected the winner by mean recall@20 on
+ * the LoCoMo dev split. **16 won** (K=32 measured byte-identical to K=16 — beyond
+ * ~16 candidates the extra cosine matches are either duplicates the content-hash
+ * union already collapsed or too weak to change the ranking; K=8 measurably
+ * trails both). This CONFIRMS 16 — already the shipped default before this
+ * measurement — is the right value; no change was made. Recorded here so the
+ * choice is measurement-backed, not merely a guess. (The sweep's `reinforcement`
+ * half of the winner — `summation` — is NOT frozen as the global default; see
+ * `DEFAULT_WALK_CONFIG`'s doc for why.)
+ */
 export const DEFAULT_EMBED_SEED_K = 16;
 
 /**
  * Default hard ceiling on an embedding-proposed seed's energy, IN ADDITION to
  * the mandatory dynamic clamp (never outrank a lexical/entity hit). `1` = no
- * extra ceiling beyond the dynamic clamp.
+ * extra ceiling beyond the dynamic clamp. Not varied by the spec §6 sweep (held
+ * at 1 throughout); no measurement basis to change it from today's default.
  */
 export const DEFAULT_EMBED_SEED_ENERGY_CAP = 1;
 

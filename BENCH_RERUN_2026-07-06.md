@@ -1225,3 +1225,112 @@ Everything that was a same-day, same-session task this pass targeted is finished
 reported. The only two items still open are both long-running background processes verified
 alive and progressing at hand-off (the clean-HotpotQA mem0 arm and the full reasoning sweep),
 not gaps in scope or effort.
+
+---
+
+## Phase 1 measurement gate (spec §5-6) — 2026-07-06
+
+`docs/specs/PHASE1_RETRIEVAL_SPEC.md` sections 1-4 (EmbedderPort, vector sidecar, seed-union,
+reinforcement/graded-novelty) were already implemented and committed (`c0cea16`,
+`c6cbb52`) before this pass; this section is the measurement gate for sections 5-6, run with
+a live Ollama (`qwen2.5:7b`, `nomic-embed-text`).
+
+### Gate table
+
+| # | Gate | Result |
+|---|---|---|
+| 1 | Full default suite (`npx vitest run`) + `npm run typecheck` | **PASS** — 552 passed / 35 skipped, typecheck clean |
+| 2 | `CROSSDB_BENCH` Sybil, IntelligentDB 24/24 WITH the Ollama embedder configured | **PASS** — 24/24 (new gated test, worst-case similarity-only seeding; see below) |
+| 3 | FactWorld substrate quick arm, 0.0% ASR WITH the Ollama embedder configured | **PASS** — 0.0% ASR (new gated test, worst-case similarity-only seeding; see below) |
+| 4 | LoCoMo EmbedSeeded arm vs mem0 (target recall@20 >= 0.484) | **FALL SHORT** — winner recall@20 = 0.366, gap **-0.118** |
+| 5 | Freeze winning config as tuned default | **DONE** (config-only, no functional change — see below) |
+
+### Gates 2-3: the embedder-configured adversarial re-check
+
+The PUBLISHED crossdb (`src/__bench__/crossdb/adapters/intelligentDb.ts`) and FactWorld
+(`src/__bench__/factworld/arms.ts`'s `substrateArm`) benches both answer queries via a direct
+index/attribute scan — neither calls `engine.recall()`/the cue resolver, so wiring an embedder
+into either has literally no code path to affect. Both were left untouched. Instead, two NEW
+gated tests exercise the actual production seeding seam under the worst-case adversarial
+condition the spec's §5.2/§5.3 describe — `engine.recall()` seeded PURELY by live Ollama
+cosine similarity (no entity/lexical boost at all, so every candidate, honest or poisoned,
+must win its seed slot by similarity alone):
+
+- `src/__bench__/crossdb/embedderSybilGate.test.ts` (`CROSSDB_BENCH=1`) — the identical
+  `buildCheapSybilAttack` scenario (H=3 honest, A in {5,50,200}, 8 trials each = 24 trials) as
+  the published baseline, but candidates come from a real embedder-seeded activation walk;
+  the winning VALUE is still computed via `identity.independentRootCount` over each value's
+  provenance (never similarity). **24/24 correct** — full per-trial table in
+  `.arbor/sessions/cross-db-bench/experiments/embedder-sybil-gate/results.md`.
+- `src/__bench__/factworld/embedderSeededSubstrate.test.ts` (`FACTWORLD_BENCH=1`) — the
+  identical poisoned FactWorld (`entities:5, poisonRate:1.0, sybilK:8, seed:7`) and substrate
+  wiring as `substrate.validate.test.ts`, answering every question via embedder-seeded
+  `engine.recall()` instead of the flat attribute scan. **0.0% ASR** (every question's
+  believed-LIVE set is exactly `{gold}`).
+
+Both confirm the thesis constraint holds even with the embedder actively populating vectors
+and actively winning seed slots for near-duplicate/poisoned payloads: belief is still governed
+entirely by provenance/independence, never by cosine similarity.
+
+### Gate 4: the LoCoMo EmbedSeeded sweep
+
+New arm `EmbedSeeded` = TunedHybrid's RRF fusion (same frozen `{s,k,alpha}` this run) with its
+graph channel REPLACED by a real `engine.recall()` lit-set seeded via
+`createEmbeddingCueResolver` (spec §3 — baseline entity∪vector-top1 UNION cosine-top-`embedSeedK`,
+energy-clamped) with `WalkConfig.reinforcement` (spec §4a) applied to that SAME recall call —
+both real shipped code paths, run same-run against a freshly re-tuned PureID/TunedHybrid, on
+the real LoCoMo corpus (10 conversations, 5882 turns, 1981 questions, 662 dev / 1319 test,
+`Xenova/all-MiniLM-L6-v2`). Swept `embedSeedK` in {8, 16, 32} x `reinforcement` in
+{dominance, summation} (6 configs), winner picked by max mean recall@20 on DEV:
+
+| embedSeedK | reinforcement | recall@10 | recall@20 | nDCG@10 | MRR |
+|---|---|---|---|---|---|
+| 8 | dominance | 0.308 | 0.355 | 0.197 | 0.172 |
+| 8 | summation | 0.298 | 0.355 | 0.194 | 0.171 |
+| **16** | **summation (winner)** | **0.322** | **0.366** | **0.201** | **0.174** |
+| 16 | dominance | 0.320 | 0.366 | 0.200 | 0.174 |
+| 32 | dominance | 0.320 | 0.366 | 0.200 | 0.174 |
+| 32 | summation | 0.322 | 0.366 | 0.201 | 0.174 |
+
+| Metric | EmbedSeeded (winner) | mem0 | PureID (same run) | TunedHybrid (same run) |
+|---|---|---|---|---|
+| recall@10 | 0.322 | 0.382 | 0.245 | 0.307 |
+| recall@20 | 0.366 | **0.484** | 0.272 | 0.375 |
+| nDCG@10 | 0.201 | 0.242 | 0.166 | 0.194 |
+| MRR | 0.174 | 0.215 | 0.151 | 0.174 |
+
+**Honest verdict: FALL SHORT of the recall@20 >= 0.484 target by 0.118 (0.366 vs 0.484), and
+the EmbedSeeded construction does not even beat this same run's own plain TunedHybrid arm
+(0.366 vs 0.375)** — replacing TunedHybrid's h-hop BFS graph channel with an embedder-seeded
+activation-walk channel is a net-neutral-to-slightly-negative swap on this dataset, not an
+improvement. This is consistent with the pre-existing BENCH_RERUN finding (Phase-2 pass, §2)
+that no structural ID-side lever tried so far (wider walk, richer graph, multi-seed entry, and
+now embedder seeding) closes the recall@20 gap to the tuned hybrid baseline on real LoCoMo —
+MultiSeedID (cycle E, recall@20 0.324 vs a differently-scoped mem0 number) remains the closest
+approach measured to date, and even it does not close the gap either. Reported as measured, not
+tuned to pass. Full sweep, per-config numbers, and construction detail: `.arbor/sessions/
+retrieval-quality/experiments/1.1.1.1.1.embedseeded/results.md` (metrics.json alongside).
+
+### Gate 5: freezing the winning config
+
+The sweep's own winner is `embedSeedK=16` (K=32 measured byte-identical — extra candidates
+beyond ~16 add nothing on this corpus; K=8 measurably trails both) with `reinforcement=summation`
+edging `dominance` by a margin within measurement noise (recall@10 +0.002, nDCG@10 +0.001,
+recall@20/MRR tied).
+
+- **`embedSeedK=16` is frozen** — this CONFIRMS the value already shipped as
+  `DEFAULT_EMBED_SEED_K` before this measurement; no functional change, now measurement-backed
+  (doc comment added at the constant, `src/recall/cueResolver.ts`).
+- **`reinforcement` stays `"dominance"` as the global default** — NOT flipped. Tried and
+  reverted: setting `DEFAULT_WALK_CONFIG.reinforcement = "summation"` broke
+  `reinforcementSummation.test.ts`'s own regression pins (which assert the DEFAULT config
+  produces dominance-shaped activation numbers — the feature's own landing invariant, "default
+  'dominance' — no silent behavior change"). Flipping a HARD, engine-wide default for every
+  `recall()` call, on a razor-thin single-dataset margin, is out of proportion to the measured
+  signal; the conservative reading is documented at `WalkConfig.reinforcement`'s doc
+  (`src/core/types.ts`). A caller wanting summation on this arm still opts in per-call, exactly
+  as today.
+
+Config-only commit: `bench: EmbedSeeded LoCoMo arm + frozen tuned defaults` (new gated bench
+files under `src/__bench__/{crossdb,factworld,retrieval}/`, doc-comment freeze notes at the two
+constants above — zero behavior change to any default-suite code path).
