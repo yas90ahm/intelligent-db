@@ -40,3 +40,33 @@ jobs:
 
       - name: Build
         run: npm run build
+
+  torture-smoke:
+    name: crash-torture smoke (50 kill-cycles)
+    runs-on: ubuntu-latest
+    # Cheap and fast (~5-25s locally for 50 real SIGKILL cycles): a real, separate
+    # OS process is spawned per cycle, forcibly killed at a random 5-50ms delay, and
+    # reopened to run the dedicated cross-op invariant checker
+    # (docs/specs/PHASE2_DURABILITY_SPEC.md §4a). Fails the build on any STRUCTURAL
+    # violation (a genuine atomicity break); a known, pre-existing, non-crash
+    # `RECONCILE_DRIFT` finding (see `src/__torture__/invariantChecker.ts`'s
+    # `KNOWN_NONCRASH_VIOLATION_KINDS`) does not fail this job — see that module's
+    # doc for why it is not a crash-consistency bug.
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '24.x'
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Run 50 kill-cycles
+        run: npm run torture
+        env:
+          TORTURE: '1'
+          CYCLES: '50'

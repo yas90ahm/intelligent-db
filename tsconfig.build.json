@@ -12,6 +12,7 @@
   "exclude": [
     "src/__bench__",
     "src/__tests__",
+    "src/__torture__",
     "src/testSupport",
     "src/**/*.test.ts",
     "dist",

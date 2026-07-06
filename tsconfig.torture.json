@@ -1,0 +1,26 @@
+{
+  // Build-only tsconfig for the crash-torture suite (docs/specs/PHASE2_DURABILITY_SPEC.md
+  // §4): the kill-loop's child worker (`src/__torture__/killWorker.ts`) is spawned as a
+  // REAL, separate OS process that gets SIGKILLed mid-op — it cannot run inside vitest's
+  // in-process TS transform, and this codebase's TS uses runtime `enum`s (not erasable
+  // syntax), so Node's built-in type-stripping can't run it directly either. This config
+  // compiles the whole engine + the torture harness itself to plain JS once; `npm run
+  // torture` runs the compiled `runTorture.js`, which spawns compiled `killWorker.js`
+  // copies. Output goes under `node_modules/` (already gitignored) so it never needs its
+  // own `.gitignore` entry and is never mistaken for a shipped artifact.
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "outDir": "node_modules/.torture-build",
+    "declaration": false,
+    "declarationMap": false,
+    "sourceMap": false
+  },
+  "exclude": [
+    "dist",
+    "node_modules",
+    "src/__bench__",
+    "src/__tests__",
+    "src/testSupport",
+    "src/**/*.test.ts"
+  ]
+}

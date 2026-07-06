@@ -56,7 +56,9 @@
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
     "bench": "vitest bench --run",
-    "mcp": "node dist/mcp/server.js"
+    "mcp": "node dist/mcp/server.js",
+    "torture:build": "tsc -p tsconfig.torture.json",
+    "torture": "npm run torture:build && node node_modules/.torture-build/__torture__/runTorture.js"
   },
   "devDependencies": {
     "@duckdb/node-api": "^1.5.4-r.1",
