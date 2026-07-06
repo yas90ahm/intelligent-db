@@ -3,12 +3,19 @@
  * (docs/specs/PHASE1B_RANKING_SPEC.md): "Sybil crossdb gate (the embedderSybilGate
  * variant): 24/24 must hold with rankMode='blend' on the recall path."
  *
+ * UPDATED for Phase 1c (docs/specs/PHASE1C_RANKING_CALIBRATION_SPEC.md, "re-run all
+ * gates on the frozen config"): the re-rank step now uses the FROZEN Phase 1c
+ * presentation config (`../frozenPresentationConfig.js` — scoreMode 'rrf', k=60,
+ * wState=0.1, unionTopN=128, embedder nomic-embed-text, the same embedder
+ * `createOllamaEmbedder()` already defaults to here) instead of the
+ * DEFAULT_PRESENTATION_WEIGHTS this gate ran with in Phase 1b.
+ *
  * IDENTICAL scenario/wiring to `embedderSybilGate.test.ts` (same `buildCheapSybilAttack`
  * generator, same H=3 honest / A in {5,50,200} / 8-trials-each = 24 trials, same
  * worst-case seeding: `engine.recall()` seeded PURELY by Ollama cosine similarity, no
  * entity/lexical boost at all) with ONE addition: after the walk completes, the lit
- * set is re-ranked through `rankRecallResult(..., { rankMode: 'blend' })` — the REAL
- * Phase 1b presentation-ranking module (`recall/presentationRank.ts`), union-widened
+ * set is re-ranked through `rankRecallResult(..., FROZEN_PRESENTATION_OPTIONS)` — the
+ * REAL presentation-ranking module (`recall/presentationRank.ts`), union-widened
  * against the SAME vector sidecar the seeding step already populated — before the
  * winning value is computed.
  *
@@ -57,6 +64,7 @@ import type { WriteFactInput } from "../../api.js";
 import { createOllamaEmbedder } from "../../examples/embedders.js";
 import { makeIdentity, bareStamp, NOW } from "../fixtures.js";
 import { buildCheapSybilAttack } from "./attack.js";
+import { FROZEN_PRESENTATION_OPTIONS } from "../frozenPresentationConfig.js";
 
 const RUN = process.env["CROSSDB_BENCH"] === "1";
 const OUT_DIR = "D:\\Intelligent DB\\.arbor\\sessions\\cross-db-bench\\experiments\\embedder-sybil-gate-blend";
@@ -184,7 +192,7 @@ interface TrialRecord {
               store,
               res,
               { vectors, modelId: embedder.modelId, cueVector },
-              { rankMode: "blend" },
+              FROZEN_PRESENTATION_OPTIONS,
             );
             const winner = winningValueOf(blended.lit);
 

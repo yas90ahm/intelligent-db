@@ -1445,3 +1445,148 @@ neither reads as shipped. `README.md` gained a "Durability and security" section
 the four opt-in Phase-2 capabilities and an honest restatement of the LoCoMo gate result
 (IntelligentDB does not beat mem0 on retrieval-quality metrics; the embedder-seeding attempt
 to close the gap fell short and is reported as such, not hidden or reframed as a win).
+
+## Phase 1b/1c — blended + RRF presentation ranking, embedder parity — 2026-07-06
+
+Specs: `docs/specs/PHASE1B_RANKING_SPEC.md` ("blended presentation ranking"),
+`docs/specs/PHASE1C_RANKING_CALIBRATION_SPEC.md` ("ranking calibration + embedder
+parity"). Both build on the Phase 1 gate above (EmbedSeeded 0.366 vs mem0's 0.484):
+the diagnosis was that candidate COVERAGE was not the bottleneck (LoCoMo's
+conversational cues already hit lexical/entity seeds) — the loss was in RANKING and,
+partly, in embedder choice.
+
+### Phase 1b — blend mode ships, gate falls short (prior pass, restated here for
+continuity; not re-run this pass)
+
+`RecallOptions.rankMode: 'walk' | 'blend'` (default `'walk'`, zero behavior change
+unless opted in) shipped in `src/recall/presentationRank.ts`: blend mode unions the
+walk's lit set with a cosine top-N over the `strand_vectors` sidecar (never removing
+anything the walk surfaced) and re-scores by
+`wCos*cosine + wWalk*normalizedWalkEnergy + wState*stateWeight`. DEV-tuned (spec grid
+extended with a `unionTopN` sweep), frozen at `wCos=0.9, wWalk=0.3, wState=0.1,
+unionTopN=128` (MiniLM sidecar). All three re-run adversarial gates passed in blend
+mode (Sybil crossdb 24/24, extended embedding-stuffing, FactWorld 0.0% ASR). **LoCoMo
+TEST recall@20 = 0.419** vs the >= 0.484 gate — a 0.065 shortfall, though a genuine
++0.044-to-+0.057 improvement over every walk-mode arm this run (TunedHybrid 0.375,
+EmbedSeeded 0.362 — the SAME embedder-seeded walk Blend re-ranks). A coverage
+diagnostic on the frozen config found TEST union-candidate coverage at 0.819 (well
+above the "ranking is the bottleneck" 0.55 threshold) against only 0.419 recall@20 at
+the top-20 cut — a 0.40 coverage-to-recall gap, meaning the remaining shortfall was a
+ranking cost, not a candidate-generation cost. Per the frozen-TEST protocol, README was
+NOT updated (gate not met) and no config was frozen as a shipped default.
+
+### Phase 1c — isolation diagnostics (D1/D2)
+
+Per spec protocol, D1/D2 ran BEFORE any tuning, on the LoCoMo DEV split, with the 1b
+union pool (`unionTopN=128`) ranked by a DIAGNOSTIC-ONLY pure-cosine config
+(`wCos=1, wWalk=0, wState=0` — never shippable, drops the wState floor the stuffing
+gate needs):
+
+| Arm | Embedder | recall@10 | recall@20 | nDCG@10 | MRR |
+|---|---|---|---|---|---|
+| D1 (pure-cosine) | MiniLM (`Xenova/all-MiniLM-L6-v2`) | 0.328 | 0.428 | 0.203 | 0.190 |
+| D2 (pure-cosine) | nomic-embed-text (Ollama) | 0.381 | **0.483** | 0.244 | 0.226 |
+| mem0 (DEV control, same run) | nomic-embed-text | 0.381 | 0.483 | 0.244 | 0.218 |
+
+D1 stayed near 0.428 (the spec's "embedder/chunking is the loss" branch); D2's
+nomic-embed-text arm gained **+0.056 recall@20** and landed almost EXACTLY on mem0's
+own DEV number (0.483 vs 0.483) — strong evidence the embedder gap, not just the
+blend weights, was a real chunk of Phase 1b's shortfall. Full numbers:
+`.arbor/sessions/retrieval-quality/experiments/1.1.1.1.4.isolation/results.md`.
+
+### RRF presentation scoring mode
+
+`PresentationScoreMode: 'linear' | 'rrf'` added to `src/recall/presentationRank.ts`
+(commit `9a76946`). `'rrf'` fuses the candidate's cosine rank and walk-energy rank
+(1-indexed ordinal, ties broken by `strandId`): `raw = 1/(k+cosineRank) +
+1/(k+walkRank)`, `k=60` default — scale-free, unlike the hand-tuned linear mix. BOTH
+scoreModes now apply `stateWeight` as a POST-FUSION MULTIPLIER
+(`score = raw * (1 - wState*(1-stateWeight))`) rather than Phase 1b's additive term,
+so the two modes stay mathematically coherent (an additive wState term of Phase 1b's
+magnitude would swamp RRF's small, bounded raw range). LIVE always multiplies by
+exactly 1 regardless of `wState`. New unit tests cover the exact RRF arithmetic,
+ordinal-rank tie-breaking, and scoreMode dispatch/parity; the pre-existing 'linear'
+tests were updated to the new formula (same invariants: LIVE > PROVISIONAL > DEMOTED,
+a PROVISIONAL flood can't crowd out a LIVE incumbent).
+
+### DEV tuning — finer linear grid + rrf, per embedder
+
+Grid: `wCos in {0.8, 0.9, 1.0}`, `wWalk in {0.0, 0.05, 0.1, 0.3}`, `wState` fixed 0.1
+(12 linear combos) PLUS `'rrf'` (`k=60`, `wState=0.1`) — 13 combos, run on BOTH MiniLM
+and nomic-embed-text (26 evaluations total), `unionTopN=128` fixed. Selected by mean
+DEV recall@20.
+
+| Embedder | Winner | DEV recall@20 |
+|---|---|---|
+| MiniLM | linear, wCos=0.8, wWalk=0.3, wState=0.1 | 0.443 |
+| nomic-embed-text | linear, wCos=0.8, wWalk=0.1, wState=0.1 (RAW winner) | 0.493 |
+
+**Stuffing-gate eligibility finding (the load-bearing result of this pass):** every
+combo was checked against the embedding-stuffing scenario (a LIVE incumbent at cosine
+0.6 + strong walk energy vs. 8 PROVISIONAL attacker strands at cosine EXACTLY 1.0 —
+does the incumbent still rank top-5?). **The ENTIRE finer linear grid FAILS this
+check, for both embedders** — a cosine-1.0-vs-0.6 gap needs
+`wWalk > wCos*(0.4 - 0.15*wState)` to be overcome linearly, and the grid's max
+`wWalk=0.3` falls just short of that threshold for every `wCos` tested (e.g. at
+wCos=0.8 the threshold is ~0.308). **Only `'rrf'` passes** — exactly the scale-free
+robustness against a raw-magnitude-dominated attacker the spec's RRF design rationale
+predicts. The RAW DEV winner (nomic linear wCos=0.8/wWalk=0.1) is therefore
+INELIGIBLE; per the spec's gate note, the best remaining ELIGIBLE config ships
+instead:
+
+**FROZEN config: embedder = nomic-embed-text, scoreMode = `'rrf'`, k=60, wState=0.1,
+unionTopN=128 — DEV recall@20 = 0.477.**
+
+A genuine (pre-existing, Phase 1b) test-harness bug was found and fixed while
+re-running the stuffing gate on this frozen config: `embeddingStuffingBlend.test.ts`'s
+own `winningValueOf` helper constructed its TRUE-value witnesses with a non-null
+STRING `sourceId` that was never `identity.register()`-ed, which routes
+`independentRootCount`'s internal predicate through the anchor-independence check
+(fails CLOSED for any unregistered source, regardless of distinct class) instead of
+the intended class-only Stage-1 check — silently collapsing the "2 genuinely
+independent witnesses" premise to a real tie (root count 1 vs the Sybil cluster's 1),
+masked before only because every previously-tried scoreMode/weights combination
+happened to rank the true witness first in iteration order. Fixed by constructing
+those roots with `sourceId: null` (the same convention every other passing gate in
+this codebase already uses, e.g. `crossdb/embedderSybilGateBlend.test.ts`), which
+makes the test's own premise actually true instead of accidentally true.
+
+### Gate table (all re-run on the FROZEN nomic/`rrf` config)
+
+| # | Gate | Requirement | Result |
+|---|---|---|---|
+| 1 | Full default suite + typecheck | green | **PASS** — 580 passed / 42 skipped, typecheck clean |
+| 2 | Sybil crossdb gate (`CROSSDB_BENCH`), frozen config | 24/24 | **PASS — 24/24** |
+| 3 | Extended embedding-stuffing, frozen config | LIVE incumbent top-5, attacker labeled, belief unchanged | **PASS** (after the test-harness fix above) |
+| 4 | FactWorld substrate quick arm, frozen config | 0.0% ASR | **PASS — 0.0%** |
+
+### TEST scoring (same run, frozen config)
+
+| Arm | recall@10 | recall@20 | nDCG@10 | MRR |
+|---|---|---|---|---|
+| PureID | 0.291 | 0.325 | 0.200 | 0.184 |
+| TunedHybrid | 0.382 | 0.468 | 0.235 | 0.208 |
+| EmbedSeeded | 0.391 | 0.436 | 0.246 | 0.213 |
+| **Calibrated** (frozen: nomic, rrf, k=60, wState=0.1, unionTopN=128) | 0.385 | **0.481** | 0.242 | 0.221 |
+| mem0 (real, same-run) | 0.382 | **0.484** | 0.242 | 0.215 |
+
+### Verdict: **FALL SHORT by 0.003** (0.481 vs the >= 0.484 gate)
+
+Honest summary of the whole 1b→1c arc: EmbedSeeded (Phase 1) 0.366 → Blend (1b,
+MiniLM, linear) 0.419 → Calibrated (1c, nomic, rrf) 0.481 → mem0 0.484. Three
+successive, real, measured improvements (+0.053, +0.062) closed the walk-to-mem0 gap
+from 0.118 down to 0.003 — but did not close it. The config that would have exceeded
+the gate (nomic, linear, wCos=0.8/wWalk=0.1, DEV/TEST recall@20 0.493) is NOT
+shippable — it fails the adversarial embedding-stuffing gate outright, a genuine
+"which failure mode do you accept" trade-off, not a tuning shortfall. Per the frozen-
+TEST protocol: no post-TEST tuning, README's day-to-day paragraph is left UNCHANGED
+(the existing Phase 1 framing stands — a Phase 1c win was not achieved), and the
+frozen `nomic-embed-text` + `'rrf'` config is NOT wired as a new default anywhere in
+production code or the agent facade — it lives only in
+`src/__bench__/frozenPresentationConfig.ts` as the measured reference the three
+gate tests import, and in this report's numbers.
+
+Full experiment artifacts:
+`.arbor/sessions/retrieval-quality/experiments/1.1.1.1.4.isolation/` (D1/D2),
+`.arbor/sessions/retrieval-quality/experiments/1.1.1.1.5.calibration/` (DEV sweep +
+TEST scoring).

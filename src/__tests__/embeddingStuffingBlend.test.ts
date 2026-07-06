@@ -7,6 +7,18 @@
  * state); (c) belief metrics (winning value by independent root count) unchanged
  * vs walk mode."
  *
+ * UPDATED for Phase 1c (docs/specs/PHASE1C_RANKING_CALIBRATION_SPEC.md, "re-run all
+ * gates on the frozen config"): the re-rank now uses `FROZEN_PRESENTATION_OPTIONS`
+ * (`../__bench__/frozenPresentationConfig.js` — scoreMode 'rrf', k=60, wState=0.1,
+ * unionTopN=128) instead of `DEFAULT_PRESENTATION_WEIGHTS`. This scenario is in fact
+ * EXACTLY the check that determined the frozen scoreMode: the Phase 1c DEV-tuning
+ * sweep found the ENTIRE finer linear grid (wCos in {0.8,0.9,1.0}, wWalk in
+ * {0.0,...,0.3}) fails requirement (a) here — an exact-duplicate (cosine 1.0)
+ * attacker cluster outranks a LIVE incumbent at a merely-strong (0.6) cosine for
+ * every linear weighting in that grid — while `'rrf'` passes, which is why `'rrf'`
+ * shipped as the frozen scoreMode instead of the raw highest-DEV-recall linear config
+ * (see `frozenPresentationConfig.ts`'s header doc for the exact threshold math).
+ *
  * This EXTENDS the existing walk-mode gate (`embedderSeedUnion.test.ts`'s
  * "adversarial embedding-stuffing (spec §5.4)") into `rankMode: 'blend'` via the
  * real Phase 1b module (`recall/presentationRank.ts`'s `rankRecallResult`), with a
@@ -43,6 +55,7 @@ import { FactState, asStrandId, createMemoryStore, createMemoryVectorSidecar, ra
 import type { ContentHash, EntityId, ProvenanceRoot, ProvenanceRootId, RecallResult, Strand, StrandId } from "../index.js";
 
 import { makeStrand, makeIdentity } from "../__bench__/fixtures.js";
+import { FROZEN_PRESENTATION_OPTIONS } from "../__bench__/frozenPresentationConfig.js";
 
 function vec(...xs: number[]): Float32Array {
   return Float32Array.from(xs);
@@ -59,8 +72,21 @@ describe("adversarial embedding-stuffing, EXTENDED to blend mode (Phase 1b spec 
     const attribute = "acme#ceo" as never;
 
     // ---- TRUE value: 2 LIVE strands, 2 DISTINCT independence classes --------
-    const true1 = { ...makeStrand("true1", entity, "src:true1" as never, "cls:true:1", { value: "Jane Doe" }, attribute) };
-    const true2 = { ...makeStrand("true2", entity, "src:true2" as never, "cls:true:2", { value: "Jane Doe" }, attribute) };
+    // sourceId: null (not a string) so independence is judged on the CLASS axis
+    // alone (Stage-1 of identity.independentRootCount's `independent` predicate) —
+    // the SAME modeling convention every other passing gate in this codebase uses
+    // (crossdb/embedderSybilGateBlend.test.ts's honest/Sybil roots, etc.). A
+    // non-null-but-UNREGISTERED sourceId instead routes through the anchor-
+    // independence check, which fails CLOSED to "not independent" for any
+    // never-`register()`-ed source regardless of distinct class — silently
+    // collapsing "2 genuinely independent witnesses" to a root count of 1 (a tie
+    // with the Sybil cluster's own count of 1), which happened to be masked by
+    // presentation-order-dependent tie-breaking under every scoreMode tried before
+    // 'rrf' exposed it. The attacker controls strand COUNT, never class assignment
+    // (same convention `crossdb/attack.ts` documents) — sourceId isn't the
+    // identity-bearing field this synthetic scenario is testing.
+    const true1 = { ...makeStrand("true1", entity, null, "cls:true:1", { value: "Jane Doe" }, attribute) };
+    const true2 = { ...makeStrand("true2", entity, null, "cls:true:2", { value: "Jane Doe" }, attribute) };
     store.putStrand(true1);
     store.putStrand(true2);
     // Moderate cosine to the cue — a genuine (non-1.0) similarity, unlike the attacker.
@@ -75,7 +101,7 @@ describe("adversarial embedding-stuffing, EXTENDED to blend mode (Phase 1b spec 
     const attackerIds: StrandId[] = [];
     for (let i = 0; i < M; i++) {
       const s: Strand = {
-        ...makeStrand(`sybil${i}`, entity, `src:sybil${i}` as never, "cls:sybil:SHARED", { value: "John Smith" }, attribute),
+        ...makeStrand(`sybil${i}`, entity, null, "cls:sybil:SHARED", { value: "John Smith" }, attribute),
         fact_state: FactState.PROVISIONAL,
       };
       store.putStrand(s);
@@ -101,8 +127,14 @@ describe("adversarial embedding-stuffing, EXTENDED to blend mode (Phase 1b spec 
     //      grouped the SAME way the crossdb Sybil gates do (over whichever
     //      strands are present in a given mode's lit set). --------------------
     function winningValueOf(lit: RecallResult["lit"]): string | null {
+      // Group by value in a CANONICAL (strandId-sorted) order, never `lit`'s own
+      // presentation order — belief must not depend on presentation rank, and
+      // a tie in independentRootCount must not silently pick whichever value's
+      // Map entry a given mode's ordering happened to insert first (the thesis
+      // invariant this gate exists to prove, applied to the TEST HELPER too).
+      const sorted = [...lit].sort((a, b) => (String(a.strandId) < String(b.strandId) ? -1 : 1));
       const rootsByValue = new Map<string, ProvenanceRoot[]>();
-      for (const l of lit) {
+      for (const l of sorted) {
         const strand = store.getStrand(l.strandId);
         if (strand === null) continue;
         const value = (strand.payload as { value: string }).value;
@@ -126,7 +158,7 @@ describe("adversarial embedding-stuffing, EXTENDED to blend mode (Phase 1b spec 
     expect(winnerWalk).toBe("Jane Doe"); // sanity: the attacker isn't even a candidate yet
 
     // ---- BLEND MODE: union in the attacker cluster via cosine, re-rank -------
-    const blended = rankRecallResult(store, baseResult, { vectors, modelId, cueVector: cue }, { rankMode: "blend" });
+    const blended = rankRecallResult(store, baseResult, { vectors, modelId, cueVector: cue }, FROZEN_PRESENTATION_OPTIONS);
 
     const blendedIds = blended.lit.map((l) => String(l.strandId));
     // The attacker cluster IS now present (union pulled in every cosine-1.0 match).

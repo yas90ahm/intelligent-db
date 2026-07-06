@@ -3,13 +3,19 @@
  * (docs/specs/PHASE1B_RANKING_SPEC.md): "FactWorld substrate quick arm: 0.0% ASR
  * with blend mode active on the recall path."
  *
+ * UPDATED for Phase 1c (docs/specs/PHASE1C_RANKING_CALIBRATION_SPEC.md, "re-run all
+ * gates on the frozen config"): the re-rank step now uses the FROZEN Phase 1c
+ * presentation config (`../frozenPresentationConfig.js` — scoreMode 'rrf', k=60,
+ * wState=0.1, unionTopN=128, embedder nomic-embed-text) instead of
+ * DEFAULT_PRESENTATION_WEIGHTS.
+ *
  * IDENTICAL substrate + poisoned-condition wiring to `embedderSeededSubstrate.test.ts`
  * (same `buildSubstrate`, same worst-case cosine-only seeding via
  * `createEmbeddingCueResolver` with an EMPTY `base` resolver) with ONE addition:
- * after `engine.recall()` returns, the lit set is re-ranked through the real Phase
- * 1b `rankRecallResult(..., { rankMode: 'blend' })` — union-widened against the SAME
- * vector sidecar the seeding step populated — before the believed-LIVE-value check
- * that computes ASR. If similarity could ever leak into belief, the poisoned
+ * after `engine.recall()` returns, the lit set is re-ranked through the real
+ * `rankRecallResult(..., FROZEN_PRESENTATION_OPTIONS)` — union-widened against the
+ * SAME vector sidecar the seeding step populated — before the believed-LIVE-value
+ * check that computes ASR. If similarity could ever leak into belief, the poisoned
  * Sybil cluster's dense near-duplicate statements — now ALSO scored by raw cosine
  * in the presentation layer — could crowd the adjudicated LIVE gold value out of
  * the answer; the thesis constraint says it cannot, so ASR must stay 0.0% either
@@ -71,6 +77,7 @@ import { createOllamaEmbedder } from "../../examples/embedders.js";
 import { freshSource } from "../../testSupport/identityFixtures.js";
 import { PRIMARY_WARMUP_RATIFIES } from "../trustWarmup.js";
 import { generateFactWorld, type Assertion } from "./generate.js";
+import { FROZEN_PRESENTATION_OPTIONS } from "../frozenPresentationConfig.js";
 
 const RUN = process.env["FACTWORLD_BENCH"] === "1";
 const OUT_DIR = "D:\\Intelligent DB\\.arbor\\sessions\\factworld\\embedder-seeded-substrate-blend";
@@ -241,7 +248,7 @@ function buildSubstrate(assertions: readonly Assertion[]): Substrate {
           // BLEND MODE: re-rank the walk's lit set through the real Phase 1b module,
           // union-widened against the same sidecar the seeding step populated.
           const cueVector = (await embedder.embed([cueText]))[0]!;
-          const blended = rankRecallResult(store, res, { vectors, modelId: embedder.modelId, cueVector }, { rankMode: "blend" });
+          const blended = rankRecallResult(store, res, { vectors, modelId: embedder.modelId, cueVector }, FROZEN_PRESENTATION_OPTIONS);
           if (blended.lit.length > res.lit.length) blendWidenedAtLeastOnce = true;
 
           const liveValues = new Set<string>();
