@@ -31,13 +31,17 @@
  */
 
 import type {
+  ContentHash,
   Strand,
   StrandId,
   EntityId,
   AttributeKey,
   Activation,
+  EmbedderPort,
+  WalkConfig,
 } from "../core/types.js";
 import type { StrandStore } from "../store/StrandStore.js";
+import type { VectorSidecar } from "../store/vectorSidecar.js";
 import type { WalkSeed } from "../traversal/walk.js";
 
 // ---------------------------------------------------------------------------
@@ -167,7 +171,7 @@ function strandTokens(
  * payload is opaque (`unknown`) by contract, but the facade stores `{ text }`, so we
  * prefer a string `text` field; otherwise fall back to a JSON rendering. Pure.
  */
-export function strandText(strand: Strand): string {
+export function strandText(strand: { readonly payload: unknown }): string {
   const p = strand.payload;
   if (typeof p === "string") return p;
   if (p !== null && typeof p === "object") {
@@ -306,6 +310,204 @@ export function createLexicalCueResolver(
         seeds.push({ strandId: id, energy: clampEnergy(energy) });
       }
       return seeds;
+    },
+  };
+}
+
+// ---------------------------------------------------------------------------
+// Embedding-augmented resolver (Phase-1 retrieval spec §3) — the seed-UNION seam
+// ---------------------------------------------------------------------------
+
+/** Default cosine top-K candidates pulled from the vector sidecar (spec §3). */
+export const DEFAULT_EMBED_SEED_K = 16;
+
+/**
+ * Default hard ceiling on an embedding-proposed seed's energy, IN ADDITION to
+ * the mandatory dynamic clamp (never outrank a lexical/entity hit). `1` = no
+ * extra ceiling beyond the dynamic clamp.
+ */
+export const DEFAULT_EMBED_SEED_ENERGY_CAP = 1;
+
+/** Options for {@link createEmbeddingCueResolver}. */
+export interface EmbeddingCueResolverOptions {
+  /**
+   * The lexical/entity baseline to union embedding candidates INTO. Defaults to
+   * a fresh {@link createLexicalCueResolver} over the same store. Supplying an
+   * already-populated resolver here means embedding candidates union with
+   * exactly what that resolver would have returned alone.
+   */
+  readonly base?: CueResolver;
+  /** Default cosine top-K (overridable per-call). Default {@link DEFAULT_EMBED_SEED_K}. */
+  readonly embedSeedK?: number;
+  /** Default energy ceiling (overridable per-call). Default {@link DEFAULT_EMBED_SEED_ENERGY_CAP}. */
+  readonly embedSeedEnergyCap?: number;
+}
+
+/**
+ * A {@link CueResolver} widened with an ADDITIONAL async entry point that
+ * performs the embedder-seeded union. The base sync `resolve` is UNTOUCHED —
+ * see {@link createEmbeddingCueResolver}'s doc for why the embedder is never on
+ * that path.
+ */
+export interface EmbeddingSeededCueResolver extends CueResolver {
+  /**
+   * Resolve a cue exactly like {@link CueResolver.resolve}, PLUS an embedder-
+   * seeded union (Phase-1 retrieval spec §3):
+   *   1. Embed `cue.text` (cached per resolver instance/session; a failed embed
+   *      degrades to the lexical/entity result alone — never a gate).
+   *   2. Cosine top-K (`embedSeedK`, default 16) over the vector sidecar,
+   *      scoped to `embedder.modelId` (a mismatched-model vector is ignored by
+   *      the sidecar itself).
+   *   3. Map each match's `content_hash` back to its strand id(s) (echoes share
+   *      one vector — every strand with that hash is proposed) and UNION them
+   *      into the lexical/entity seed set — NEVER replacing an existing seed's
+   *      energy, only adding new ones or raising to a MAX.
+   *   4. Energy: an embedding-proposed seed's energy is its cosine score,
+   *      clamped to `<= embedSeedEnergyCap` (a static config ceiling) AND
+   *      `<= the strongest lexical/entity seed energy this cue produced` (or 1
+   *      when there were none) — similarity may NEVER outrank an exact
+   *      entity/lexical hit.
+   */
+  resolveWithEmbeddings(
+    cue: Cue,
+    config?: Pick<WalkConfig, "embedSeedK" | "embedSeedEnergyCap">,
+  ): Promise<WalkSeed[]>;
+}
+
+/**
+ * Create the embedder-seeded {@link CueResolver}. THE SEAM this module's header
+ * doc anticipated: identical construction shape to
+ * {@link createLexicalCueResolver} plus the embedder + vector sidecar.
+ *
+ * WHY `resolve` stays SYNC and embedding lives on a SEPARATE async method
+ * ({@link EmbeddingSeededCueResolver.resolveWithEmbeddings}): `EmbedderPort.embed`
+ * is inherently async (an HTTP/model call), but {@link CueResolver.resolve} — and
+ * every synchronous caller across this codebase (the activation walk, the
+ * facade's `recall`) — is a hard, load-bearing SYNC contract (see
+ * `store/StrandStore.ts`'s "Synchrony" note). Rather than infect that contract
+ * with `Promise`, this resolver keeps `resolve`/`index` byte-identical to the
+ * lexical baseline (so passing an `EmbeddingSeededCueResolver` anywhere a
+ * `CueResolver` is expected is a no-op change) and exposes the embedder-seeded
+ * union as an ADDITIONAL opt-in async entry point a caller invokes explicitly
+ * before building the `RecallCue` it hands `engine.recall`. This is a
+ * deliberate, conservative resolution of the tension between the spec's async
+ * embedder and the engine's sync-core invariant — documented, not silent.
+ *
+ * `index(strand)` maintains a `content_hash -> Set<StrandId>` map (so a cosine
+ * match on a shared payload resolves to every strand carrying that hash — the
+ * spec's "echoes share one vector") IN ADDITION TO delegating to `base.index`,
+ * and rebuilds itself from `store.allStrands()` at construction, mirroring the
+ * lexical resolver's reopen-survival behavior.
+ */
+export function createEmbeddingCueResolver(
+  store: StrandStore,
+  embedder: EmbedderPort,
+  vectors: VectorSidecar,
+  opts?: EmbeddingCueResolverOptions,
+): EmbeddingSeededCueResolver {
+  const base = opts?.base ?? createLexicalCueResolver(store);
+  const defaultK = opts?.embedSeedK ?? DEFAULT_EMBED_SEED_K;
+  const defaultCap = opts?.embedSeedEnergyCap ?? DEFAULT_EMBED_SEED_ENERGY_CAP;
+
+  /** content_hash -> every strand id currently sharing that hash (echoes). */
+  const byContentHash = new Map<ContentHash, Set<StrandId>>();
+  /** Per-session query-embedding cache (spec §3 step 1), keyed by raw cue text. */
+  const queryCache = new Map<string, Float32Array>();
+
+  function indexContentHash(strand: Strand): void {
+    let bucket = byContentHash.get(strand.content_hash);
+    if (bucket === undefined) {
+      bucket = new Set<StrandId>();
+      byContentHash.set(strand.content_hash, bucket);
+    }
+    bucket.add(strand.id);
+  }
+
+  for (const strand of store.allStrands()) indexContentHash(strand);
+
+  async function embedCue(text: string): Promise<Float32Array | null> {
+    const cached = queryCache.get(text);
+    if (cached !== undefined) return cached;
+    try {
+      const [vec] = await embedder.embed([text]);
+      if (vec === undefined) return null;
+      queryCache.set(text, vec);
+      return vec;
+    } catch {
+      // FAIL-OPEN (spec §2): embeddings are an accelerator, never a gate — a
+      // failed cue embedding degrades to the lexical/entity result alone.
+      return null;
+    }
+  }
+
+  return {
+    index(strand: Strand): void {
+      base.index(strand);
+      indexContentHash(strand);
+    },
+
+    // UNCHANGED sync contract — see the factory doc's "WHY resolve stays sync".
+    resolve(cue: Cue): WalkSeed[] {
+      return base.resolve(cue);
+    },
+
+    async resolveWithEmbeddings(
+      cue: Cue,
+      config?: Pick<WalkConfig, "embedSeedK" | "embedSeedEnergyCap">,
+    ): Promise<WalkSeed[]> {
+      const k = config?.embedSeedK ?? defaultK;
+      const cap = config?.embedSeedEnergyCap ?? defaultCap;
+
+      // 1) BASELINE — existing lexical/entity seeds. UNION never replace: every
+      //    lexical/exact seed keeps EXACTLY the energy the baseline gave it.
+      const lexicalSeeds = base.resolve(cue);
+      const combined = new Map<StrandId, number>();
+      let lexicalCap = 0;
+      for (const seed of lexicalSeeds) {
+        combined.set(seed.strandId, seed.energy);
+        if (seed.energy > lexicalCap) lexicalCap = seed.energy;
+      }
+      // No lexical/entity seed at all: nothing to "outrank" this cue, so the
+      // DYNAMIC clamp degrades to full energy — the STATIC embedSeedEnergyCap
+      // ceiling below still applies regardless.
+      if (lexicalSeeds.length === 0) lexicalCap = 1;
+
+      // 2) EMBED the cue + cosine TOP-K over the sidecar (skip entirely when
+      //    there is no text to embed, or K is non-positive — the cue's exact/
+      //    lexical channels still work with no embedder cost).
+      if (cue.text !== undefined && cue.text.trim().length > 0 && k > 0) {
+        const queryVec = await embedCue(cue.text);
+        if (queryVec !== null) {
+          const matches = vectors.topK(queryVec, embedder.modelId, k);
+          for (const match of matches) {
+            const strandIds = byContentHash.get(match.contentHash);
+            if (strandIds === undefined) continue; // vector has no live strand (stale)
+            // 3+4) UNION + ENERGY CLAMP: seedEnergy = cosineScore, clamped to
+            //    <= embedSeedEnergyCap AND <= lexicalCap — similarity may NEVER
+            //    outrank an exact lexical/entity hit.
+            const cosineScore = Math.max(0, match.score);
+            const proposed = Math.min(cosineScore, cap, lexicalCap);
+            if (proposed <= 0) continue;
+            for (const strandId of strandIds) {
+              const existing = combined.get(strandId);
+              if (existing === undefined || proposed > existing) {
+                combined.set(strandId, proposed);
+              }
+            }
+          }
+        }
+      }
+
+      // Rank energy desc, id asc — the same determinism rule the lexical
+      // resolver uses, so the union's output order is reproducible.
+      const ranked = [...combined.entries()].sort((a, b) => {
+        if (b[1] !== a[1]) return b[1] - a[1];
+        return a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : 0;
+      });
+      return ranked.map(([strandId, energy]) => ({
+        strandId,
+        energy: energy as Activation,
+      }));
     },
   };
 }

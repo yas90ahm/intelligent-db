@@ -86,6 +86,8 @@ export type {
   LitStrand,
   HaltStamp,
   WalkConfig,
+  // Phase-1 retrieval spec §1 — the optional, injected embedder port
+  EmbedderPort,
 } from "./core/types.js";
 
 // ===========================================================================
@@ -105,6 +107,41 @@ export type {
   StoreTxn,
 } from "./store/StrandStore.js";
 
+// Schema migration ladder (docs/specs/PHASE2_DURABILITY_SPEC.md §1): `PRAGMA
+// user_version` as the schema version, an ordered ladder, refuse-to-open on a
+// newer-than-known version.
+export {
+  runMigrations,
+  readUserVersion,
+  LATEST_SCHEMA_VERSION,
+  MIGRATIONS,
+  UnknownFutureSchemaError,
+} from "./store/migrations.js";
+
+export type { Migration } from "./store/migrations.js";
+
+// Online snapshot + WAL archiving + point-in-time restore
+// (docs/specs/PHASE2_DURABILITY_SPEC.md §2).
+export {
+  snapshotDb,
+  readSnapshotManifest,
+  manifestPathFor,
+  createWalArchiver,
+  restoreToTimestamp,
+} from "./store/backup.js";
+
+export type {
+  ChainHeadLike,
+  SnapshotManifest,
+  WalArchiveOptions,
+  WalArchiver,
+  ArchivedSegmentMeta,
+  ArchiveBaseMeta,
+  ChainVerifier,
+  RestoreOptions,
+  RestoreResult,
+} from "./store/backup.js";
+
 // Value-level AES-256-GCM encryption-at-rest adapter (docs/specs/PHASE2_DURABILITY_SPEC.md §3).
 export { createEncryptedStore, EncryptedStoreIntegrityError } from "./store/encryptedStore.js";
 
@@ -112,6 +149,20 @@ export type {
   KeyProvider,
   EncryptedStoreErrorReason,
 } from "./store/encryptedStore.js";
+
+// The vector sidecar (Phase-1 retrieval spec §2) — pure storage, never belief.
+export {
+  createMemoryVectorSidecar,
+  createSqliteVectorSidecar,
+  cosineSimilarity,
+} from "./store/vectorSidecar.js";
+
+export type {
+  VectorSidecar,
+  SqliteVectorSidecar,
+  StoredVector,
+  VectorMatch,
+} from "./store/vectorSidecar.js";
 
 // ===========================================================================
 // traversal — spreading-activation walk + two-phase halting controller
@@ -388,6 +439,7 @@ export type {
   IntelligentDb,
   ConsolidationPort,
   RatificationDeps,
+  RetrievalDeps,
   AdjudicateOptions,
   ApproveOptions,
   DisownOptions,
@@ -421,12 +473,18 @@ export {
   DEFAULT_STOPWORDS,
   DEFAULT_TOP_K,
   DEFAULT_ENERGY_FLOOR,
+  // Phase-1 retrieval spec §3 — the embedder-seeded UNION resolver
+  createEmbeddingCueResolver,
+  DEFAULT_EMBED_SEED_K,
+  DEFAULT_EMBED_SEED_ENERGY_CAP,
 } from "./recall/cueResolver.js";
 
 export type {
   Cue,
   CueResolver,
   LexicalCueResolverOptions,
+  EmbeddingCueResolverOptions,
+  EmbeddingSeededCueResolver,
 } from "./recall/cueResolver.js";
 
 // ===========================================================================

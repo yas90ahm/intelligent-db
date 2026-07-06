@@ -75,11 +75,14 @@ import type {
   WalkConfig,
   LitStrand,
   HaltStamp,
+  EmbedderPort,
 } from "./core/types.js";
 
 import type { StrandStore, StoreTxn } from "./store/StrandStore.js";
+import type { VectorSidecar } from "./store/vectorSidecar.js";
 import type { WalkSeed, WalkResult } from "./traversal/walk.js";
 import { activationWalk } from "./traversal/walk.js";
+import { strandText } from "./recall/cueResolver.js";
 import type { HaltingController } from "./traversal/halting.js";
 import { createHaltingController } from "./traversal/halting.js";
 import type { SourceIdentityLayer } from "./identity/index.js";
@@ -599,6 +602,33 @@ export interface IntelligentDb {
   writeFactsBatch(inputs: readonly WriteFactInput[]): StrandId[];
 
   /**
+   * {@link writeFact}, PLUS an accelerator: when a {@link RetrievalDeps} was
+   * wired at construction (Phase-1 retrieval spec §1-2), embeds the fact's text
+   * BEFORE opening the write transaction and — on success — populates the
+   * vector sidecar keyed by the fresh strand's `content_hash` inside the SAME
+   * transaction `writeFact` already uses (no `await` ever runs inside an open
+   * txn). Embedding is an ACCELERATOR, NEVER A GATE: a failed/throwing embed
+   * call (network error, unreachable model, …) is caught and the fact is
+   * written WITHOUT a vector — `writeFactWithEmbedding` never rejects because
+   * an embedder failed. An existing vector for the SAME `content_hash` under
+   * the SAME `embedder.modelId` is reused (no redundant embed call — echoes
+   * share one vector).
+   *
+   * When NO {@link RetrievalDeps} is wired (the default), this is IDENTICAL to
+   * calling {@link writeFact} (wrapped in a resolved `Promise`) — the embedder
+   * is never referenced.
+   *
+   * THE THESIS CONSTRAINT: the resulting vector is consumed EXCLUSIVELY by the
+   * seed-selection seam (`recall/cueResolver.ts`'s `createEmbeddingCueResolver`).
+   * It never touches `fact_state`, edge weights, adjudication, independence
+   * counting, reputation, or eviction — this method mints EXACTLY the same
+   * strand `writeFact` would, plus one extra sidecar row.
+   *
+   * @returns the id of the newly created strand (same semantics as {@link writeFact}).
+   */
+  writeFactWithEmbedding(input: WriteFactInput): Promise<StrandId>;
+
+  /**
    * Run a traversal. Builds a {@link HaltingController} and a share-normalized
    * best-first activation walk over the store seeded by the cue, then returns the
    * lit strands plus the halt stamp. The model SPEAKS here; it does not confirm.
@@ -793,6 +823,14 @@ export const DEFAULT_QUARANTINE_THRESHOLD = 0.1;
  * from a source whose strongest single anchor weight is below 0.10 lands
  * PROVISIONAL, not LIVE. Pass `{ quarantineThreshold: 0 }` for the explicit
  * legacy always-LIVE escape hatch.
+ *
+ * The {@link RetrievalDeps} `retrieval` param (Phase-1 retrieval spec §1) is the
+ * OPTIONAL embedder + vector-sidecar wiring. OMITTED (or null, the default)
+ * means behavior is BIT-FOR-BIT today's: the core ships no embedder and never
+ * calls one. When supplied, ONLY {@link IntelligentDb.writeFactWithEmbedding}
+ * consults it (`writeFact` itself is UNCHANGED) — see that method's doc and
+ * `core/types.ts`'s `EmbedderPort` doc for the non-negotiable "seeding only,
+ * never belief" constraint.
  */
 export function createIntelligentDb(
   store: StrandStore,
@@ -801,8 +839,31 @@ export function createIntelligentDb(
   reputation: ReputationLedger | null = null,
   ratification: RatificationDeps | null = null,
   ingest: IngestPolicy | null = null,
+  retrieval: RetrievalDeps | null = null,
 ): IntelligentDb {
-  return new IntelligentDbImpl(store, identity, consolidation, reputation, ratification, ingest);
+  return new IntelligentDbImpl(
+    store,
+    identity,
+    consolidation,
+    reputation,
+    ratification,
+    ingest,
+    retrieval,
+  );
+}
+
+/**
+ * OPTIONAL retrieval wiring (Phase-1 retrieval spec §1-2): the injected
+ * {@link EmbedderPort} plus the {@link VectorSidecar} it writes into. Passed as
+ * ONE bag (rather than two separate params) because they are always used
+ * together — an embedder with nowhere to store its vectors, or a vector store
+ * with no embedder to populate it, is not a coherent wiring.
+ */
+export interface RetrievalDeps {
+  /** The injected embedder. Never called by anything except {@link IntelligentDb.writeFactWithEmbedding}. */
+  readonly embedder: EmbedderPort;
+  /** The vector sidecar {@link IntelligentDb.writeFactWithEmbedding} populates. */
+  readonly vectors: VectorSidecar;
 }
 
 /**
@@ -1410,6 +1471,14 @@ class IntelligentDbImpl implements IntelligentDb {
    */
   readonly #quarantineThreshold: number;
 
+  /**
+   * OPTIONAL retrieval wiring (Phase-1 retrieval spec §1-2): the embedder + the
+   * vector sidecar it writes into. `null` (the default) means
+   * {@link writeFactWithEmbedding} degrades to a plain {@link writeFact} call —
+   * the embedder is never invoked and no vector is ever written.
+   */
+  readonly #retrieval: RetrievalDeps | null;
+
   constructor(
     store: StrandStore,
     identity: SourceIdentityLayer,
@@ -1417,6 +1486,7 @@ class IntelligentDbImpl implements IntelligentDb {
     reputation: ReputationLedger | null,
     ratification: RatificationDeps | null,
     ingest: IngestPolicy | null,
+    retrieval: RetrievalDeps | null = null,
   ) {
     this.#store = store;
     this.#identity = identity;
@@ -1424,6 +1494,7 @@ class IntelligentDbImpl implements IntelligentDb {
     this.#reputation = reputation;
     this.#ratification = ratification;
     this.#quarantineThreshold = ingest?.quarantineThreshold ?? DEFAULT_QUARANTINE_THRESHOLD;
+    this.#retrieval = retrieval;
   }
 
   /**
@@ -1693,6 +1764,72 @@ class IntelligentDbImpl implements IntelligentDb {
         // reconcile the cached share-normalization denominator (one call for the
         // whole batch of citations, O(degree) total).
         this.#store.recomputeOutWeightSum(fresh.id);
+      }
+    });
+
+    return fresh.id;
+  }
+
+  // -------------------------------------------------------------------------
+  // writeFactWithEmbedding — writeFact + the optional vector-sidecar accelerator
+  // -------------------------------------------------------------------------
+
+  async writeFactWithEmbedding(input: WriteFactInput): Promise<StrandId> {
+    if (this.#retrieval === null) {
+      // No retrieval wiring: BIT-FOR-BIT writeFact (the embedder is never
+      // referenced, matching "absent => today's behavior").
+      return this.writeFact(input);
+    }
+    const { embedder, vectors } = this.#retrieval;
+
+    // The content_hash the fresh strand WILL carry is a pure function of
+    // (entity, payload) — identical to what makeObservedStrand computes below —
+    // so we can key/reuse the vector BEFORE minting the strand or opening a txn.
+    const contentHash = hashPayload(input.entity, input.payload);
+    const text = strandText({ payload: input.payload });
+
+    // EMBED BEFORE THE TXN OPENS (spec §2): no `await` may run inside an open
+    // transaction. Reuse an existing vector for the SAME content_hash under the
+    // SAME model (echoes share one vector, no redundant embed call); otherwise
+    // embed fresh. A throwing/failing embed is caught here — embeddings are an
+    // ACCELERATOR, never a gate, so the write proceeds without one.
+    let vec: Float32Array | null = null;
+    const existing = vectors.get(contentHash);
+    if (existing !== null && existing.modelId === embedder.modelId) {
+      vec = existing.vec;
+    } else {
+      try {
+        const [embedded] = await embedder.embed([text]);
+        vec = embedded ?? null;
+      } catch {
+        vec = null;
+      }
+    }
+
+    // From here, mirror writeFact's synchronous core EXACTLY (same causal-origin
+    // resolution, same trust-tiered ingest gate, same strand mint) — see
+    // writeFactsBatch's "Mirror writeFact EXACTLY" precedent for why this
+    // codebase duplicates rather than shares this body: the belief-relevant
+    // write path stays easy to diff/audit against the original verb.
+    const at = now();
+    const resolved = resolveCausalOrigin(input, at, (id) => this.#store.getStrand(id));
+    const factState = this.#ingestStateFor(input.stamp.source_id);
+    const fresh = makeObservedStrand(input, at, resolved.provenance, factState);
+
+    withTxn(this.#store, () => {
+      this.#store.putStrand(fresh);
+      if (resolved.derivationWitnesses.length > 0) {
+        for (const witness of resolved.derivationWitnesses) {
+          this.#store.putEdge(derivationEdgeFor(fresh.id, witness));
+        }
+        this.#store.recomputeOutWeightSum(fresh.id);
+      }
+      // Populate the vector sidecar — a plain, SYNCHRONOUS upsert (no await),
+      // so it enrolls in this same transaction. Skipped entirely when the embed
+      // step above yielded nothing (fail-open: the fact still lands, just
+      // without an accelerator).
+      if (vec !== null) {
+        vectors.put(fresh.content_hash, embedder.modelId, vec);
       }
     });
 

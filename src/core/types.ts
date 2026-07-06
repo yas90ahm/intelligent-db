@@ -283,6 +283,37 @@ export interface IdentityStamp {
 }
 
 // ---------------------------------------------------------------------------
+// EmbedderPort (Phase-1 retrieval spec §1) — OPTIONAL, INJECTED, zero-dep core
+// ---------------------------------------------------------------------------
+
+/**
+ * OPTIONAL, INJECTED batch text embedder. The library ships NO implementation of
+ * this in the core (zero runtime deps preserved); reference implementations (an
+ * Ollama HTTP embedder and the hashing-trick embedder) live in
+ * `src/examples/embedders.ts`, never imported from the barrel.
+ *
+ * THE THESIS CONSTRAINT (non-negotiable, see docs/specs/PHASE1_RETRIEVAL_SPEC.md):
+ * embeddings may only ever propose WHERE TO LOOK (seeding candidates for
+ * `recall`). They must NEVER influence edge weights, `fact_state`, adjudication,
+ * independence counting, reputation, eviction, or what the walk does after
+ * seeding. An `EmbedderPort` is consumed EXCLUSIVELY by the seed-selection step
+ * (`recall/cueResolver.ts`'s `createEmbeddingCueResolver`) and the vector sidecar
+ * writer (`api.ts`'s `writeFactWithEmbedding`) — nowhere else.
+ *
+ * `createIntelligentDb(..., retrieval?: { embedder, vectors })` — absent (the
+ * default) means behavior is bit-for-bit today's; the engine never calls this
+ * port unless a caller wires it.
+ */
+export interface EmbedderPort {
+  /** Batch-embed. Deterministic for identical inputs within a session. */
+  embed(texts: string[]): Promise<Float32Array[]>;
+  /** Fixed output dimensionality of every vector this embedder produces. */
+  readonly dim: number;
+  /** Identifies the model so stored vectors are never mixed across models. */
+  readonly modelId: string;
+}
+
+// ---------------------------------------------------------------------------
 // Edges (threads)
 // ---------------------------------------------------------------------------
 
@@ -562,6 +593,22 @@ export interface WalkConfig {
   readonly bridgeBudgetFraction: number;
   /** Consecutive zero-yield crossings that trip the bridge circuit-breaker (2). */
   readonly bridgeZeroYieldBreaker: number;
+
+  // -- Phase-1 retrieval spec §3: embedder seed-union knobs (OPTIONAL) ------
+  /**
+   * Cosine top-K candidates pulled from the vector sidecar when seeding a recall
+   * with an {@link EmbedderPort} configured (`createEmbeddingCueResolver`).
+   * Consulted ONLY by that seam; the core walk never reads this. Default 16
+   * when omitted.
+   */
+  readonly embedSeedK?: number;
+  /**
+   * Hard ceiling on an embedding-PROPOSED seed's energy, in ADDITION to the
+   * mandatory dynamic clamp ("similarity may never outrank an exact lexical/
+   * entity hit" — see `createEmbeddingCueResolver`). Default 1 (no extra
+   * ceiling beyond the dynamic per-cue clamp) when omitted.
+   */
+  readonly embedSeedEnergyCap?: number;
 }
 
 /** Default walk configuration grounded in CLAUDE.md's resolved halting design. */
