@@ -26,26 +26,48 @@
  *   ANNOTATES that existing candidate with a cosine score for scoring
  *   purposes — it is never duplicated or restated as a second entry.
  *
- * §3 — the presentation score:
- *   `score = wCos * cosine(cue, strand) + wWalk * normalizedWalkEnergy + wState * stateWeight`
+ * §3 — the presentation score (RE-DERIVED for Phase 1c,
+ *   `docs/specs/PHASE1C_RANKING_CALIBRATION_SPEC.md`, to stay coherent across BOTH
+ *   {@link PresentationScoreMode}s):
+ *
+ *   1. A RAW FUSION SCORE that never reads `fact_state`:
+ *      - `'linear'` mode: `raw = wCos * cosine(cue, strand) + wWalk * normalizedWalkEnergy`.
+ *      - `'rrf'` mode (reciprocal-rank fusion): `raw = 1/(k + cosineRank) + 1/(k +
+ *        walkRank)`, where `cosineRank`/`walkRank` are 1-indexed ORDINAL ranks
+ *        (ties broken by `strandId` ascending) of this candidate within the
+ *        CURRENT candidate set by cosine / raw walk energy descending, and `k`
+ *        defaults to {@link DEFAULT_RRF_K} (60). Rank fusion is scale-free — it
+ *        never needs `cosine` and `walkEnergy` to share a distribution, unlike the
+ *        hand-tuned linear mix.
+ *   2. `stateWeight` ({@link STATE_WEIGHT}: LIVE 1.0, PROVISIONAL 0.85, DEMOTED
+ *      0.4 — config-overridable constants) applies as a POST-FUSION MULTIPLIER,
+ *      IDENTICALLY in both modes: `score = raw * (1 - wState * (1 - stateWeight))`.
+ *      At `wState=0` the multiplier is exactly 1 (no effect); at `wState=1` it
+ *      collapses to `stateWeight` itself. LIVE always multiplies by exactly 1
+ *      regardless of `wState` — the nudge only ever discounts non-LIVE
+ *      candidates, never boosts LIVE above its own raw fusion score. A
+ *      multiplier (not Phase 1b's additive term) is what keeps the nudge
+ *      meaningful alongside RRF's small, bounded `raw` range (`<= 2/(k+1)`) — an
+ *      additive `wState*stateWeight` term of Phase-1b's magnitude would swamp an
+ *      RRF fusion score outright. It reads `fact_state`, it never sets it, and
+ *      exists so a quarantined (PROVISIONAL) flood cannot crowd the top ranks
+ *      ahead of a LIVE incumbent purely on cosine/energy.
  *   - `normalizedWalkEnergy` is `walkEnergy` min-max normalized WITHIN the
  *     candidate set at hand (0 for a union-added candidate the walk never
  *     lit — this falls out of the min-max normalization for free, since a
  *     union-added candidate's raw `walkEnergy` is exactly 0 and 0 always
- *     participates in the observed minimum).
- *   - `stateWeight` ({@link STATE_WEIGHT}): LIVE 1.0, PROVISIONAL 0.85,
- *     DEMOTED 0.4 — config-overridable constants. A PRESENTATION nudge only:
- *     it reads `fact_state`, it never sets it, and exists so a quarantined
- *     (PROVISIONAL) flood cannot crowd the top ranks ahead of a LIVE
- *     incumbent purely on cosine/energy.
+ *     participates in the observed minimum). RRF mode still reports this field
+ *     for transparency but ranks on raw `walkEnergy` order (order-invariant
+ *     under the monotonic normalization).
  *   - Weights ({@link PresentationWeights}) default to
- *     {@link DEFAULT_PRESENTATION_WEIGHTS} — the middle point of the spec's
- *     own sweep grid (`wCos in {0.5,0.7,0.9}`, `wWalk in {0.1,0.3,0.5}`,
- *     `wState` fixed at 0.1). NOTE: this default is NOT yet frozen by a
- *     LoCoMo DEV-split measurement sweep (spec §6) — that sweep, and
- *     freezing the tuned weights before TEST is scored, is a follow-on step
- *     gated on the spec's adversarial gates (§5) re-passing in blend mode.
- *     Fully config-overridable via {@link RecallOptions.weights} today.
+ *     {@link DEFAULT_PRESENTATION_WEIGHTS}. Phase 1b's sweep grid: wCos in
+ *     {0.5,0.7,0.9}, wWalk in {0.1,0.3,0.5}, wState fixed 0.1. Phase 1c's finer
+ *     grid: wCos in {0.8,0.9,1.0}, wWalk in {0.0,0.05,0.1,0.3}, wState fixed 0.1,
+ *     PLUS the `'rrf'` {@link PresentationScoreMode} as an alternative to the
+ *     whole linear grid — see `docs/specs/PHASE1C_RANKING_CALIBRATION_SPEC.md`
+ *     for the frozen winner.
+ *     Fully config-overridable via {@link RecallOptions.weights} /
+ *     {@link RecallOptions.scoreMode} / {@link RecallOptions.rrfK}.
  *
  * §4 — rendering/labels unchanged: this module never touches `Strand`,
  *   never computes `fact_state`, and returns plain data the caller renders
@@ -74,6 +96,19 @@ import type { RecallResult } from "../api.js";
 
 /** Presentation ranking mode (spec §1). Default `'walk'` — zero behavior change. */
 export type RankMode = "walk" | "blend";
+
+/**
+ * Phase 1c (`docs/specs/PHASE1C_RANKING_CALIBRATION_SPEC.md`): how a `'blend'`-mode
+ * raw fusion score is computed BEFORE the §3 stateWeight post-fusion multiplier.
+ * `'linear'` (default) is the Phase 1b hand-tuned weighted sum
+ * (`wCos*cosine + wWalk*normalizedWalkEnergy`); `'rrf'` is reciprocal-rank fusion
+ * over the candidate's cosine rank and walk-energy rank. Only meaningful when
+ * `rankMode: 'blend'` — ignored (never read) in `'walk'` mode.
+ */
+export type PresentationScoreMode = "linear" | "rrf";
+
+/** Default RRF constant `k` (spec: "k=60 default"). */
+export const DEFAULT_RRF_K = 60;
 
 /** Weights for the §3 presentation score. All three are dimensionless, additive terms. */
 export interface PresentationWeights {
@@ -113,6 +148,10 @@ export interface RecallOptions {
   readonly unionTopN?: number;
   /** Override any subset of {@link DEFAULT_PRESENTATION_WEIGHTS}. */
   readonly weights?: Partial<PresentationWeights>;
+  /** `'linear'` (default) or `'rrf'` — only meaningful when `rankMode: 'blend'`. */
+  readonly scoreMode?: PresentationScoreMode;
+  /** RRF constant `k` (default {@link DEFAULT_RRF_K}); ignored outside `'rrf'` scoreMode. */
+  readonly rrfK?: number;
 }
 
 // ---------------------------------------------------------------------------
@@ -257,19 +296,28 @@ export interface ScoredCandidate extends PresentationCandidate {
   readonly normalizedWalkEnergy: number;
   readonly stateWeight: number;
   readonly score: number;
+  /** 1-indexed ordinal cosine rank within the candidate set — `'rrf'` scoreMode only. */
+  readonly cosineRank?: number;
+  /** 1-indexed ordinal walk-energy rank within the candidate set — `'rrf'` scoreMode only. */
+  readonly walkRank?: number;
 }
 
 /**
- * §3 — score every candidate: `wCos*cosine + wWalk*normalizedWalkEnergy +
- * wState*stateWeight`. `normalizedWalkEnergy` min-max normalizes `walkEnergy`
- * ACROSS THIS CANDIDATE SET (not globally) — see this module's header doc
- * for why union-added candidates fall out at exactly 0 for free. Does NOT
- * sort; {@link rankForPresentation} does the union + score + sort together.
+ * §3 step 2 — the shared post-fusion stateWeight multiplier, identical in both
+ * {@link PresentationScoreMode}s: `1 - wState * (1 - stateWeight)`. `wState=0` ⇒
+ * multiplier exactly 1 (no-op); LIVE (`stateWeight=1`) ⇒ multiplier exactly 1
+ * regardless of `wState` (the nudge only ever discounts non-LIVE candidates).
  */
-export function scorePresentation(
-  candidates: readonly PresentationCandidate[],
-  weights: PresentationWeights = DEFAULT_PRESENTATION_WEIGHTS,
-): ScoredCandidate[] {
+function stateMultiplier(stateWeight: number, wState: number): number {
+  return 1 - wState * (1 - stateWeight);
+}
+
+/**
+ * Min-max normalize `walkEnergy` ACROSS `candidates` (not globally) — see this
+ * module's header doc for why union-added candidates fall out at exactly 0 for
+ * free. Shared by both {@link scorePresentation} and {@link scorePresentationRrf}.
+ */
+function normalizeWalkEnergies(candidates: readonly PresentationCandidate[]): Map<string, number> {
   let lo = Infinity;
   let hi = -Infinity;
   for (const c of candidates) {
@@ -277,13 +325,81 @@ export function scorePresentation(
     if (c.walkEnergy > hi) hi = c.walkEnergy;
   }
   const span = hi - lo;
+  const out = new Map<string, number>();
+  for (const c of candidates) {
+    out.set(String(c.strandId), span > 0 ? (c.walkEnergy - lo) / span : c.walkEnergy > 0 ? 1 : 0);
+  }
+  return out;
+}
+
+/**
+ * 1-indexed ORDINAL ranks of `candidates` by `keyFn` descending, ties broken by
+ * `strandId` ascending (deterministic — no two candidates share a rank). Used by
+ * {@link scorePresentationRrf} for the cosine-rank / walk-energy-rank fusion inputs.
+ */
+function ordinalRanks(
+  candidates: readonly PresentationCandidate[],
+  keyFn: (c: PresentationCandidate) => number,
+): Map<string, number> {
+  const sorted = [...candidates].sort((a, b) => {
+    const ka = keyFn(a);
+    const kb = keyFn(b);
+    if (kb !== ka) return kb - ka;
+    const sa = String(a.strandId);
+    const sb = String(b.strandId);
+    return sa < sb ? -1 : sa > sb ? 1 : 0;
+  });
+  const ranks = new Map<string, number>();
+  sorted.forEach((c, i) => ranks.set(String(c.strandId), i + 1));
+  return ranks;
+}
+
+/**
+ * §3, `'linear'` scoreMode: `raw = wCos*cosine + wWalk*normalizedWalkEnergy`,
+ * then `score = raw * stateMultiplier`. `normalizedWalkEnergy` min-max
+ * normalizes `walkEnergy` across this candidate set. Does NOT sort;
+ * {@link rankForPresentation} does the union + score + sort together.
+ */
+export function scorePresentation(
+  candidates: readonly PresentationCandidate[],
+  weights: PresentationWeights = DEFAULT_PRESENTATION_WEIGHTS,
+): ScoredCandidate[] {
+  const normEnergyById = normalizeWalkEnergies(candidates);
 
   return candidates.map((c) => {
-    const normalizedWalkEnergy = span > 0 ? (c.walkEnergy - lo) / span : c.walkEnergy > 0 ? 1 : 0;
+    const normalizedWalkEnergy = normEnergyById.get(String(c.strandId))!;
     const stateWeight = stateWeightOf(c.factState);
-    const score =
-      weights.wCos * c.cosine + weights.wWalk * normalizedWalkEnergy + weights.wState * stateWeight;
+    const raw = weights.wCos * c.cosine + weights.wWalk * normalizedWalkEnergy;
+    const score = raw * stateMultiplier(stateWeight, weights.wState);
     return { ...c, normalizedWalkEnergy, stateWeight, score };
+  });
+}
+
+/**
+ * §3, `'rrf'` scoreMode (Phase 1c): reciprocal-rank fusion of the candidate's
+ * cosine rank and walk-energy rank — `raw = 1/(k+cosineRank) + 1/(k+walkRank)` —
+ * then `score = raw * stateMultiplier` (identical post-fusion treatment to
+ * {@link scorePresentation}). `wCos`/`wWalk` are NOT read here — RRF replaces the
+ * hand-tuned linear mix entirely; only `wState` carries over. Does NOT sort;
+ * {@link rankForPresentation} does the union + score + sort together.
+ */
+export function scorePresentationRrf(
+  candidates: readonly PresentationCandidate[],
+  weights: PresentationWeights = DEFAULT_PRESENTATION_WEIGHTS,
+  k: number = DEFAULT_RRF_K,
+): ScoredCandidate[] {
+  const normEnergyById = normalizeWalkEnergies(candidates);
+  const cosineRanks = ordinalRanks(candidates, (c) => c.cosine);
+  const walkRanks = ordinalRanks(candidates, (c) => c.walkEnergy);
+
+  return candidates.map((c) => {
+    const normalizedWalkEnergy = normEnergyById.get(String(c.strandId))!;
+    const stateWeight = stateWeightOf(c.factState);
+    const cosineRank = cosineRanks.get(String(c.strandId))!;
+    const walkRank = walkRanks.get(String(c.strandId))!;
+    const raw = 1 / (k + cosineRank) + 1 / (k + walkRank);
+    const score = raw * stateMultiplier(stateWeight, weights.wState);
+    return { ...c, normalizedWalkEnergy, stateWeight, cosineRank, walkRank, score };
   });
 }
 
@@ -302,10 +418,12 @@ export function scorePresentation(
  * `rankMode` is absent" a structural guarantee, not a coincidence: the
  * blend-mode code path is never even reached.
  *
- * `rankMode: 'blend'`: builds the §2 union, computes the §3 score with
- * `options.weights` merged over {@link DEFAULT_PRESENTATION_WEIGHTS}, and
- * sorts by score descending (ties broken by `strandId` ascending, for
- * determinism).
+ * `rankMode: 'blend'`: builds the §2 union, computes the §3 score — dispatched
+ * on `options.scoreMode` (default `'linear'`) to {@link scorePresentation} or
+ * {@link scorePresentationRrf}, with `options.weights` merged over
+ * {@link DEFAULT_PRESENTATION_WEIGHTS} and `options.rrfK` merged over
+ * {@link DEFAULT_RRF_K} — and sorts by score descending (ties broken by
+ * `strandId` ascending, for determinism).
  */
 export function rankForPresentation(
   walkLit: readonly WalkLitCandidate[],
@@ -332,8 +450,12 @@ export function rankForPresentation(
     ...DEFAULT_PRESENTATION_WEIGHTS,
     ...options?.weights,
   };
+  const scoreMode: PresentationScoreMode = options?.scoreMode ?? "linear";
   const unionSet = buildUnionCandidateSet(walkLit, cosineTopN);
-  const scored = scorePresentation(unionSet, weights);
+  const scored =
+    scoreMode === "rrf"
+      ? scorePresentationRrf(unionSet, weights, options?.rrfK ?? DEFAULT_RRF_K)
+      : scorePresentation(unionSet, weights);
   return [...scored].sort((a, b) => {
     if (b.score !== a.score) return b.score - a.score;
     return String(a.strandId) < String(b.strandId) ? -1 : 1;

@@ -488,16 +488,19 @@ export type {
 } from "./recall/cueResolver.js";
 
 // ===========================================================================
-// recall — Phase 1b BLENDED PRESENTATION RANKING (docs/specs/PHASE1B_RANKING_SPEC.md)
+// recall — Phase 1b/1c BLENDED + RRF PRESENTATION RANKING
+// (docs/specs/PHASE1B_RANKING_SPEC.md, docs/specs/PHASE1C_RANKING_CALIBRATION_SPEC.md)
 // ===========================================================================
 
 export {
   DEFAULT_PRESENTATION_WEIGHTS,
   DEFAULT_UNION_TOP_N,
+  DEFAULT_RRF_K,
   STATE_WEIGHT,
   stateWeightOf,
   buildUnionCandidateSet,
   scorePresentation,
+  scorePresentationRrf,
   rankForPresentation,
   cosineTopNCandidates,
   rankRecallResult,
@@ -505,6 +508,7 @@ export {
 
 export type {
   RankMode,
+  PresentationScoreMode,
   PresentationWeights,
   RecallOptions,
   WalkLitCandidate,

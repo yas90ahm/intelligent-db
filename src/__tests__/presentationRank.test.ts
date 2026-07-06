@@ -1,12 +1,16 @@
 /**
- * presentationRank.test.ts — Phase 1b Design §1-4 (docs/specs/PHASE1B_RANKING_SPEC.md).
+ * presentationRank.test.ts — Phase 1b Design §1-4 (docs/specs/PHASE1B_RANKING_SPEC.md)
+ * + Phase 1c RRF scoreMode (docs/specs/PHASE1C_RANKING_CALIBRATION_SPEC.md, Design #1).
  *
  * Covers exactly the invariants the spec's design section makes load-bearing:
  *   1. union-never-removes — buildUnionCandidateSet is strictly additive.
  *   2. walk-mode-unchanged — rankMode absent/'walk' is a byte-identical passthrough.
  *   3. stateWeight nudge ordering — LIVE > PROVISIONAL > DEMOTED at equal cosine/energy.
- *   4. blend score math — the exact wCos/wWalk/wState arithmetic, incl. min-max
- *      normalization of walk energy across the candidate set.
+ *   4. blend score math — the exact 'linear' raw-fusion + post-fusion-multiplier
+ *      arithmetic, incl. min-max normalization of walk energy across the candidate set.
+ *   4b. RRF math + mode parity — exact `1/(k+rank)` fusion, ordinal rank tie-breaking,
+ *      the shared stateWeight post-fusion multiplier applying identically to both
+ *      'linear' and 'rrf', and 'linear' being the (unchanged) default scoreMode.
  * Plus a real store+vectors integration test for the §2 union term (the
  * diagnostic-flagged primary lever: widening `unionTopN` widens coverage).
  */
@@ -26,12 +30,14 @@ import {
   createSqliteVectorSidecar,
   buildUnionCandidateSet,
   scorePresentation,
+  scorePresentationRrf,
   rankForPresentation,
   stateWeightOf,
   cosineTopNCandidates,
   rankRecallResult,
   DEFAULT_PRESENTATION_WEIGHTS,
   DEFAULT_UNION_TOP_N,
+  DEFAULT_RRF_K,
   STATE_WEIGHT,
 } from "../index.js";
 import type {
@@ -255,7 +261,7 @@ describe("stateWeight — presentation nudge orders LIVE > PROVISIONAL > DEMOTED
 // ---------------------------------------------------------------------------
 
 describe("scorePresentation — exact blend score arithmetic", () => {
-  it("matches wCos*cosine + wWalk*normalizedWalkEnergy + wState*stateWeight by hand", () => {
+  it("matches raw=wCos*cosine+wWalk*normalizedWalkEnergy, score=raw*(1-wState*(1-stateWeight)) by hand", () => {
     const candidates = [
       { strandId: asStrandId("a"), contentHash: "h1" as ContentHash, factState: FactState.LIVE, walkEnergy: 0, cosine: 0.2, litByWalk: true },
       { strandId: asStrandId("b"), contentHash: "h2" as ContentHash, factState: FactState.PROVISIONAL, walkEnergy: 5, cosine: 0.8, litByWalk: true },
@@ -271,15 +277,18 @@ describe("scorePresentation — exact blend score arithmetic", () => {
     scored.forEach((s, i) => {
       expect(s.normalizedWalkEnergy).toBeCloseTo(expectedNormEnergy[i]!, 10);
       expect(s.stateWeight).toBeCloseTo(expectedStateWeight[i]!, 10);
-      const expectedScore =
-        weights.wCos * candidates[i]!.cosine +
-        weights.wWalk * expectedNormEnergy[i]! +
-        weights.wState * expectedStateWeight[i]!;
-      expect(s.score).toBeCloseTo(expectedScore, 10);
+      const raw = weights.wCos * candidates[i]!.cosine + weights.wWalk * expectedNormEnergy[i]!;
+      const multiplier = 1 - weights.wState * (1 - expectedStateWeight[i]!);
+      expect(s.score).toBeCloseTo(raw * multiplier, 10);
     });
 
-    // Spot-check candidate b by hand: 0.5*0.8 + 0.3*0.5 + 0.2*0.85 = 0.4+0.15+0.17 = 0.72
-    expect(scored[1]!.score).toBeCloseTo(0.72, 10);
+    // Spot-check candidate b by hand: raw = 0.5*0.8 + 0.3*0.5 = 0.55;
+    // multiplier = 1 - 0.2*(1-0.85) = 1 - 0.03 = 0.97; score = 0.55*0.97 = 0.5335
+    expect(scored[1]!.score).toBeCloseTo(0.5335, 10);
+
+    // LIVE (candidate a) always multiplies by exactly 1, regardless of wState.
+    const rawA = weights.wCos * candidates[0]!.cosine + weights.wWalk * expectedNormEnergy[0]!;
+    expect(scored[0]!.score).toBeCloseTo(rawA, 10);
   });
 
   it("a degenerate all-equal-energy set normalizes energy to 1 when energy > 0, else 0", () => {
@@ -307,6 +316,147 @@ describe("scorePresentation — exact blend score arithmetic", () => {
     const ranked = rankForPresentation(walkLit, [], { rankMode: "blend" });
     expect(ranked[0]!.score).toBe(ranked[1]!.score);
     expect(ranked.map((r) => String(r.strandId))).toEqual(["a", "z"]);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// 4b) RRF math + mode parity (Phase 1c)
+// ---------------------------------------------------------------------------
+
+describe("scorePresentationRrf — exact reciprocal-rank-fusion arithmetic", () => {
+  it("matches raw=1/(k+cosineRank)+1/(k+walkRank), score=raw*(1-wState*(1-stateWeight)) by hand", () => {
+    // 3 candidates with distinct cosine AND distinct walkEnergy so ranks are unambiguous.
+    const candidates = [
+      { strandId: asStrandId("a"), contentHash: "h1" as ContentHash, factState: FactState.LIVE, walkEnergy: 1, cosine: 0.9, litByWalk: true },
+      { strandId: asStrandId("b"), contentHash: "h2" as ContentHash, factState: FactState.PROVISIONAL, walkEnergy: 3, cosine: 0.5, litByWalk: true },
+      { strandId: asStrandId("c"), contentHash: "h3" as ContentHash, factState: FactState.DEMOTED, walkEnergy: 2, cosine: 0.1, litByWalk: false },
+    ];
+    const weights = { wCos: 0.5, wWalk: 0.5, wState: 0.2 };
+    const k = 60;
+    const scored = scorePresentationRrf(candidates, weights, k);
+
+    // cosine descending: a(0.9)=1, b(0.5)=2, c(0.1)=3.
+    // walkEnergy descending: b(3)=1, c(2)=2, a(1)=3.
+    const expected = [
+      { id: "a", cosineRank: 1, walkRank: 3, stateWeight: 1.0 },
+      { id: "b", cosineRank: 2, walkRank: 1, stateWeight: 0.85 },
+      { id: "c", cosineRank: 3, walkRank: 2, stateWeight: 0.4 },
+    ];
+    const byId = new Map(scored.map((s) => [String(s.strandId), s]));
+    for (const e of expected) {
+      const s = byId.get(e.id)!;
+      expect(s.cosineRank).toBe(e.cosineRank);
+      expect(s.walkRank).toBe(e.walkRank);
+      const raw = 1 / (k + e.cosineRank) + 1 / (k + e.walkRank);
+      const multiplier = 1 - weights.wState * (1 - e.stateWeight);
+      expect(s.score).toBeCloseTo(raw * multiplier, 12);
+    }
+
+    // Spot-check candidate b by hand: raw = 1/(60+2) + 1/(60+1) = 1/62 + 1/61
+    const rawB = 1 / 62 + 1 / 61;
+    const multiplierB = 1 - 0.2 * (1 - 0.85);
+    expect(byId.get("b")!.score).toBeCloseTo(rawB * multiplierB, 12);
+
+    // wCos/wWalk are NOT read by RRF fusion — changing them must not move the score.
+    const rescored = scorePresentationRrf(candidates, { ...weights, wCos: 0.99, wWalk: 0.01 }, k);
+    expect(rescored.map((s) => s.score)).toEqual(scored.map((s) => s.score));
+  });
+
+  it("ties in cosine or walkEnergy break by strandId ascending (deterministic ordinal ranks)", () => {
+    const candidates = [
+      { strandId: asStrandId("z"), contentHash: "h1" as ContentHash, factState: FactState.LIVE, walkEnergy: 1, cosine: 0.5, litByWalk: true },
+      { strandId: asStrandId("a"), contentHash: "h2" as ContentHash, factState: FactState.LIVE, walkEnergy: 1, cosine: 0.5, litByWalk: true },
+    ];
+    const scored = scorePresentationRrf(candidates, DEFAULT_PRESENTATION_WEIGHTS);
+    const byId = new Map(scored.map((s) => [String(s.strandId), s]));
+    // Exact tie on both cosine and walkEnergy => "a" (lexicographically first) gets rank 1 on both axes.
+    expect(byId.get("a")!.cosineRank).toBe(1);
+    expect(byId.get("a")!.walkRank).toBe(1);
+    expect(byId.get("z")!.cosineRank).toBe(2);
+    expect(byId.get("z")!.walkRank).toBe(2);
+    // No two candidates share a rank on the same axis.
+    expect(byId.get("a")!.cosineRank).not.toBe(byId.get("z")!.cosineRank);
+  });
+
+  it("default k is 60, matching the spec's 'RRF k=60 default'", () => {
+    expect(DEFAULT_RRF_K).toBe(60);
+    const candidates = [
+      { strandId: asStrandId("a"), contentHash: "h1" as ContentHash, factState: FactState.LIVE, walkEnergy: 1, cosine: 0.9, litByWalk: true },
+      { strandId: asStrandId("b"), contentHash: "h2" as ContentHash, factState: FactState.LIVE, walkEnergy: 0, cosine: 0.1, litByWalk: false },
+    ];
+    const withDefaultK = scorePresentationRrf(candidates, DEFAULT_PRESENTATION_WEIGHTS);
+    const withExplicitK = scorePresentationRrf(candidates, DEFAULT_PRESENTATION_WEIGHTS, DEFAULT_RRF_K);
+    expect(withDefaultK).toEqual(withExplicitK);
+  });
+
+  it("LIVE always multiplies by exactly 1 in RRF too, regardless of wState", () => {
+    const candidates = [
+      { strandId: asStrandId("a"), contentHash: "h1" as ContentHash, factState: FactState.LIVE, walkEnergy: 5, cosine: 0.8, litByWalk: true },
+    ];
+    for (const wState of [0, 0.1, 0.5, 1]) {
+      const scored = scorePresentationRrf(candidates, { wCos: 0.5, wWalk: 0.5, wState });
+      const raw = 1 / (DEFAULT_RRF_K + 1) + 1 / (DEFAULT_RRF_K + 1);
+      expect(scored[0]!.score).toBeCloseTo(raw, 12);
+    }
+  });
+
+  it("wState=0 is a strict no-op multiplier in both scoreModes (rrf and linear agree: raw===score)", () => {
+    const candidates = [
+      { strandId: asStrandId("a"), contentHash: "h1" as ContentHash, factState: FactState.DEMOTED, walkEnergy: 5, cosine: 0.8, litByWalk: true },
+      { strandId: asStrandId("b"), contentHash: "h2" as ContentHash, factState: FactState.PROVISIONAL, walkEnergy: 1, cosine: 0.2, litByWalk: false },
+    ];
+    const weights = { wCos: 0.6, wWalk: 0.4, wState: 0 };
+    const linear = scorePresentation(candidates, weights);
+    const rrf = scorePresentationRrf(candidates, weights);
+    for (const s of linear) {
+      const raw = weights.wCos * s.cosine + weights.wWalk * s.normalizedWalkEnergy;
+      expect(s.score).toBeCloseTo(raw, 12);
+    }
+    for (const s of rrf) {
+      const raw = 1 / (DEFAULT_RRF_K + s.cosineRank!) + 1 / (DEFAULT_RRF_K + s.walkRank!);
+      expect(s.score).toBeCloseTo(raw, 12);
+    }
+  });
+});
+
+describe("rankForPresentation — scoreMode dispatch + mode parity", () => {
+  const walkLit = [
+    wlc("a", "h1", FactState.LIVE, 3),
+    wlc("b", "h2", FactState.PROVISIONAL, 1),
+  ];
+  const cosineTopN = [cc("c", "h3", FactState.DEMOTED, 0.7)];
+
+  it("scoreMode absent defaults to 'linear' (byte-identical to explicit 'linear')", () => {
+    const implicit = rankForPresentation(walkLit, cosineTopN, { rankMode: "blend" });
+    const explicit = rankForPresentation(walkLit, cosineTopN, { rankMode: "blend", scoreMode: "linear" });
+    expect(explicit).toEqual(implicit);
+  });
+
+  it("scoreMode: 'rrf' produces a genuinely different ranking function than 'linear' on this candidate set", () => {
+    const linear = rankForPresentation(walkLit, cosineTopN, { rankMode: "blend", scoreMode: "linear" });
+    const rrf = rankForPresentation(walkLit, cosineTopN, { rankMode: "blend", scoreMode: "rrf" });
+    // Both rank all 3 union candidates (union is scoreMode-independent).
+    expect(linear.map((r) => String(r.strandId)).sort()).toEqual(rrf.map((r) => String(r.strandId)).sort());
+    // rrf candidates carry cosineRank/walkRank; linear candidates don't compute them.
+    for (const r of rrf) {
+      expect(typeof r.cosineRank).toBe("number");
+      expect(typeof r.walkRank).toBe("number");
+    }
+    for (const r of linear) {
+      expect(r.cosineRank).toBeUndefined();
+      expect(r.walkRank).toBeUndefined();
+    }
+  });
+
+  it("rrfK override changes rrf scores but not the mode's basic sanity (all scores positive, sorted descending)", () => {
+    const small = rankForPresentation(walkLit, cosineTopN, { rankMode: "blend", scoreMode: "rrf", rrfK: 1 });
+    const big = rankForPresentation(walkLit, cosineTopN, { rankMode: "blend", scoreMode: "rrf", rrfK: 1000 });
+    for (const arr of [small, big]) {
+      for (const s of arr) expect(s.score).toBeGreaterThan(0);
+      for (let i = 1; i < arr.length; i++) expect(arr[i - 1]!.score).toBeGreaterThanOrEqual(arr[i]!.score);
+    }
+    // A smaller k makes rank-1 dominate more sharply than a huge k (classic RRF property).
+    expect(small[0]!.score).not.toBeCloseTo(big[0]!.score, 6);
   });
 });
 
