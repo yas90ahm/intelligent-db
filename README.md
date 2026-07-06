@@ -1,13 +1,13 @@
 # Intelligent DB
 
-**A memory substrate for AI agents — not a vector database. A deliberate inversion of one.**
+**A memory substrate for AI agents, not a vector database: a deliberate inversion of one.**
 
 [![CI](https://github.com/yas90ahm/intelligent-db/actions/workflows/ci.yml/badge.svg)](https://github.com/yas90ahm/intelligent-db/actions/workflows/ci.yml)
 [![License: Apache-2.0](https://img.shields.io/badge/License-Apache--2.0-blue.svg)](./LICENSE)
 [![Node](https://img.shields.io/badge/node-%3E%3D22.13-brightgreen)](https://nodejs.org)
 
 AI agents fail two ways: they **forget** (context evaporates within and across sessions),
-and they **hallucinate** — worse, they can't tell their own recall from their own
+and they **hallucinate**. Worse, they can't tell their own recall from their own
 invention. The standard fix, a vector database, quietly makes the second failure *easier*:
 cosine similarity ranks by density, so whoever floods the most near-duplicate claims wins
 the retrieval. There is no concept of "this came from a trustworthy, independent source"
@@ -15,15 +15,15 @@ versus "this is a plausible-sounding plant."
 
 Intelligent DB is a zero-runtime-dependency TypeScript memory substrate built against both
 failures at once. Facts are latent **strands** in a spider-web graph, surfaced only by
-**spreading activation** from a cue — never a flat nearest-neighbor scan. Recall is
+**spreading activation** from a cue, never a flat nearest-neighbor scan. Recall is
 **provenance-first**: every fact carries its citation, and two facts from the same root are
 an echo, never corroboration. And the graph is protected by an **immune system** external
-to it — **priced identity** (independence costs something real: a domain, a device, a
+to it: **priced identity** (independence costs something real: a domain, a device, a
 verified human), **earned reputation** (trust accrues slowly and craters fast on
-contradiction), and a **tamper-evident, checksum-chained audit ledger** — because an
-adversarial council proved no rule living *inside* a memory graph can both let one true
-witness overturn a planted lie and stop two fake witnesses from overturning the truth
-(see [`CLAUDE.md`](./CLAUDE.md) §"The hard theorem"). Contradiction **demotes, never
+contradiction), and a **tamper-evident, checksum-chained audit ledger**. An adversarial
+council proved no rule living *inside* a memory graph can both let one true witness overturn
+a planted lie and stop two fake witnesses from overturning the truth (see
+[`CLAUDE.md`](./CLAUDE.md) §"The hard theorem"). Contradiction **demotes, never
 deletes**; genuinely independent disputes defer to a human instead of being settled by
 headcount.
 
@@ -32,15 +32,15 @@ headcount.
 ## Why not a vector database?
 
 A vector store has no notion of *who* asserted a fact or whether two assertions are
-*independent* — it only has distance. That is exactly the property a poisoning attack
+*independent*: it only has distance. That is exactly the property a poisoning attack
 exploits: inject enough near-duplicate fabrications and they out-rank the truth. Intelligent
-DB inverts the model — identity is priced and independence is measured before a fact is
+DB inverts the model: identity is priced and independence is measured before a fact is
 ever allowed to out-rank another. The result, **re-verified 2026-07-06 against the current
-(crypto-free) engine** — full report: [`BENCH_RERUN_2026-07-06.md`](./BENCH_RERUN_2026-07-06.md):
+(crypto-free) engine**, full report: [`BENCH_RERUN_2026-07-06.md`](./BENCH_RERUN_2026-07-06.md):
 
 - **Cheap-Sybil poisoning, cross-store comparison** (`src/__bench__/crossdb/`): every
-  trust-blind store benchmarked — 8 in total, including **Qdrant**, **Postgres+pgvector**,
-  and **Redis-Stack** alongside five embedded/on-disk backends — scored **0/24** against a
+  trust-blind store benchmarked (8 in total, including **Qdrant**, **Postgres+pgvector**,
+  and **Redis-Stack** alongside five embedded/on-disk backends) scored **0/24** against a
   24-trial cheap-Sybil attack (an attacker who mints throwaway identities for free). The
   IntelligentDB engine, the 9th arm in the same run, scored **24/24**.
 - **mem0 comparison** (PoisonedRAG-nq, n=100, real BEIR corpus + the paper's own attack
@@ -50,13 +50,13 @@ ever allowed to out-rank another. The result, **re-verified 2026-07-06 against t
   flat RAG scores **98.7% attack-success**; the substrate scores **0.0% attack-success at
   99.8% accuracy**.
 
-This does **not** claim Sybil resistance is impossible to beat — it converts an unbounded,
+This does **not** claim Sybil resistance is impossible to beat; it converts an unbounded,
 free attack into a *priced, visible, self-limiting* one. An attacker who buys genuinely
 independent, expensive anchors (real domains, real devices, real reputations) **can** still
 win; the degradation curve as an attacker pays more is measured and published, not hidden
 (`docs/ARCHITECTURE_BENCHMARKS.md` §2.5, "costly-independent boundary"). The known,
-deliberate limitations of the current single-process prototype — cross-process
-concurrency, encryption-at-rest, the asserted-attribution trade-off — are enumerated in
+deliberate limitations of the current single-process prototype (cross-process
+concurrency, encryption-at-rest, the asserted-attribution trade-off) are enumerated in
 **Known Limitations** in [`CLAUDE.md`](./CLAUDE.md), not swept under the rug.
 
 Full methodology, the arms, the fidelity notes, and every reproduction command:
@@ -169,8 +169,8 @@ Or via the package bin: `npx intelligent-db-mcp` (after `npm link` / a local ins
 
 ## Architecture overview
 
-One engine, layered so every load-bearing decision — when to stop walking, what's
-canonical, who is independent — is a gate or an external signal, never a model judgment:
+One engine, layered so every load-bearing decision (when to stop walking, what's
+canonical, who is independent) is a gate or an external signal, never a model judgment:
 
 | Layer | What it does | Docs |
 |---|---|---|
@@ -202,7 +202,7 @@ design-and-status document (test counts, known limitations) is [`CLAUDE.md`](./C
 
 RAG and IntelligentDB rows above, and the nq mem0 figure, are **re-verified 2026-07-06**
 against the current crypto-free engine. The rows marked **\*** (FactWorld's mem0 row, and
-the hotpotqa/msmarco mem0 figures) were **not** re-run this pass — mem0 is slow to ingest a
+the hotpotqa/msmarco mem0 figures) were **not** re-run this pass: mem0 is slow to ingest a
 full corpus (tens of minutes per dataset) and only the representative nq case was budgeted;
 they carry the **HISTORICAL** (pre-rebuild) numbers from `ARCHITECTURE_BENCHMARKS.md` §9–10,
 included for comparison, not as fresh measurements. Full methodology, the label-free
