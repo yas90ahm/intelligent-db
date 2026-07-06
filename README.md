@@ -1,39 +1,77 @@
 # Intelligent DB
 
-**Memory for AI agents that a crowd of liars can't poison.**
+**A memory substrate for AI agents — not a vector database. A deliberate inversion of one.**
 
-AI agents fail two ways: they **forget** (context evaporates across sessions) and they
-**hallucinate** (they invent facts and can't tell recall from invention). Intelligent DB is
-a zero-dependency TypeScript memory substrate built against both — and the poisoning-resistance
-claim is **measured, not argued**.
+[![CI](https://github.com/yas90ahm/intelligent-db/actions/workflows/ci.yml/badge.svg)](https://github.com/yas90ahm/intelligent-db/actions/workflows/ci.yml)
+[![License: Apache-2.0](https://img.shields.io/badge/License-Apache--2.0-blue.svg)](./LICENSE)
+[![Node](https://img.shields.io/badge/node-%3E%3D22.13-brightgreen)](https://nodejs.org)
 
-Every security claim traces to a benchmark, a regression test, or a documented limitation —
-including the project's own review history: [Review Findings](./docs/launch/REVIEW_FINDINGS.md)
-records each adversarial-review finding, its fix, and the test that guards it.
+AI agents fail two ways: they **forget** (context evaporates within and across sessions),
+and they **hallucinate** — worse, they can't tell their own recall from their own
+invention. The standard fix, a vector database, quietly makes the second failure *easier*:
+cosine similarity ranks by density, so whoever floods the most near-duplicate claims wins
+the retrieval. There is no concept of "this came from a trustworthy, independent source"
+versus "this is a plausible-sounding plant."
 
-## Measured results
+Intelligent DB is a zero-runtime-dependency TypeScript memory substrate built against both
+failures at once. Facts are latent **strands** in a spider-web graph, surfaced only by
+**spreading activation** from a cue — never a flat nearest-neighbor scan. Recall is
+**provenance-first**: every fact carries its citation, and two facts from the same root are
+an echo, never corroboration. And the graph is protected by an **immune system** external
+to it — **priced identity** (independence costs something real: a domain, a device, a
+verified human), **earned reputation** (trust accrues slowly and craters fast on
+contradiction), and a **tamper-evident, checksum-chained audit ledger** — because an
+adversarial council proved no rule living *inside* a memory graph can both let one true
+witness overturn a planted lie and stop two fake witnesses from overturning the truth
+(see [`CLAUDE.md`](./CLAUDE.md) §"The hard theorem"). Contradiction **demotes, never
+deletes**; genuinely independent disputes defer to a human instead of being settled by
+headcount.
 
-| What was measured | Undefended | Intelligent DB | Source |
-|---|---|---|---|
-| **FactWorld memory poisoning** (601 attacked questions): attack success rate | flat RAG **98.7%** · mem0 **79.4%** | **0.0%** (99.8% accuracy) | [`docs/ARCHITECTURE_BENCHMARKS.md`](./docs/ARCHITECTURE_BENCHMARKS.md) §9 |
-| **Sybil fleet collapse**: a cheap fake-source fleet of 1→500 identities | RAG & sameness-only arms flip the fact at **3** fakes | fleet collapses to **one** witness — **0%** attack success at every fleet size | `ARCHITECTURE_BENCHMARKS.md` §10.3 |
-| **Red-team trajectory** (97 attack specs, real engine) | — | **59 → 25 → 18** breaches across three hardening generations, **zero new breaches** after the crypto-free rebuild | [`docs/launch/REBUILD_SUMMARY.md`](./docs/launch/REBUILD_SUMMARY.md) §4 |
+---
 
-> **Footnote — what's fresh and what's historical:** the LLM-scored rows (FactWorld's
-> RAG/mem0 comparison, the PoisonedRAG suite) are **HISTORICAL** — measured pre-rebuild and
-> pending re-run, per [`docs/ARCHITECTURE_BENCHMARKS.md`](./docs/ARCHITECTURE_BENCHMARKS.md)
-> §9–§10. The locally-runnable poisoning arms **were re-measured at 0% attack success on the
-> current tree** ([`REBUILD_SUMMARY.md`](./docs/launch/REBUILD_SUMMARY.md) §4).
+## Why not a vector database?
 
-The disclosed failure boundary, stated up front: an attacker who **buys genuinely
-independent, expensive anchors can win** — Sybil resistance here is *priced, not prevented*,
-and the degradation curve is published, not hidden
-([`docs/marketing/COMPARISON.md`](./docs/marketing/COMPARISON.md) §2.4).
+A vector store has no notion of *who* asserted a fact or whether two assertions are
+*independent* — it only has distance. That is exactly the property a poisoning attack
+exploits: inject enough near-duplicate fabrications and they out-rank the truth. Intelligent
+DB inverts the model — identity is priced and independence is measured before a fact is
+ever allowed to out-rank another. The result, **re-verified 2026-07-06 against the current
+(crypto-free) engine** — full report: [`BENCH_RERUN_2026-07-06.md`](./BENCH_RERUN_2026-07-06.md):
+
+- **Cheap-Sybil poisoning, cross-store comparison** (`src/__bench__/crossdb/`): every
+  trust-blind store benchmarked — 8 in total, including **Qdrant**, **Postgres+pgvector**,
+  and **Redis-Stack** alongside five embedded/on-disk backends — scored **0/24** against a
+  24-trial cheap-Sybil attack (an attacker who mints throwaway identities for free). The
+  IntelligentDB engine, the 9th arm in the same run, scored **24/24**.
+- **mem0 comparison** (PoisonedRAG-nq, n=100, real BEIR corpus + the paper's own attack
+  files): mem0, a genuine external memory framework with its own embedder and vector store,
+  suffers **96% attack-success rate**; the substrate scores **6%**.
+- **FactWorld** (601 poisoned closed-book questions, exact-match scoring, no LLM judge):
+  flat RAG scores **98.7% attack-success**; the substrate scores **0.0% attack-success at
+  99.8% accuracy**.
+
+This does **not** claim Sybil resistance is impossible to beat — it converts an unbounded,
+free attack into a *priced, visible, self-limiting* one. An attacker who buys genuinely
+independent, expensive anchors (real domains, real devices, real reputations) **can** still
+win; the degradation curve as an attacker pays more is measured and published, not hidden
+(`docs/ARCHITECTURE_BENCHMARKS.md` §2.5, "costly-independent boundary"). The known,
+deliberate limitations of the current single-process prototype — cross-process
+concurrency, encryption-at-rest, the asserted-attribution trade-off — are enumerated in
+**Known Limitations** in [`CLAUDE.md`](./CLAUDE.md), not swept under the rug.
+
+Full methodology, the arms, the fidelity notes, and every reproduction command:
+[`docs/ARCHITECTURE_BENCHMARKS.md`](./docs/ARCHITECTURE_BENCHMARKS.md).
+
+---
 
 ## Quickstart
 
+The package is not yet published to npm (`private: true` in `package.json`); install from
+source:
+
 ```sh
-git clone <this-repo> && cd intelligent-db
+git clone https://github.com/yas90ahm/intelligent-db.git
+cd intelligent-db
 npm install
 npm run build
 ```
@@ -41,29 +79,76 @@ npm run build
 ```js
 import { createAgentMemory } from "./dist/index.js";
 
-const memory = createAgentMemory(); // in-memory; see below for durable
+// Zero configuration: the owner is the trust root. Pass { dbPath } for a durable
+// SQLite/WAL store instead of the in-memory default.
+const memory = createAgentMemory();
 
-memory.remember({ text: "Yasir's favourite database is SQLite." });
-const { facts } = memory.recall("what is Yasir's favourite database?");
+// Remember: files a provenance-rooted strand, not a row in a table.
+const { id: ownerFactId } = memory.remember({
+  text: "the deploy target is prod-cluster-7",
+  entity: "entity:deploy",
+  attribute: "deploy#target",
+});
 
-console.log(facts[0].text);                          // "Yasir's favourite database is SQLite."
-console.log(facts[0].citation, facts[0].fact_state); // who said it + LIVE/PROVISIONAL/DEMOTED
+// Recall: spreading activation from the cue, never a fuzzy nearest-neighbor scan.
+// Every fact carries a citation and a belief-state label — no provenance, no voice.
+const { facts } = memory.recall("what is the deploy target?");
+for (const f of facts) {
+  console.log(`[${f.fact_state}] "${f.text}" — ${f.citation}`);
+}
+
+// A rival, low-trust source contradicts it (e.g. a fetched web page). It lands
+// PROVISIONAL — visible, weightless, unable to displace the believed fact.
+memory.remember({
+  text: "the deploy target is evil-cluster-666",
+  entity: "entity:deploy",
+  attribute: "deploy#target",
+  origin: { kind: "web", resourceId: "https://untrusted.example/post" },
+});
+
+// A genuinely independent, trusted source disputes it instead: two LIVE, independent
+// claims. The engine refuses to pick a winner by majority or arrival order — it
+// defers to a human. The dispute horn surfaces as plain data:
+const disputes = memory.pendingQuestions();
+if (disputes.length > 0) {
+  const [question] = disputes;
+  // ... show question.options to the user, then record their answer:
+  memory.resolvePending(question.contradictionSetId, ownerFactId);
+}
+
+memory.close();
 ```
 
-Durable memory is one option: `createAgentMemory({ dbPath: "memory.db" })` (SQLite/WAL,
-crash-consistent) — or watch the attack fail: `npm run demo`.
-
-### Attach to Claude via MCP
-
-The MCP server is a zero-dependency stdio binary (`src/mcp/server.ts`). Build first
-(`npm run build`), then:
+Or run the narrated, four-act demo end-to-end against a real in-memory instance (a 50-fake-source
+flood, a real dispute, and the receipts from the audit ledger):
 
 ```sh
+npm run demo
+```
+
+See [`src/examples/demo.ts`](./src/examples/demo.ts) for the full annotated walkthrough.
+
+---
+
+## MCP server (Claude Code / Claude Desktop)
+
+Intelligent DB ships a zero-dependency stdio MCP server (`src/mcp/server.ts`) exposing five
+tools: `remember`, `recall`, `list_pending_questions`, `resolve_pending` (the personal-tier
+dispute horn — when two independent sources genuinely disagree, the agent asks the user and
+records their answer), and `why_do_you_believe_this` (a belief dossier: sources, anchors,
+independence count, demotion cause, dispute status, audit receipts).
+
+Build first, then register it:
+
+```sh
+npm run build
+
+# Claude Code CLI:
 claude mcp add intelligent-db -- node /abs/path/to/dist/mcp/server.js
 # set a durable store with:  -e MEMORY_DB=/abs/path/to/memory.db
 ```
 
-Or a client `mcpServers` JSON block:
+Or a `mcpServers` JSON block (Claude Desktop and compatible clients):
 
 ```json
 {
@@ -77,125 +162,76 @@ Or a client `mcpServers` JSON block:
 }
 ```
 
-Or via the package bin: `npx intelligent-db-mcp` (after `npm link` / install). The server
-exposes **four tools**: `remember`, `recall` (its parameter is `query`),
-`list_pending_questions`, and `resolve_pending` — the last two are the dispute horn: when
-two independent sources genuinely disagree, the agent asks the user instead of guessing.
+Or via the package bin: `npx intelligent-db-mcp` (after `npm link` / a local install). Omit
+`MEMORY_DB` for an in-memory (non-durable) store — useful for a quick trial.
 
-## How it works, in 5 lines
+---
 
-1. Facts are **latent strands** in a spider-web graph — nothing sits in a readable list.
-2. A cue energizes a seed; **spreading activation** propagates until relevant facts "light up" — only lit strands are spoken.
-3. **Provenance is first-class**: two facts from the same root are an echo, never corroboration; independence is *priced* against external anchors.
-4. Contradiction **demotes, never deletes** — and genuinely independent disputes defer to a human instead of being resolved by headcount.
-5. The model files and speaks memories but **never confirms them** — no provenance, no voice.
+## Architecture overview
 
-## Why this exists
+One engine, layered so every load-bearing decision — when to stop walking, what's
+canonical, who is independent — is a gate or an external signal, never a model judgment:
 
-Agents forget, and they hallucinate — and the worse failure is that they can't tell the
-difference. The obvious fix, a vector database, makes poisoning *easier*: similarity search
-ranks by density, so whoever injects the most near-duplicates wins. Worse, an adversarial
-review of this project proved a **hard theorem** (see [CLAUDE.md](./CLAUDE.md)): no rule
-*inside* a memory graph can both let one true witness overturn a planted lie and stop two
-fake witnesses from overturning the truth.
-
-So identity has to be witnessed from **outside** the graph. The first build did that with
-self-minted cryptography — a signing key per source, a Merkle audit tree, staking —
-machinery this project built, operated, and trusted itself.
-
-Then the twist: real deployments **already have a trust root**. One person's agent trusts
-its owner; a company's fleet trusts its SSO; the web has registered domains. The rebuild
-deleted every line of home-built crypto, consumed identity from configuration instead — and
-the red-team breach count went **down**, 25 to 18, with zero new breaches.
-
-The deletion was the upgrade.
-
-
-## Project docs
-
-- [**CLAUDE.md**](./CLAUDE.md) — the canonical design + status document (full mechanics, known limitations).
-- [`docs/ARCHITECTURE_ENGINE.md`](./docs/ARCHITECTURE_ENGINE.md) — the current engine architecture, module by module.
-- [**CONTRIBUTING.md**](./CONTRIBUTING.md) — dev setup, required checks, code philosophy.
-- [**SECURITY.md**](./SECURITY.md) — supported versions, private vulnerability reporting, threat model.
-- [`docs/launch/`](./docs/launch/) — the rebuild summary, review findings, code-review reports.
-- [`docs/marketing/`](./docs/marketing/) — positioning and comparison-vs-alternatives docs.
-- [`docs/product/`](./docs/product/) — roadmap and use cases.
-- [`docs/project-management/`](./docs/project-management/) — governance and release process.
-- [`docs/history/`](./docs/history/) — the pre-rebuild (crypto-era) design docs, preserved with banners.
-
-## Status
-
-**Production-grade single-process prototype.** All four roadmap pillars are implemented,
-adversarially tested, and wired end-to-end; the `// TODO(crack-A/B)` stub era is over. The
-activation walk, two-phase halting, eviction gates, contradiction adjudication, the
-retroactive disown sweep, the exact maximum-independent-set independence count
-(Bron–Kerbosch/Tomita), the Beta(α,β)-LCB reputation ledger, and the tamper-evident
-checksum-chain audit ledger (with exported `chainHead` checkpoints and real-time
-`AppendSink` shipping) all ship complete.
-Ingest is **trust-tiered**: a fact filed by a low-trust source (anonymous, unverified
-publisher) lands as a visible `PROVISIONAL` superposition — stored and recallable but
-unable to displace a believed fact — and is promoted to `LIVE` only when an
-anchor-independent source ratifies it (or a human approves the dispute).
-The **dispute horn is surfaced per tier**: when two independent sources genuinely
-disagree, the personal tier turns the deferred dispute into a question to the owner
-(`pendingQuestions()` / `resolvePending()` on the agent facade, plus the MCP tools
-`list_pending_questions` / `resolve_pending`), with the owner's answer receipted as an
-auditable `ownerOverride` approval; the enterprise tier gets a pure, deterministic
-dispute-routing adapter (`createDisputeRouter`) that maps open disputes to owning
-groups (e.g. IdP groups) from config — no transport, just replayable decisions.
-The codebase builds and owns **zero cryptographic machinery** — no keypairs, no signing,
-no attestations, no staking; plain SHA-256 is used only as a checksum (content hashes,
-hash-chained audit records, deterministic ids). Persistence is SQLite/WAL with atomic,
-crash-consistent compound writes. The library is **zero runtime dependency** (`dependencies: {}` — only `node:`
-builtins; the heavy packages in `devDependencies` serve the benchmark harness only).
-
-`npm test` runs the full Vitest suite (see [CLAUDE.md](./CLAUDE.md) for the current count);
-`npm run typecheck` is clean under a strict config
-(NodeNext, `verbatimModuleSyntax`, `exactOptionalPropertyTypes`, `noUncheckedIndexedAccess`).
-The remaining gaps are deliberately out-of-scope operational/social items — cross-process
-concurrency, encryption-at-rest, access-segregated checkpoint storage, and the
-asserted-attribution trade-off (audit attribution is asserted, not signed; an exported
-checkpoint is the insider-tamper detector) — enumerated in **Known Limitations** in
-[CLAUDE.md](./CLAUDE.md), which is the canonical status document.
-
-## Module map
-
-| Path | Role | State |
+| Layer | What it does | Docs |
 |---|---|---|
-| `src/core/types.ts` | The shared contract: strand/edge model, enums, branded ids, identity stamp, walk config. | Implemented |
-| `src/store/StrandStore.ts` | Pluggable storage contract (no deletion by design; forgetting is downward tier movement). | Implemented |
-| `src/store/memoryStore.ts` · `sqliteStore.ts` | In-memory backend + durable SQLite/WAL backend (batch writes, nestable txns, integrity check). | Implemented |
-| `src/traversal/walk.ts` | `MaxPriorityQueue` + share-normalized `activationWalk` body. | Implemented |
-| `src/traversal/halting.ts` | Two-phase stop controller (local saturation + mandatory bridge sweep + hard backstop). | Implemented |
-| `src/forgetting/tiers.ts` | Tier stepping + `decayPressure` + fail-closed eviction permission gates. | Implemented |
-| `src/forgetting/consolidation.ts` | Echo collapse, demotion, decisive-or-defer contradiction adjudication. | Implemented |
-| `src/identity/sources.ts` · `trustRegistry.ts` | Crypto-free identity: deterministic source ids (sameness) + the trust registry's claim producers (owner / SSO member / publisher / system-of-record). | Implemented |
-| `src/identity/anchors.ts` | Anchor-cost table + independence (set-disjointness) + sublinear self-stack cap + rep_cap. | Implemented |
-| `src/identity/reputation.ts` | Credit-score pillar: Beta(α,β), decay-on-read, LCB readout, exact credit reversal. | Implemented |
-| `src/identity/index.ts` | Source-Identity Layer facade; exact MIS independence count (Bron–Kerbosch/Tomita). | Implemented |
-| `src/ratification/` | Tamper-evident checksum-chain audit ledger (exported checkpoints), disown taint-closure, corroboration ledger, enterprise dispute-routing adapter. | Implemented |
-| `src/agent/agentMemory.ts` · `src/mcp/` | Agent facade (`remember`/`recall`/`pendingQuestions`/`resolvePending`) + the zero-dep MCP server (tools: `remember`, `recall`, `list_pending_questions`, `resolve_pending`). | Implemented |
-| `src/api.ts` | The engine verbs: `writeFact` / `writeFactsBatch` / `recall` / `ratify` / `adjudicate` / `disown` / `approve`; trust-tiered ingest (quarantine gate). | Implemented |
-| `src/index.ts` | Public barrel re-exporting the API above. | Implemented |
+| **Storage** (`src/store/`) | Pluggable `StrandStore`: in-memory + durable SQLite/WAL, no delete operation (forgetting is downward tier movement). | [`docs/ARCHITECTURE_ENGINE.md`](./docs/ARCHITECTURE_ENGINE.md) §4 |
+| **Traversal** (`src/traversal/`, `src/recall/`) | Cue → seeds → share-normalized best-first spreading activation → two-phase halting (local saturation + mandatory bridge sweep). | [`docs/ARCHITECTURE_ENGINE.md`](./docs/ARCHITECTURE_ENGINE.md) §5 |
+| **Forgetting** (`src/forgetting/`) | Tier decay (`HOT→WARM→COLD→ARCHIVE_STUB`, never delete) + fail-closed eviction gates; echo collapse and decisive-or-defer contradiction adjudication. | [`docs/ARCHITECTURE_ENGINE.md`](./docs/ARCHITECTURE_ENGINE.md) §6 |
+| **Source-Identity Layer** (`src/identity/`) | Crypto-free trust registry, anchor-cost table + independence math, Beta(α,β) reputation, exact max-independent-set count. | [`docs/ARCHITECTURE_ENGINE.md`](./docs/ARCHITECTURE_ENGINE.md) §7 |
+| **Ratification** (`src/ratification/`) | Tamper-evident checksum-chain audit ledger, the dispute doorbell, the retroactive disown/undo sweep, enterprise dispute routing. | [`docs/ARCHITECTURE_ENGINE.md`](./docs/ARCHITECTURE_ENGINE.md) §9 |
+| **Engine verbs** (`src/api.ts`) | `writeFact` / `recall` / `ratify` / `adjudicate` / `disown` / `explain` / `beliefTimeline` — the composed `IntelligentDb` surface. | [`docs/ARCHITECTURE_ENGINE.md`](./docs/ARCHITECTURE_ENGINE.md) §10 |
+| **Agent facade + MCP** (`src/agent/`, `src/mcp/`) | `remember` / `recall` / `pendingQuestions` / `resolvePending` for a zero-config personal deployment, plus the stdio MCP server. | [`docs/ARCHITECTURE_ENGINE.md`](./docs/ARCHITECTURE_ENGINE.md) §11 |
 
-## Install / build / test
+The full module-by-module reference, including the hard theorem that makes the
+Source-Identity Layer mandatory, lives in
+[`docs/ARCHITECTURE_ENGINE.md`](./docs/ARCHITECTURE_ENGINE.md); the canonical
+design-and-status document (test counts, known limitations) is [`CLAUDE.md`](./CLAUDE.md).
 
-Requires Node `>=22.13` — the first release line with `node:sqlite` unflagged, which the durable store uses (developed and tested on Node 24).
+---
+
+<!-- FINAL-CLOSEOUT-NUMBERS-PENDING -->
+## Benchmarks
+
+| Benchmark | Undefended (RAG / mem0) | IntelligentDB | Notes |
+|---|---|---|---|
+| Cheap-Sybil poisoning, 9-store comparison (24 trials/store) | 0/24 on all 8 trust-blind stores (incl. Qdrant, Postgres+pgvector, Redis-Stack) | **24/24** | `src/__bench__/crossdb/` |
+| FactWorld (601 poisoned questions) — attack-success / accuracy | RAG 98.7% / 1.3% · mem0 79.4% / 20.1%\* | **0.0% / 99.8%** | `src/__bench__/factworld/` |
+| PoisonedRAG-nq (n=100, real attack files) — attack-success | RAG 93% · mem0 96% | **6%** | `src/__bench__/poisonedrag/` |
+| PoisonedRAG-hotpotqa (n=100) — attack-success | RAG 99% · mem0 98%\* | **18%** | `src/__bench__/poisonedrag/` |
+| PoisonedRAG-msmarco (n=100) — attack-success | RAG 94% · mem0 92%\* | **7%** | `src/__bench__/poisonedrag/` |
+
+RAG and IntelligentDB rows above, and the nq mem0 figure, are **re-verified 2026-07-06**
+against the current crypto-free engine. The rows marked **\*** (FactWorld's mem0 row, and
+the hotpotqa/msmarco mem0 figures) were **not** re-run this pass — mem0 is slow to ingest a
+full corpus (tens of minutes per dataset) and only the representative nq case was budgeted;
+they carry the **HISTORICAL** (pre-rebuild) numbers from `ARCHITECTURE_BENCHMARKS.md` §9–10,
+included for comparison, not as fresh measurements. Full methodology, the label-free
+(non-oracle) structural defense, the disclosed costly-independent degradation boundary, and
+every reproduction command: [`docs/ARCHITECTURE_BENCHMARKS.md`](./docs/ARCHITECTURE_BENCHMARKS.md).
+The complete re-run log for this pass, including the fresh nq mem0 measurement:
+[`BENCH_RERUN_2026-07-06.md`](./BENCH_RERUN_2026-07-06.md).
+
+---
+
+## Development
+
+Requires Node `>=22.13` (the first release line with `node:sqlite` unflagged, which the
+durable store uses; developed and tested on Node 24).
 
 ```sh
-npm install        # install dev deps (typescript, vitest, @types/node, + bench-only DB clients)
-npm run typecheck  # tsc --noEmit (strict, NodeNext, ESM)
-npm run build      # tsc -p .  -> dist/
-npm test           # vitest run  (the full Vitest suite — see CLAUDE.md for the current count; benchmark suites are env-gated and skipped)
+npm install        # dev deps only — the library itself has zero runtime dependencies
+npm run typecheck  # tsc --noEmit (strict, NodeNext, verbatimModuleSyntax, exactOptionalPropertyTypes)
+npm run build      # tsc -p tsconfig.build.json -> dist/
+npm test           # vitest run — the full suite (benchmark suites are env-gated and skipped)
 ```
 
-The suite spans adversarial security tests (Sybil-fleet collapse, contradiction-bomb
-defusal, audit byte-flip detection, checkpoint divergence after a full history rewrite,
-demote-never-delete,
-mid-op crash rollback) and one end-to-end integration test (`systemCoherence.test.ts`) that
-wires the whole pipeline over a shared SQLite handle. The competitive benchmark suites
-(cross-DB, deployment, retrieval, QA) live under `src/__bench__/` and are gated behind env
-flags (`CROSSDB_BENCH`, `DEPLOY_BENCH`, `RETRIEVAL_BENCH`, `QA_BENCH`) so `npm test` stays
-fast; see [`docs/ARCHITECTURE_BENCHMARKS.md`](./docs/ARCHITECTURE_BENCHMARKS.md) for the
-methodology + measured tables and [`docs/history/PAPER.md`](./docs/history/PAPER.md) for the
-(pre-rebuild) synthesis.
+CI (`.github/workflows/ci.yml`) runs typecheck + test + build on Node 22.x and 24.x for
+every push and pull request to `main`.
+
+## Contributing, security, and license
+
+- [`CONTRIBUTING.md`](./CONTRIBUTING.md) — dev setup, required checks, code philosophy.
+- [`SECURITY.md`](./SECURITY.md) — supported versions, private vulnerability reporting, threat model.
+- [`CODE_OF_CONDUCT.md`](./CODE_OF_CONDUCT.md) — community standards.
+- Licensed under [Apache-2.0](./LICENSE); see [`NOTICE`](./NOTICE) for attribution requirements.
+- Full documentation index: [`docs/README.md`](./docs/README.md).
