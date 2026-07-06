@@ -189,27 +189,29 @@ design-and-status document (test counts, known limitations) is [`CLAUDE.md`](./C
 
 ---
 
-<!-- FINAL-CLOSEOUT-NUMBERS-PENDING -->
 ## Benchmarks
 
-| Benchmark | Undefended (RAG / mem0) | IntelligentDB | Notes |
-|---|---|---|---|
-| Cheap-Sybil poisoning, 9-store comparison (24 trials/store) | 0/24 on all 8 trust-blind stores (incl. Qdrant, Postgres+pgvector, Redis-Stack) | **24/24** | `src/__bench__/crossdb/` |
-| FactWorld (601 poisoned questions) — attack-success / accuracy | RAG 98.7% / 1.3% · mem0 79.4% / 20.1%\* | **0.0% / 99.8%** | `src/__bench__/factworld/` |
-| PoisonedRAG-nq (n=100, real attack files) — attack-success | RAG 93% · mem0 96% | **6%** | `src/__bench__/poisonedrag/` |
-| PoisonedRAG-hotpotqa (n=100) — attack-success | RAG 99% · mem0 98%\* | **18%** | `src/__bench__/poisonedrag/` |
-| PoisonedRAG-msmarco (n=100) — attack-success | RAG 94% · mem0 92%\* | **7%** | `src/__bench__/poisonedrag/` |
+| Benchmark | bare | RAG | mem0 | IntelligentDB |
+|---|---|---|---|---|
+| Cheap-Sybil poisoning, 9-store comparison (24 trials/store) | — | 0/24 on all 8 trust-blind stores (incl. Qdrant, Postgres+pgvector, Redis-Stack) | not measured (config gap, see below) | **24/24** |
+| FactWorld (n=1200, 601 poisoned) — attack-success / accuracy | 0.0% / 0.0% | 98.7% / 50.3% | 78.9% / 60.2% | **0.0% / 99.8%** |
+| PoisonedRAG-nq (n=100, real attack files) — attack-success / accuracy | 4.0% / 50.0% | 93.0% / 22.0% | 96.0% / 22.0% | **6.0% / 86.0%** |
+| PoisonedRAG-hotpotqa (n=100) — attack-success / accuracy | 21.0% / 54.0% | 99.0% / 13.0% | 97.0% / 14.0% | **18.0% / 81–82%** |
+| PoisonedRAG-msmarco (n=100) — attack-success / accuracy | 12.0% / 63.0% | 93–94% / 15–16% | 93.0% / 21.0% | **6–7% / 84–85%** |
 
-RAG and IntelligentDB rows above, and the nq mem0 figure, are **re-verified 2026-07-06**
-against the current crypto-free engine. The rows marked **\*** (FactWorld's mem0 row, and
-the hotpotqa/msmarco mem0 figures) were **not** re-run this pass: mem0 is slow to ingest a
-full corpus (tens of minutes per dataset) and only the representative nq case was budgeted;
-they carry the **HISTORICAL** (pre-rebuild) numbers from `ARCHITECTURE_BENCHMARKS.md` §9–10,
-included for comparison, not as fresh measurements. Full methodology, the label-free
-(non-oracle) structural defense, the disclosed costly-independent degradation boundary, and
-every reproduction command: [`docs/ARCHITECTURE_BENCHMARKS.md`](./docs/ARCHITECTURE_BENCHMARKS.md).
-The complete re-run log for this pass, including the fresh nq mem0 measurement:
-[`BENCH_RERUN_2026-07-06.md`](./BENCH_RERUN_2026-07-06.md).
+Every row above, including the full mem0 column, is **re-verified 2026-07-06** against the
+current crypto-free engine — no historical or pre-rebuild figures remain in this table.
+mem0 tracks RAG's vulnerability almost exactly on the three PoisonedRAG datasets (its
+embedder+vector-store retrieval carries no provenance/independence model); on FactWorld it
+lands meaningfully between RAG's near-total collapse and IntelligentDB's clean defense,
+some internal dedup in mem0 partially resisting a near-duplicate Sybil cluster it doesn't
+resist on the PoisonedRAG attack shape. IntelligentDB is the only arm defended on every
+dataset. The crossdb mem0 adapter is not yet wired (`Memory.from_config` needs either an
+OpenAI key or explicit Ollama LLM config the harness doesn't pass) — a configuration gap,
+not a result. Full methodology, the label-free (non-oracle) structural defense, the
+disclosed costly-independent degradation boundary, and every reproduction command:
+[`docs/ARCHITECTURE_BENCHMARKS.md`](./docs/ARCHITECTURE_BENCHMARKS.md). The complete
+re-run log for this pass: [`BENCH_RERUN_2026-07-06.md`](./BENCH_RERUN_2026-07-06.md).
 
 ---
 
