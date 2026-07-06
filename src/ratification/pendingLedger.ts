@@ -88,6 +88,7 @@ import type {
 } from "../forgetting/consolidation.js";
 
 import type { ReputationLedger } from "../identity/reputation.js";
+import { runMigrations } from "../store/migrations.js";
 
 // ---------------------------------------------------------------------------
 // Record shapes (the VAULT's contents)
@@ -1152,6 +1153,10 @@ class SqlitePendingLedgerImpl implements SqlitePendingLedger {
       this.#db.exec("PRAGMA journal_mode=WAL");
       this.#db.exec("PRAGMA synchronous=NORMAL");
     }
+    // SCHEMA MIGRATION LADDER (Phase 2 Durability spec §1) — see store/migrations.ts.
+    // Idempotent; safe to run here even if a shared handle already ran it via the
+    // strand store or the reputation ledger's constructor.
+    runMigrations(this.#db);
     this.#db.exec(
       `CREATE TABLE IF NOT EXISTS ratification_records (
          seq  INTEGER PRIMARY KEY,
@@ -1427,13 +1432,23 @@ export function createSqlitePendingLedger(
   const reputation = opts.reputation ?? null;
   const onAppend = opts.onAppend ?? null;
   if ("path" in opts) {
-    return new SqlitePendingLedgerImpl({
-      db: new DatabaseSync(opts.path),
-      ownsDb: true,
-      contentBlind,
-      reputation,
-      onAppend,
-    });
+    // Open first, outside the constructor, so a throw INSIDE construction (e.g. the
+    // migration ladder's refusal on a future-versioned db) can still close the
+    // just-opened handle before propagating (see the identical note in
+    // store/sqliteStore.ts's createSqliteStore).
+    const handle = new DatabaseSync(opts.path);
+    try {
+      return new SqlitePendingLedgerImpl({
+        db: handle,
+        ownsDb: true,
+        contentBlind,
+        reputation,
+        onAppend,
+      });
+    } catch (err) {
+      handle.close();
+      throw err;
+    }
   }
   return new SqlitePendingLedgerImpl({
     db: opts.db,

@@ -57,6 +57,7 @@ import type {
   StrandId,
 } from "../core/types.js";
 import type { NeighborView, StoreTxn, StrandStore } from "./StrandStore.js";
+import { runMigrations } from "./migrations.js";
 
 /**
  * Load `node:sqlite`'s {@link DatabaseSync} constructor via a runtime `require`
@@ -305,6 +306,15 @@ class SqliteStrandStoreImpl implements SqliteStrandStore {
       // explicit; does not affect per-commit crash-safety.
       this.#db.exec("PRAGMA wal_autocheckpoint=1000");
     }
+
+    // SCHEMA MIGRATION LADDER (Phase 2 Durability spec §1): stamps a fresh db at
+    // LATEST_SCHEMA_VERSION and brings an old (pre-ladder, unstamped => user_version 0)
+    // db forward inside one transaction before any table below is touched. Runs
+    // regardless of ownsDb: a borrowed shared handle may be constructed here BEFORE
+    // any other subsystem has touched it, so this store cannot assume someone else
+    // already ran it. Idempotent — a second call against an up-to-date handle is one
+    // cheap PRAGMA read.
+    runMigrations(this.#db);
 
     // Schema is idempotent so reopening an existing database is a no-op create.
     this.#db.exec(CREATE_STRANDS);
@@ -688,11 +698,22 @@ export function createSqliteStore(
           `{ allowNetworkPath: true } to accept the risk explicitly.`,
       );
     }
-    return new SqliteStrandStoreImpl({
-      db: new DatabaseSync(arg),
-      ownsDb: true,
-      ...(opts?.synchronous !== undefined ? { synchronous: opts.synchronous } : {}),
-    });
+    // Open the handle FIRST, outside the constructor, so a throw INSIDE construction
+    // (e.g. the migration ladder's UnknownFutureSchemaError refusal) can still close
+    // the just-opened handle before propagating — otherwise the handle leaks (no
+    // reference survives the throw to close it later), which on Windows also blocks
+    // deleting/reopening the file (a locked handle) until process exit.
+    const handle = new DatabaseSync(arg);
+    try {
+      return new SqliteStrandStoreImpl({
+        db: handle,
+        ownsDb: true,
+        ...(opts?.synchronous !== undefined ? { synchronous: opts.synchronous } : {}),
+      });
+    } catch (err) {
+      handle.close();
+      throw err;
+    }
   }
   return new SqliteStrandStoreImpl({ db: arg.db, ownsDb: false });
 }

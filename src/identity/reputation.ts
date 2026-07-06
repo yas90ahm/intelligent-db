@@ -57,6 +57,7 @@ import type { DatabaseSync as DatabaseSyncType } from "node:sqlite";
 
 import { asEpochMs } from "../core/types.js";
 import type { SourceId, StrandId, EpochMs, Unit } from "../core/types.js";
+import { runMigrations } from "../store/migrations.js";
 
 // ---------------------------------------------------------------------------
 // Tunable Beta-model constants (product decision — tune to threat model)
@@ -1017,6 +1018,10 @@ class SqliteReputationLedgerImpl implements SqliteReputationLedger {
       this.#db.exec("PRAGMA journal_mode=WAL");
       this.#db.exec("PRAGMA synchronous=NORMAL");
     }
+    // SCHEMA MIGRATION LADDER (Phase 2 Durability spec §1) — see store/migrations.ts.
+    // Idempotent; safe to run here even if a shared handle already ran it via the
+    // strand store or the pending ledger's constructor.
+    runMigrations(this.#db);
     this.#db.exec(
       `CREATE TABLE IF NOT EXISTS reputation (
          source_id TEXT PRIMARY KEY,
@@ -1151,13 +1156,17 @@ export function createSqliteReputationLedger(
   const params = opts.params ?? DEFAULT_REPUTATION_PARAMS;
   const clock = opts.clock ?? (() => asEpochMs(Date.now()));
   if ("path" in opts) {
-    return new SqliteReputationLedgerImpl(
-      repCapOf,
-      new DatabaseSync(opts.path),
-      true,
-      params,
-      clock,
-    );
+    // Open first, outside the constructor, so a throw INSIDE construction (e.g. the
+    // migration ladder's refusal on a future-versioned db) can still close the
+    // just-opened handle before propagating (see the identical note in
+    // store/sqliteStore.ts's createSqliteStore).
+    const handle = new DatabaseSync(opts.path);
+    try {
+      return new SqliteReputationLedgerImpl(repCapOf, handle, true, params, clock);
+    } catch (err) {
+      handle.close();
+      throw err;
+    }
   }
   return new SqliteReputationLedgerImpl(repCapOf, opts.db, false, params, clock);
 }

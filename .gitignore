@@ -13,6 +13,10 @@ dist/
 *.db-shm
 *.sqlite
 
+# EXCEPT checked-in test fixtures (small, intentionally versioned database files
+# used by tests, e.g. the migration ladder's pre-ladder legacy fixture).
+!src/__tests__/fixtures/*.db
+
 # internal multi-agent run artifacts (kept local, not published) —
 # EXCEPT the benchmark evidence the docs cite, which is published below.
 .arbor/*
