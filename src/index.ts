@@ -120,6 +120,28 @@ export {
 
 export type { Migration } from "./store/migrations.js";
 
+// Online snapshot + WAL archiving + point-in-time restore
+// (docs/specs/PHASE2_DURABILITY_SPEC.md §2).
+export {
+  snapshotDb,
+  readSnapshotManifest,
+  manifestPathFor,
+  createWalArchiver,
+  restoreToTimestamp,
+} from "./store/backup.js";
+
+export type {
+  ChainHeadLike,
+  SnapshotManifest,
+  WalArchiveOptions,
+  WalArchiver,
+  ArchivedSegmentMeta,
+  ArchiveBaseMeta,
+  ChainVerifier,
+  RestoreOptions,
+  RestoreResult,
+} from "./store/backup.js";
+
 // Value-level AES-256-GCM encryption-at-rest adapter (docs/specs/PHASE2_DURABILITY_SPEC.md §3).
 export { createEncryptedStore, EncryptedStoreIntegrityError } from "./store/encryptedStore.js";
 

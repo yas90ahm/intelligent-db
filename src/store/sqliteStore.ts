@@ -58,6 +58,8 @@ import type {
 } from "../core/types.js";
 import type { NeighborView, StoreTxn, StrandStore } from "./StrandStore.js";
 import { runMigrations } from "./migrations.js";
+import { snapshotDb } from "./backup.js";
+import type { ChainHeadLike, SnapshotManifest } from "./backup.js";
 
 /**
  * Load `node:sqlite`'s {@link DatabaseSync} constructor via a runtime `require`
@@ -136,6 +138,20 @@ export interface SqliteStrandStore extends StrandStore {
    * SEMANTIC half); a corrupted store is never silently served as correct.
    */
   integrityCheck(): boolean;
+
+  /**
+   * `db.snapshot(destPath)` (Phase 2 Durability spec §2): an online, consistent,
+   * compact backup copy via `VACUUM INTO` plus a fsynced sidecar manifest
+   * (`<destPath>.manifest.json`). See {@link "./backup.js".snapshotDb} for the
+   * full contract (this is a thin delegate over the store's own handle) and its
+   * module doc for why `VACUUM INTO` is the portable floor rather than a
+   * fallback. Pass `chainHead` (the ratification ledger's `chainHead()`, if one
+   * is wired) so the manifest can prove consistency with the audit chain later.
+   */
+  snapshot(
+    destPath: string,
+    opts?: { readonly chainHead?: ChainHeadLike | null; readonly now?: () => number },
+  ): SnapshotManifest;
 }
 
 /**
@@ -593,6 +609,17 @@ class SqliteStrandStoreImpl implements SqliteStrandStore {
     if (first === undefined) return false;
     const val = first["integrity_check"];
     return val === "ok";
+  }
+
+  // -------------------------------------------------------------------------
+  // Snapshot / backup
+  // -------------------------------------------------------------------------
+
+  snapshot(
+    destPath: string,
+    opts?: { readonly chainHead?: ChainHeadLike | null },
+  ): SnapshotManifest {
+    return snapshotDb(this.#db, destPath, opts);
   }
 
   // -------------------------------------------------------------------------
