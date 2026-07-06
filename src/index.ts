@@ -488,6 +488,33 @@ export type {
 } from "./recall/cueResolver.js";
 
 // ===========================================================================
+// recall — Phase 1b BLENDED PRESENTATION RANKING (docs/specs/PHASE1B_RANKING_SPEC.md)
+// ===========================================================================
+
+export {
+  DEFAULT_PRESENTATION_WEIGHTS,
+  DEFAULT_UNION_TOP_N,
+  STATE_WEIGHT,
+  stateWeightOf,
+  buildUnionCandidateSet,
+  scorePresentation,
+  rankForPresentation,
+  cosineTopNCandidates,
+  rankRecallResult,
+} from "./recall/presentationRank.js";
+
+export type {
+  RankMode,
+  PresentationWeights,
+  RecallOptions,
+  WalkLitCandidate,
+  CosineCandidate,
+  PresentationCandidate,
+  ScoredCandidate,
+  CosineDeps,
+} from "./recall/presentationRank.js";
+
+// ===========================================================================
 // agent — the ergonomic AGENT MEMORY FACADE ("attach and use")
 // ===========================================================================
 
