@@ -37,6 +37,8 @@ import { createIntelligentDbAdapter } from "./adapters/intelligentDb.js";
 import { createQdrantAdapter } from "./adapters/qdrant.js";
 import { createPgVectorAdapter } from "./adapters/pgvector.js";
 import { createRedisVectorAdapter } from "./adapters/redisVector.js";
+import { createFaissNodeAdapter } from "./adapters/faissNode.js";
+import { createHnswlibNodeAdapter } from "./adapters/hnswlibNode.js";
 
 // --- Fixed, identical workload across every engine -------------------------------
 
@@ -118,6 +120,10 @@ const REGISTRY: Registration[] = [
   { name: "lmdb", footprintKind: "on-disk file", make: createLmdbAdapter },
   { name: "duckdb (@duckdb/node-api)", footprintKind: "on-disk file", make: createDuckDbAdapter },
   { name: "vector-bruteforce (in-proc)", footprintKind: "in-memory estimate", make: createVectorBruteforceAdapter },
+  // faiss-node ships a win32-x64 prebuilt N-API binary — no MSVC toolchain needed.
+  { name: "faiss-node (IndexFlatL2)", footprintKind: "in-memory estimate", make: createFaissNodeAdapter },
+  // hnswlib-node compiles natively (MSVC Build Tools installed this pass) — real ANN graph.
+  { name: "hnswlib-node (HierarchicalNSW)", footprintKind: "on-disk file", make: createHnswlibNodeAdapter },
   // Cycle-2 FAIR FOOTPRINT FIX: ID now writes through an on-disk SQLite backend, so its
   // footprint is on-disk-vs-on-disk against the sqlite/lmdb/duckdb stores (was heap delta).
   { name: "IntelligentDB (engine)", footprintKind: "on-disk file", make: createIntelligentDbAdapter },
@@ -150,18 +156,7 @@ const BLOCKED: SkipResult[] = [
 ];
 
 // Curated skips for adapters that could not install/build in this environment.
-const SKIPS: SkipResult[] = [
-  {
-    name: "hnswlib-node",
-    reason:
-      "No prebuilt binary for win32-x64 / Node 24; npm install falls back to `node-gyp rebuild`, " +
-      "which needs an MSVC toolchain (absent on this box) — the native module never built (Cannot find module 'hnswlib-node').",
-  },
-  {
-    name: "faiss-node",
-    reason: "Not attempted by directive (requires MSVC to build) — would fail identically to hnswlib-node.",
-  },
-];
+const SKIPS: SkipResult[] = [];
 
 function firstLine(err: unknown): string {
   const msg = err instanceof Error ? err.message : String(err);
@@ -335,7 +330,8 @@ function writeArtifacts(results: AdapterResult[]): void {
   lines.push(
     "- **Footprint method, per engine** (how `bytes_per_fact_disk` was measured): " +
       "node:sqlite / better-sqlite3 / lmdb / duckdb / **IntelligentDB** = on-disk file size " +
-      "(data + WAL/sidecars) after flush; **Qdrant** = `du -sb /qdrant/storage` inside the " +
+      "(data + WAL/sidecars) after flush; **hnswlib-node** = `writeIndexSync()` graph-file size " +
+      "(+ JS-side value-string bytes); **Qdrant** = `du -sb /qdrant/storage` inside the " +
       "container (actual segment + WAL bytes); **Postgres+pgvector** = " +
       "`pg_database_size(current_database())`; **Redis-Stack** = `INFO memory` `used_memory` " +
       "(Redis is IN-MEMORY, so this is resident dataset RAM, not on-disk bytes — the directive's " +
@@ -373,8 +369,17 @@ function writeArtifacts(results: AdapterResult[]): void {
       "class assignment (the external anchor layer's output), exactly as the Phase-2 capability test models.",
   );
   lines.push(
-    "- **hnswlib-node** (the intended native vector engine) has no win32-x64/Node-24 prebuilt and needs " +
-      "MSVC to build, so the zero-dep `vector-bruteforce` index stands in for the vector-DB class.",
+    "- **faiss-node** ships a win32-x64 prebuilt N-API binary (`prebuild-install`, no MSVC needed) — its " +
+      "`IndexFlatL2` is a native exact-L2 index over the SAME deterministic embeddings, majority-voted over " +
+      "the top-K nearest neighbours with no entity filter (mirrors `vector-bruteforce`'s semantics exactly, " +
+      "so the two in-process vector stand-ins are directly comparable; L2 distance and cosine induce the " +
+      "same nearest-neighbour ordering over these L2-normalized vectors).",
+  );
+  lines.push(
+    "- **hnswlib-node** is the ANN-graph native vector engine (Hierarchical NSW) — no win32-x64/Node-24 " +
+      "prebuilt, so it needs `node-gyp rebuild` against an installed MSVC toolchain; once built, its " +
+      "footprint is a REAL on-disk figure (`writeIndexSync()` to a temp file, sized like the sqlite/lmdb/" +
+      "duckdb adapters) rather than an in-memory estimate.",
   );
 
   writeFileSync(`${OUT_DIR}/results.md`, lines.join("\n"), "utf8");

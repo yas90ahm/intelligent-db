@@ -64,6 +64,8 @@
     "@qdrant/js-client-rest": "^1.18.0",
     "@types/node": "^22.10.0",
     "better-sqlite3": "^12.11.1",
+    "faiss-node": "^0.5.1",
+    "hnswlib-node": "^3.0.0",
     "lmdb": "^3.5.6",
     "pg": "^8.22.0",
     "redis": "^6.0.1",
