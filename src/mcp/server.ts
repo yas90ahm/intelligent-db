@@ -38,11 +38,33 @@
  * when the user should decide between conflicting memories, the agent asks them and
  * calls `resolve_pending` with their choice).
  *
+ * DAEMON-BACKED MEMORY (PHASE3_DAEMON_SPEC.md deliverable 2, opt-in, R7: the
+ * in-process default above is unchanged and permanent). Setting BOTH
+ * `MEMORY_DAEMON_SOCKET` (the daemon's Unix socket path / Windows named pipe)
+ * and `MEMORY_DAEMON_TOKEN_FILE` (a file containing the bearer token — never
+ * the token itself in an env var, mirroring how the daemon's own token file
+ * is user-private) opts a server instance into daemon-backed memory instead
+ * of `MEMORY_DB`. Today this validates the daemon is reachable and the token
+ * is accepted (a real handshake round trip over `daemon/client.ts`'s async
+ * {@link createRemoteAgentMemory}) and then FAILS FAST with a clear,
+ * actionable {@link DaemonBackingNotWiredError}: request-level dispatch
+ * through this stdio transport's unchanged, SYNCHRONOUS `handleMcpRequest`
+ * requires a synchronous `AgentMemory`, and `daemon/client.ts`'s module doc
+ * explains why a safe synchronous bridge was NOT shipped this pass (a real,
+ * reproduced `worker_threads`+`Atomics.wait` stall under genuine socket I/O,
+ * not a hypothetical risk). This is a DISCLOSED scope boundary, not a silent
+ * gap: failing loud beats either hanging indefinitely or silently falling
+ * back to a private in-process store when the operator explicitly opted into
+ * shared daemon memory. Unset `MEMORY_DAEMON_SOCKET` to run in-process.
+ *
  * STACK NOTE: ESM + NodeNext ⇒ relative imports carry `.js`; `verbatimModuleSyntax`.
  */
 
+import { readFile } from "node:fs/promises";
+
 import { createAgentMemory } from "../agent/agentMemory.js";
 import type { AgentMemory } from "../agent/agentMemory.js";
+import { createRemoteAgentMemory } from "../daemon/client.js";
 import { handleMcpRequest } from "./handler.js";
 import type { McpRequest, McpResponse } from "./handler.js";
 import { JSONRPC_INTERNAL_ERROR, JSONRPC_INVALID_PARAMS } from "./handler.js";
@@ -185,12 +207,126 @@ export function processLine(line: string, memory: AgentMemory): McpResponse | nu
   return handleMcpRequest(req, memory);
 }
 
+// ---------------------------------------------------------------------------
+// Daemon-backed memory switch (opt-in; deliverable 2 — see the module doc's
+// "DAEMON-BACKED MEMORY" section for the disclosed sync/async scope boundary)
+// ---------------------------------------------------------------------------
+
+/** How long startup waits for the daemon handshake before giving up. */
+export const DAEMON_STARTUP_TIMEOUT_MS = 8_000;
+
+/**
+ * Thrown when `MEMORY_DAEMON_SOCKET`/`MEMORY_DAEMON_TOKEN_FILE` opted into
+ * daemon-backed memory AND connectivity was validated successfully, but this
+ * build has no synchronous request-dispatch bridge to plug into the unchanged
+ * `handleMcpRequest` (see the module doc). Never thrown for a config/connectivity
+ * problem — those surface as their own plain `Error`s naming what failed.
+ */
+export class DaemonBackingNotWiredError extends Error {
+  constructor(socketPath: string) {
+    super(
+      `MEMORY_DAEMON_SOCKET (${socketPath}) is configured and the daemon handshake ` +
+        `succeeded, but per-request dispatch through this stdio transport is not wired ` +
+        `in this build (a disclosed scope boundary — see mcp/server.ts's and ` +
+        `daemon/client.ts's module docs, and PHASE3_DAEMON_SPEC.md deliverable 2). ` +
+        `Unset MEMORY_DAEMON_SOCKET to run in-process (the permanent default, R7).`,
+    );
+    this.name = "DaemonBackingNotWiredError";
+  }
+}
+
+/** Daemon opt-in config, resolved from env (mirrors the `MEMORY_DB` pattern). */
+export interface DaemonMemoryConfig {
+  readonly socketPath: string;
+  readonly token: string;
+}
+
+/**
+ * Read `MEMORY_DAEMON_SOCKET` / `MEMORY_DAEMON_TOKEN_FILE` from the
+ * environment. Returns `null` when daemon mode is not requested (the
+ * default). Throws a plain, descriptive `Error` for a half-configured or
+ * unreadable/empty token file — never silently falls back to in-process when
+ * the operator clearly tried to opt in.
+ */
+export async function resolveDaemonConfig(
+  env: NodeJS.ProcessEnv = process.env,
+): Promise<DaemonMemoryConfig | null> {
+  const socketPath = env["MEMORY_DAEMON_SOCKET"];
+  if (socketPath === undefined || socketPath.length === 0) return null;
+
+  const tokenFile = env["MEMORY_DAEMON_TOKEN_FILE"];
+  if (tokenFile === undefined || tokenFile.length === 0) {
+    throw new Error(
+      "MEMORY_DAEMON_SOCKET is set but MEMORY_DAEMON_TOKEN_FILE is not — both are " +
+        "required to opt into daemon-backed memory (the raw token is never read from " +
+        "an env var, mirroring the daemon's own user-private token file).",
+    );
+  }
+  let raw: string;
+  try {
+    raw = await readFile(tokenFile, "utf8");
+  } catch (err) {
+    throw new Error(
+      `MEMORY_DAEMON_TOKEN_FILE ${tokenFile} could not be read: ` +
+        `${err instanceof Error ? err.message : String(err)}`,
+    );
+  }
+  const token = raw.trim();
+  if (token.length === 0) {
+    throw new Error(`MEMORY_DAEMON_TOKEN_FILE ${tokenFile} is empty.`);
+  }
+  return { socketPath, token };
+}
+
+/**
+ * Validate the daemon is reachable and the token is accepted: a real
+ * handshake round trip over {@link createRemoteAgentMemory}, bounded by
+ * `timeoutMs` so a stale/unreachable socket path fails fast rather than
+ * hanging (reconnect-with-backoff would otherwise retry forever). Always
+ * closes the probing connection before returning/throwing.
+ */
+export async function validateDaemonConnectivity(
+  config: DaemonMemoryConfig,
+  timeoutMs: number = DAEMON_STARTUP_TIMEOUT_MS,
+): Promise<void> {
+  const remote = createRemoteAgentMemory({ socketPath: config.socketPath, token: config.token });
+  try {
+    await Promise.race([
+      remote.getDefaultSourceId(),
+      new Promise<never>((_resolve, reject) => {
+        setTimeout(() => {
+          reject(
+            new Error(
+              `daemon at ${config.socketPath} did not complete the handshake within ` +
+                `${timeoutMs}ms.`,
+            ),
+          );
+        }, timeoutMs);
+      }),
+    ]);
+  } finally {
+    await remote.close();
+  }
+}
+
 /**
  * The runnable transport. Wires an {@link AgentMemory} and pumps stdin → handler →
  * stdout, one JSON line per message. Resolves when stdin closes (the client
  * disconnected), after closing the store.
+ *
+ * Backing choice (deliverable 2): `MEMORY_DAEMON_SOCKET` +
+ * `MEMORY_DAEMON_TOKEN_FILE` opt into the daemon path (validated, then a
+ * disclosed {@link DaemonBackingNotWiredError} — see the module doc);
+ * otherwise this is BYTE-FOR-BYTE the original in-process behavior
+ * (`MEMORY_DB` durable / in-memory default, R7's permanent default).
  */
 export async function main(): Promise<void> {
+  const daemonConfig = await resolveDaemonConfig();
+  if (daemonConfig !== null) {
+    await validateDaemonConnectivity(daemonConfig);
+    throw new DaemonBackingNotWiredError(daemonConfig.socketPath);
+  }
+
   const dbPath = process.env["MEMORY_DB"];
   const memory: AgentMemory = createAgentMemory(
     dbPath !== undefined && dbPath.length > 0 ? { dbPath } : {},
