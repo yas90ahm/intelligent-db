@@ -1334,3 +1334,114 @@ recall@20/MRR tied).
 Config-only commit: `bench: EmbedSeeded LoCoMo arm + frozen tuned defaults` (new gated bench
 files under `src/__bench__/{crossdb,factworld,retrieval}/`, doc-comment freeze notes at the two
 constants above — zero behavior change to any default-suite code path).
+
+---
+
+## Phase 1-4 results — final consolidation, 2026-07-06
+
+This section pulls together every deliverable landed after the Phase-1 measurement gate
+above into one place: retrieval (Phase 1), durability (Phase 2), ship-prep + the daemon-mode
+design proposal (Phase 3, process/design work — no benchmark numbers of its own), and this
+final documentation consolidation pass (Phase 4). Full prose narrative with every artifact
+pointer lives in [`docs/BENCHMARK_NARRATIVE.md`](./docs/BENCHMARK_NARRATIVE.md); this section
+is the terse, tabular version for a reader who wants the numbers without the story.
+
+### Gate table (Phase 1, §5-6 of `PHASE1_RETRIEVAL_SPEC.md` — restated verbatim from above)
+
+| # | Gate | Result |
+|---|---|---|
+| 1 | Full default suite (`npx vitest run`) + `npm run typecheck` | **PASS** — 552 passed / 35 skipped (89 files: 56 passed / 33 skipped), typecheck clean |
+| 2 | `CROSSDB_BENCH` Sybil, IntelligentDB 24/24 WITH the Ollama embedder configured | **PASS** — 24/24 |
+| 3 | FactWorld substrate quick arm, 0.0% ASR WITH the Ollama embedder configured | **PASS** — 0.0% ASR |
+| 4 | LoCoMo EmbedSeeded arm vs mem0 (target recall@20 >= 0.484) | **FALL SHORT** by 0.118 (0.366 vs 0.484) |
+| 5 | Freeze winning sweep config as tuned default | **DONE** — config-only, zero behavior change to any default-suite path |
+
+### LoCoMo — final numbers vs mem0 (TEST split, same run)
+
+| Metric | EmbedSeeded (winner: embedSeedK=16, summation) | mem0 | PureID (same run) | TunedHybrid (same run) |
+|---|---:|---:|---:|---:|
+| recall@10 | 0.322 | 0.382 | 0.245 | 0.307 |
+| recall@20 | 0.366 | **0.484** | 0.272 | 0.375 |
+| nDCG@10 | 0.201 | 0.242 | 0.166 | 0.194 |
+| MRR | 0.174 | 0.215 | 0.151 | 0.174 |
+
+**Honest verdict: IntelligentDB does not beat mem0 on LoCoMo retrieval-quality metrics, before
+or after the embedder-seeding gate.** The gate lane froze `embedSeedK=16` as the shipped
+default (confirming, not changing, the pre-existing value) and explicitly declined to flip the
+global `reinforcement` default to `summation` despite it nominally winning the sweep — the
+margin (recall@10 +0.002, nDCG@10 +0.001, recall@20/MRR tied) was judged too thin against two
+existing regression tests pinning the default to `dominance`-shaped numbers. A follow-on spec,
+`docs/specs/PHASE1B_RANKING_SPEC.md` ("blended presentation ranking" — similarity may reorder
+already-surfaced, correctly-labeled candidates for presentation, never influence belief), is
+written and product-approved as the next attempt to close this gap, but **is not implemented**
+— zero code shipped against it in this pass.
+
+### Durability (Phase 2) — landed capabilities
+
+| Capability | Status | Module |
+|---|---|---|
+| Schema migration ladder | Shipped, `LATEST_SCHEMA_VERSION = 2` | `src/store/migrations.ts` |
+| Online snapshot + WAL archiving + point-in-time restore | Shipped, refuses to complete unless integrity + chain both verify | `src/store/backup.ts` |
+| Value-level AES-256-GCM encrypted store adapter | Shipped, opt-in, payload-only | `src/store/encryptedStore.ts` |
+| Crash-torture suite | Shipped, env-gated `TORTURE=1`, CI smoke at 50 cycles | `src/__torture__/` |
+
+### Crash-torture verdict — 200/200 cycles, zero structural violations
+
+```
+TORTURE=1 CYCLES=200 npm run torture
+```
+
+- **200/200 cycles completed.** State accumulated to **1,948 strands / 40 demotions / 1
+  approval** by cycle 200 under a genuinely uncontrolled `SIGKILL` each cycle (5-50ms random
+  delay after worker start, no unwind, no flush, no atexit).
+- **Zero structural violations** across all 200 cycles: no `DEMOTED_NO_OUTRANKED_BY`, no
+  `DEMOTED_DANGLING_OUTRANKS_EDGE`, no `DEMOTED_EDGE_WRONG_TYPE`/`WRONG_TARGET`, no
+  `APPROVAL_NO_MATCHING_PENDING`, no `APPROVAL_LOSER_NOT_DEMOTED`, no `DISOWN_HALF_APPLIED`,
+  no `INTEGRITY_CHECK_FAILED`, no `CHAIN_BROKEN`.
+- **One recurring, known, non-crash finding**: `RECONCILE_DRIFT` on every cycle from the first
+  `approve()` onward (root cause: `approve()`'s reputation credit bypasses the
+  corroboration-event ledger `ratify()` uses to stay reconcilable — reproduces with zero
+  process kills, a pre-existing gap in already-shipped code, not a new crash-consistency bug).
+  Not fixed in this pass (adjacent, out of scope for a durability deliverable); documented and
+  exported as a named, separable violation kind
+  (`KNOWN_NONCRASH_VIOLATION_KINDS = new Set(["RECONCILE_DRIFT"])`) so structural-only
+  pass/fail signals (CI, the exit code) are unaffected by it.
+- A dedicated torn-write test (real kill + a further deliberate 48-byte tail corruption of the
+  live `-wal` file) and fault-injection tests on the snapshot/archive write sites also pass
+  cleanly and reproducibly.
+- One harness bug was found and fixed *before* the reported run: the torture db was not opened
+  in WAL mode on the first dry run (silently torturing the default rollback-journal instead);
+  fixed by explicitly setting `PRAGMA journal_mode=WAL` on the owned handle. The 200-cycle
+  numbers above are entirely under WAL.
+
+Full detail, invariant definitions, and the minimal zero-kill repro for `RECONCILE_DRIFT`:
+`docs/BENCHMARK_NARRATIVE.md` §3; harness source `src/__torture__/`.
+
+### Phase 3 — ship-prep and daemon-mode proposal (process/design, no benchmark numbers)
+
+- **Ship-prep**: `npm pack --dry-run` verified a clean 128-file tarball (dist + README + LICENSE
+  + NOTICE only, no test/bench/torture leakage); `prepublishOnly` added
+  (`typecheck && test && build`); a tag-triggered `.github/workflows/release.yml` added
+  (test matrix → publish with `--provenance` → GitHub release from a CHANGELOG excerpt), gated
+  on a `secrets.NPM_TOKEN` that does not yet exist and on `package.json`'s `private: true`
+  remaining `true` (both deliberately left for the maintainer). Package name `intelligent-db`
+  confirmed available on the public npm registry.
+- **Daemon-mode design proposal** (`docs/specs/PHASE3_DAEMON_PROPOSAL.md`): a from-scratch
+  security analysis of a future multi-client daemon (transport, authentication once the
+  single-process trust boundary dissolves, write serialization, crash semantics). Recommends
+  Unix-socket/named-pipe transport with registry-backed bearer tokens, but explicitly ends
+  with an "AWAITING PRODUCT-OWNER SECURITY REVIEW — do not implement" section. **Zero code
+  shipped.** No flag, no wiring, no behavior change from this document's existence.
+
+### Phase 4 — this consolidation pass
+
+Full default suite and typecheck re-confirmed green one final time (see the commit this
+section lands in for the exact numbers at commit time). `CLAUDE.md`'s Status header and Known
+Limitations were updated to cross out what Phase 2 closed (schema migrations, backup/PITR)
+with honest scope statements (forward-only ladder; application-level snapshot/PITR, not a
+backup service) rather than claiming unconditional closure, and to add the two new
+non-implementation disclosures (`PHASE1B_RANKING_SPEC.md`, `PHASE3_DAEMON_PROPOSAL.md`) so
+neither reads as shipped. `README.md` gained a "Durability and security" section documenting
+the four opt-in Phase-2 capabilities and an honest restatement of the LoCoMo gate result
+(IntelligentDB does not beat mem0 on retrieval-quality metrics; the embedder-seeding attempt
+to close the gap fell short and is reported as such, not hidden or reframed as a win).

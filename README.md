@@ -57,8 +57,12 @@ independent, expensive anchors (real domains, real devices, real reputations) **
 win; the degradation curve as an attacker pays more is measured and published, not hidden
 (`docs/ARCHITECTURE_BENCHMARKS.md` §2.5, "costly-independent boundary"). The known,
 deliberate limitations of the current single-process prototype (cross-process
-concurrency, encryption-at-rest, the asserted-attribution trade-off) are enumerated in
-**Known Limitations** in [`CLAUDE.md`](./CLAUDE.md), not swept under the rug.
+concurrency — a written, unimplemented daemon-mode design proposal exists for this,
+`docs/specs/PHASE3_DAEMON_PROPOSAL.md` — the asserted-attribution trade-off, offline
+class-assignment liability) are enumerated in **Known Limitations** in
+[`CLAUDE.md`](./CLAUDE.md), not swept under the rug. Encryption-at-rest, schema migrations,
+and snapshot/point-in-time recovery are no longer gaps — see **Durability and security**
+below.
 
 Full methodology, the arms, the fidelity notes, and every reproduction command:
 [`docs/ARCHITECTURE_BENCHMARKS.md`](./docs/ARCHITECTURE_BENCHMARKS.md).
@@ -190,6 +194,32 @@ design-and-status document (test counts, known limitations) is [`CLAUDE.md`](./C
 
 ---
 
+## Durability and security
+
+All opt-in — default behavior (in-memory or plain `createSqliteStore()`) is unchanged unless
+a caller explicitly reaches for one of these:
+
+| Capability | What it does | Module |
+|---|---|---|
+| **Optional embedder, seed-only** | `EmbedderPort` injected at construction; cosine similarity over a `strand_vectors` sidecar proposes candidate seeds, unioned with (never replacing) lexical/entity seeds, energy-capped at the strongest lexical seed. Belief — `fact_state`, adjudication, independence, reputation, eviction — never reads similarity. | `src/store/vectorSidecar.ts`, `src/recall/cueResolver.ts` |
+| **Schema migration ladder** | `PRAGMA user_version`-tracked, ordered migrations run in one transaction on open; refuses to open a database stamped newer than the running code knows about. | `src/store/migrations.ts` |
+| **Online snapshot + WAL archiving + point-in-time restore** | `snapshotDb()` (`VACUUM INTO` + a signed manifest), `createWalArchiver()` (segments copied out before checkpoint-truncation), `restoreToTimestamp()` — refuses to complete unless `integrity_check` and the audit chain both verify. | `src/store/backup.ts` |
+| **Value-level AES-256-GCM encryption** | `createEncryptedStore(inner, keyProvider)` wraps either backend and encrypts exactly `Strand.payload` (AAD-bound to the row id); ids, indexes, provenance, and the audit chain stay plaintext by design so traversal and `verifyChain()` keep working keyless. Wrong key or a swapped ciphertext surfaces as a named, typed error — never a crash or a silent wrong read. | `src/store/encryptedStore.ts` |
+| **Crash-torture suite** | A child process loops randomized compound operations while the parent `SIGKILL`s it at a random 5-50ms delay; a 6-point invariant checker runs on every reopen. 200/200 cycles, zero structural violations (one pre-existing, non-crash reconciliation-audit finding, documented not hidden). | `src/__torture__/` (env-gated `TORTURE=1`) |
+
+None of this weakens the existing durability floor: SQLite/WAL transaction atomicity, the
+tamper-evident audit chain, and `integrity_check` are unchanged — these are additive
+capabilities layered in front of guarantees that already held. Full detail, including two
+disclosed design deviations (why WAL-archive replay uses its own base file rather than
+splicing onto a `VACUUM INTO` snapshot, and why the encrypted adapter is value-level rather
+than full-file), plus the crash-torture invariant list and the one non-crash finding it
+surfaced: [`CLAUDE.md`](./CLAUDE.md) Known Limitations, [`docs/BENCHMARK_NARRATIVE.md`](./docs/BENCHMARK_NARRATIVE.md) §3.
+A design proposal for a future multi-client daemon mode exists
+([`docs/specs/PHASE3_DAEMON_PROPOSAL.md`](./docs/specs/PHASE3_DAEMON_PROPOSAL.md)) but is
+explicitly **not implemented** — no code, no flag — pending a product-owner security review.
+
+---
+
 ## Benchmarks
 
 | Benchmark | bare | RAG | mem0 | IntelligentDB |
@@ -236,8 +266,34 @@ in the same session beats IntelligentDB's own best (frozen, hybrid) retriever on
 ranking metric (recall@10 0.382 vs 0.307, nDCG@10 0.242 vs 0.194) — evidence this project
 reports plainly rather than omits: mem0's cosine-similarity pipeline is a stronger day-to-day
 retriever on this dataset, even though it carries no defense against the adversarial setting
-IntelligentDB is built for. Full tables and methodology:
-[`BENCH_RERUN_2026-07-06.md`](./BENCH_RERUN_2026-07-06.md).
+IntelligentDB is built for.
+
+An optional, injected embedder port (`EmbedderPort`, seed-only — similarity proposes candidates,
+it never sets belief) was measured directly against that mem0 number as a gate: could an
+embedder-seeded activation walk close the gap? **Honest result: no.** The best swept
+configuration (`embedSeedK=16`, summation reinforcement) measured recall@20 = 0.366 against
+mem0's 0.484 — a 0.118 shortfall — and didn't even beat this same run's own plain hybrid arm
+(0.366 vs 0.375). `embedSeedK=16` shipped as the frozen default anyway (it confirms a value
+already in place); nothing about default retrieval behavior changed as a result of this gate.
+The poisoning-defense numbers above are unaffected — the same embedder, actively populating
+vectors and actively winning seed slots for near-duplicate/poisoned payloads, was re-run
+through the Sybil (24/24) and FactWorld (0.0% ASR) gates with no change to either result: belief
+still comes from provenance and independence, never from cosine similarity. Full sweep,
+gate table, and reproduction commands: [`BENCH_RERUN_2026-07-06.md`](./BENCH_RERUN_2026-07-06.md),
+[`docs/BENCHMARK_NARRATIVE.md`](./docs/BENCHMARK_NARRATIVE.md).
+
+Separately, a 200-cycle crash-torture suite (`src/__torture__/`, `TORTURE=1 npm run torture`)
+repeatedly `SIGKILL`s a child process mid-write against a real SQLite/WAL file and reopens it
+under a 6-point cross-op invariant checker. **200/200 cycles, zero structural violations** —
+no demotion ever lost its outranking edge, no approval record ever lost its demotions, no
+disown sweep was ever half-applied, and the audit checksum chain stayed clean on every reopen.
+One pre-existing, non-crash reconciliation-audit gap was found and is documented, not silently
+dropped (see [`CLAUDE.md`](./CLAUDE.md) Known Limitations). Durability now also includes an
+opt-in schema migration ladder, online snapshot/WAL-archive/point-in-time restore, and a
+value-level AES-256-GCM encrypted store adapter — all documented in
+[`CLAUDE.md`](./CLAUDE.md) and exercised in [`docs/BENCHMARK_NARRATIVE.md`](./docs/BENCHMARK_NARRATIVE.md) §3.
+
+Full tables and methodology: [`BENCH_RERUN_2026-07-06.md`](./BENCH_RERUN_2026-07-06.md).
 
 ---
 
