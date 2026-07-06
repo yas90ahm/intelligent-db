@@ -150,6 +150,27 @@ export interface SystemOfRecordInput {
 }
 
 /**
+ * PHASE 3 [daemon mode, H2]. Input to {@link TrustRegistry.registerDaemonClient}.
+ * Carries ONLY the token FINGERPRINT (sha256 hex) — never the raw bearer token
+ * (R3: the raw token never appears outside the daemon's own auth check).
+ */
+export interface DaemonClientInput {
+  /** sha256 (hex) fingerprint of the authenticated bearer token. Never raw. */
+  readonly tokenFingerprint: string;
+  /** The config-priced anchor grade this token was minted/issued at. */
+  readonly grade: AnchorClass;
+  /** Optional human-readable label (agent name, connection purpose, …). */
+  readonly label?: string;
+  /**
+   * OPTIONAL fleet axis: tokens sharing the SAME `fleetClassId` collapse toward
+   * one independence class (mirrors `registerPublisher`'s `operatorOf`). Omitted
+   * ⇒ each token is its own fleet (the DEFAULT — two agent tokens must not
+   * silently trust each other; see the interface doc's R1/§3 rationale).
+   */
+  readonly fleetClassId?: string;
+}
+
+/**
  * The crypto-free trust registry: ONE object satisfying both facade ports —
  * the source registry (sameness: register/has) AND the anchor registry
  * (independence: anchorsOf / independenceBetween / the fleet-capped
@@ -166,6 +187,25 @@ export interface TrustRegistry extends SourceRegistryPort, AnchorRegistryPort {
   registerPublisher(url: string): SourceRef;
   /** ENTERPRISE tier: register a configured authoritative system of record. */
   registerSystemOfRecord(input: SystemOfRecordInput): SourceRef;
+  /**
+   * PHASE 3 [daemon mode, H2]: register a daemon client's resolved identity, the
+   * `registerDaemonClient`-style claim producer the daemon spec (`PHASE3_DAEMON_SPEC.md`
+   * H2) calls for. A daemon connection authenticates with a bearer token (never the
+   * SourceId itself — see `daemon/tokens.ts`); THIS producer is where that token's
+   * fingerprint becomes a priced identity in the SAME swappable trust root every other
+   * claim producer bottoms out in (no ungoverned parallel trust root — CLAUDE.md /
+   * the proposal doc §1). One token ⇒ one deterministic SourceId (echo-collapse,
+   * `sourceIdFor("iddb:daemon-token", tokenFingerprint)`); grade is CONFIG-priced —
+   * the caller (the daemon, reading its own token-issuance config) supplies which
+   * {@link AnchorClass} a given token was minted at (e.g. OWNER grade for the
+   * auto-provisioned owner token; a lower grade for an issued per-agent token). By
+   * default each distinct token is its own independence class AND its own fleet
+   * (`operatorClassId`), so two different agent tokens issued to the same OS user do
+   * NOT automatically trust each other (the exact gap R1/§3 names) — an OPTIONAL
+   * `fleetClassId` groups tokens the deployment's config has decided share a fleet
+   * (mirroring `registerPublisher`'s `operatorOf` axis).
+   */
+  registerDaemonClient(input: DaemonClientInput): SourceRef;
   /** The source-aware fleet-cap independence predicate (REQUIRED here). */
   independentSources(a: SourceId, b: SourceId): boolean;
   /**
@@ -338,6 +378,33 @@ class CryptoFreeTrustRegistry implements TrustRegistry {
       classId: input.name as IndependenceClassId,
       operatorClassId: input.name as OperatorClassId,
       weight: ANCHOR_TABLE[AnchorClass.SYSTEM_OF_RECORD].independenceWeight,
+    });
+    return this.#known.get(sourceId) ?? ref;
+  }
+
+  registerDaemonClient(input: DaemonClientInput): SourceRef {
+    // Deterministic per-token id: the SAME token fingerprint always resolves to
+    // the SAME SourceId (echo-collapse), namespaced away from every other
+    // producer's issuer string so a daemon token can never collide with an
+    // owner/SSO/publisher/system-of-record id.
+    const sourceId = sourceIdFor("iddb:daemon-token", input.tokenFingerprint);
+    const ref: SourceRef = { sourceId, kind: "AGENT", label: input.label ?? input.tokenFingerprint };
+    this.register(ref);
+    // classId defaults to the token itself (each token its own independence
+    // class); operatorClassId defaults to the SAME (each token its own fleet —
+    // two distinct agent tokens do NOT automatically trust each other) unless
+    // the deployment's config supplies an explicit fleetClassId grouping.
+    const classId = ("daemon-token:" + input.tokenFingerprint) as IndependenceClassId;
+    const operatorClassId = (
+      input.fleetClassId !== undefined
+        ? "daemon-fleet:" + input.fleetClassId
+        : "daemon-token:" + input.tokenFingerprint
+    ) as OperatorClassId;
+    this.#addClaim(sourceId, {
+      anchorClass: input.grade,
+      classId,
+      operatorClassId,
+      weight: ANCHOR_TABLE[input.grade].independenceWeight,
     });
     return this.#known.get(sourceId) ?? ref;
   }

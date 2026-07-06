@@ -573,8 +573,13 @@ export interface PendingLedger {
 
 const GENESIS_PREV_HASH = sha256Hex("GENESIS");
 
-/** sha256 of a UTF-8 string, hex (a checksum, nothing more). */
-function sha256Hex(s: string): string {
+/**
+ * sha256 of a UTF-8 string, hex (a checksum, nothing more). Exported (additive,
+ * non-breaking) so `daemon/auditChain.ts` can reuse the SAME primitive for its
+ * separate hash chain per R8 ("same ledger code") without duplicating the
+ * checksum computation.
+ */
+export function sha256Hex(s: string): string {
   return createHash("sha256").update(s, "utf8").digest("hex");
 }
 
