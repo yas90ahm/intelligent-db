@@ -43,6 +43,7 @@ import type {
   RatificationDeps,
   AnchorBinding,
   WalkConfig,
+  ContentHash,
 } from "../../index.js";
 
 import { makeStrand, makeEdge, NOW } from "../fixtures.js";
@@ -104,9 +105,21 @@ export function createIdRetriever(graph: SharedGraph, dataset: Dataset): IdRetri
   // 1) Mirror NODES. The strand id IS the fact id; the entity index gives the
   //    SHARED_ENTITY relation (as the real engine represents it), so no SHARED_ENTITY
   //    edges are materialized.
+  //    `content_hash` normally derives from the fact's own id (`makeStrand`'s
+  //    `hash:${idRaw}`, id-keyed, NOT value-keyed); when a fact carries an explicit
+  //    `contentHashKey` (a genuinely separate corroborating witness fact meant to
+  //    agree on the SAME value as another fact), the strand's `content_hash` is
+  //    overridden to that key's hash instead, so the engine's `#deriveAgreementSet`
+  //    (same entity + same content_hash + LIVE, `api.ts:1494-1503`) counts it as
+  //    agreement rather than a distinct unrelated claim.
   for (const f of dataset.facts) {
+    const strand = makeStrand(
+      f.id, f.entity as EntityId, f.sourceId as SourceId | null, f.sourceClass, { value: f.value }, f.attribute as AttributeKey,
+    );
     store.putStrand(
-      makeStrand(f.id, f.entity as EntityId, f.sourceId as SourceId, f.sourceClass, { value: f.value }, f.attribute as AttributeKey),
+      f.contentHashKey !== undefined
+        ? { ...strand, content_hash: `hash:${f.contentHashKey}` as ContentHash }
+        : strand,
     );
   }
   // 2) Mirror CONFIRMED_LINK edges (materialized threads the walk traverses).

@@ -153,14 +153,34 @@ export interface SybilCorpus {
 
 /**
  * Build the Sybil-flood corpus deterministically. Produces, per scenario:
- *   - ONE true {@link FactRecord} (source `src:authority`, a distinct class), and
+ *   - ONE true {@link FactRecord} (source `src:authority`, a distinct class),
+ *   - ONE corroborating {@link FactRecord} for the SAME true value (a genuinely
+ *     separate witness — its own fact id/strand, its own independence class, an
+ *     anonymous/unresolvable `sourceId: null`), and
  *   - K Sybil {@link FactRecord}s (distinct keys, ONE shared class), all with the SAME
  *     (entity, attribute) so the engine's attribute index collects them into a single
  *     contradiction set the real adjudicator resolves.
- * The contradiction set therefore spans exactly TWO independence classes (true vs the
- * shared Sybil class) — the multi-class decisive-or-defer path — and the authority's
- * pre-earned reputation gives the decisive, earned margin that keeps it LIVE while the
- * weightless Sybil fleet (reputation 0, any headcount) is demoted.
+ *
+ * The corroborator exists SOLELY to clear the engine's F4a "second independent lock"
+ * floor (`forgetting/consolidation.ts`): a multi-class dispute may only auto-resolve
+ * once the winning VALUE is backed by >= multiClassMinRoots (2) mutually-independent
+ * roots (`#R` / `agreementRootCountOf`) — a LONE true witness is R=1 and DEFERS
+ * unconditionally, regardless of reputation margin, so the decisive-margin logic this
+ * bench actually intends to exercise would never even run. The corroborator shares the
+ * true fact's `content_hash` via `contentHashKey` (so the engine's
+ * `#deriveAgreementSet` counts it as agreeing on the SAME value, same entity) but
+ * carries its OWN independence class and a `null` sourceId — the NULL-SOURCE FALLBACK
+ * `identity/index.ts`'s `independent(a,b)` treats as independent-by-default once the
+ * class differs (exactly the convention `../fixtures.js`'s own `independentRoots()`
+ * helper uses for the same reason). It is NOT added to `factText`/the scenario's
+ * `sybilFactIds` — it never appears in either reader context (raw or adjudicated); it
+ * only participates in the engine's own trust/independence bookkeeping.
+ *
+ * The contradiction set spans THREE independence classes (true, its corroborator, and
+ * the shared Sybil class) — still the multi-class decisive-or-defer path — and the
+ * authority's pre-earned reputation gives the decisive, earned margin that keeps the
+ * true value LIVE while the weightless Sybil fleet (reputation 0, any headcount) is
+ * demoted.
  */
 export function buildSybilCorpus(): SybilCorpus {
   const facts: FactRecord[] = [];
@@ -181,6 +201,17 @@ export function buildSybilCorpus(): SybilCorpus {
       sourceClass: `class:syb-true:${i}`, sourceId: AUTHORITY_SOURCE,
     });
     factText.set(trueFactId, trueText);
+
+    // SECOND independent witness for the TRUE value — clears F4a's >=2-root floor
+    // (see the module doc above). Deliberately NOT added to `factText`/the reader
+    // contexts: it exists only so the engine's own trust layer counts the true value
+    // as backed by 2 mutually-independent roots, not to change what the LLM reads.
+    facts.push({
+      id: `f:syb-true-corrob:${i}`, entity, attribute, value: spec.trueVal,
+      text: `A second independent record corroborates: ${trueText}`,
+      sourceClass: `class:syb-true-corrob:${i}`, sourceId: null,
+      contentHashKey: trueFactId, // SAME value fingerprint as the primary true fact
+    });
 
     const sybilFactIds: string[] = [];
     for (let k = 0; k < SYBIL_K; k++) {

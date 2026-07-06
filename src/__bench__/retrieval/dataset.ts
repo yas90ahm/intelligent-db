@@ -57,8 +57,23 @@ export interface FactRecord {
   readonly text: string;
   /** Offline-assigned independence class for this fact's single provenance root. */
   readonly sourceClass: string;
-  /** The source (registered source id) that asserted this fact. */
-  readonly sourceId: string;
+  /**
+   * The source (registered source id) that asserted this fact, or `null` for an
+   * anonymous/unresolvable corroborating witness (the NULL-SOURCE FALLBACK the real
+   * identity layer treats as independent-by-default once its independence class
+   * differs from the compared root — see `identity/index.ts`'s `independent(a,b)`).
+   */
+  readonly sourceId: string | null;
+  /**
+   * OPTIONAL: when set, `createIdRetriever` mints this fact's strand `content_hash`
+   * from THIS key instead of the fact's own `id` — the mechanism a genuinely SEPARATE
+   * corroborating witness (its own fact id, so its own strand) needs to be counted as
+   * "agreeing" by the engine's `#deriveAgreementSet`/`#R` (same entity + same
+   * content_hash + LIVE, `api.ts:1494-1529`). Set this to the PRIMARY fact's `id` to
+   * make a second fact corroborate it (same VALUE fingerprint, distinct strand,
+   * distinct provenance root/class) without colliding strand ids.
+   */
+  readonly contentHashKey?: string;
 }
 
 /** A directed, typed relation between two facts (the shared graph's edges). */
@@ -366,6 +381,21 @@ export function buildDataset(opts: BuildOptions = {}): Dataset {
   // Two conflicting values for one (entity, attribute) from DIFFERENT independence
   // classes/sources. The planted-true source pre-earns reputation so the engine's
   // adjudicator keeps the true value LIVE and DEMOTES the false one.
+  //
+  // F4a ("second independent lock", `forgetting/consolidation.ts`) REQUIRES the
+  // winning value to be backed by >= multiClassMinRoots (2) mutually-independent
+  // roots (the engine's own `#R` / `agreementRootCountOf`) before a multi-class
+  // dispute may even be CONSIDERED for auto-resolution — a lone true witness is
+  // R=1 and DEFERS unconditionally (never RESOLVES), regardless of its reputation
+  // margin. A SECOND, genuinely independent corroborating witness for the TRUE
+  // value is planted below (`f:ctr-true-corrob:${i}`) so #R(true) = 2 and the
+  // decisive-margin/reputation logic this bench actually intends to exercise runs.
+  // The corroborator shares the true fact's `content_hash` via `contentHashKey`
+  // (so `#deriveAgreementSet` counts it as agreeing on the SAME value) but carries
+  // its OWN independence class and a null (anonymous/unresolvable) sourceId — the
+  // NULL-SOURCE FALLBACK `identity/index.ts`'s `independent(a,b)` treats as
+  // independent-by-default once the class differs, exactly like the `null`-source
+  // roots `fixtures.ts`'s own `independentRoots()` helper uses for the same reason.
   const TRUE_SRC = "src:authority"; // pre-earns reputation
   const trustedSources = [TRUE_SRC];
   for (let i = 0; i < NUM_CONTRADICTIONS; i++) {
@@ -375,6 +405,7 @@ export function buildDataset(opts: BuildOptions = {}): Dataset {
     const trueVal = String(120_000 + i * 5000);
     const falseVal = String(900_000 + i * 5000);
     const trueId = `f:ctr-true:${i}`;
+    const corrobId = `f:ctr-true-corrob:${i}`;
     const falseId = `f:ctr-false:${i}`;
     addFact({
       id: trueId, entity, attribute, value: trueVal,
@@ -382,11 +413,17 @@ export function buildDataset(opts: BuildOptions = {}): Dataset {
       sourceClass: `class:ctr-true:${i}`, sourceId: TRUE_SRC,
     });
     addFact({
+      id: corrobId, entity, attribute, value: trueVal,
+      text: `An independent municipal audit corroborates the population of ${city} as ${trueVal}.`,
+      sourceClass: `class:ctr-true-corrob:${i}`, sourceId: null,
+      contentHashKey: trueId, // SAME value fingerprint as the primary true fact
+    });
+    addFact({
       id: falseId, entity, attribute, value: falseVal,
       text: `An unverified blog post claims the population of ${city} is ${falseVal}.`,
       sourceClass: `class:ctr-false:${i}`, sourceId: `src:rumor:${i}`,
     });
-    sharedEntityClique([trueId, falseId]);
+    sharedEntityClique([trueId, corrobId, falseId]);
     const pair: ContradictionPair = { attribute, entity, trueFactId: trueId, falseFactId: falseId };
     contradictions.push(pair);
     queries.push({

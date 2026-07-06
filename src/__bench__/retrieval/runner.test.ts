@@ -123,7 +123,7 @@ function f3(x: number): string {
 
       // ---- 7) CONTRADICTION accuracy (full contradiction set) -----------
       const K_CON = 10;
-      let idBoth = 0, hyBoth = 0, idCorrectLive = 0;
+      let idBoth = 0, hyBoth = 0, idCorrectLive = 0, idDeferred = 0;
       const conQueryById = new Map<string, QueryRecord>();
       for (const q of dataset.queries) if (q.contradiction) conQueryById.set(q.contradiction.attribute, q);
       for (const pair of dataset.contradictions) {
@@ -132,7 +132,17 @@ function f3(x: number): string {
         const hyR = hybridRetrieve(graph, q, cueVec(q), frozen).slice(0, K_CON);
         if (idR.includes(pair.trueFactId) && idR.includes(pair.falseFactId)) idBoth++;
         if (hyR.includes(pair.trueFactId) && hyR.includes(pair.falseFactId)) hyBoth++;
-        if (id.liveWinnerOf(pair) === pair.trueFactId) idCorrectLive++;
+        const winner = id.liveWinnerOf(pair);
+        if (winner === pair.trueFactId) idCorrectLive++;
+        // `liveWinnerOf` returns null both when the dispute genuinely DEFERRED (the
+        // engine's F4a "second independent lock" gate, or the decisive-margin gate,
+        // held off an in-graph resolution — both sides stay LIVE) and in the
+        // structurally-impossible "both demoted" case. Surfaced SEPARATELY from
+        // `idCorrectLiveRate` so a correctly-DEFERRED dispute reads as an explicit,
+        // named outcome rather than silently counting as a miss (a dispute the
+        // engine intentionally declines to resolve is not the same failure mode as
+        // one it resolves WRONG).
+        if (winner === null) idDeferred++;
       }
       const nCon = dataset.contradictions.length;
       const contradiction = {
@@ -140,6 +150,7 @@ function f3(x: number): string {
         idBothSidesRate: idBoth / nCon,
         hybridBothSidesRate: hyBoth / nCon,
         idCorrectLiveRate: idCorrectLive / nCon,
+        idDeferredRate: idDeferred / nCon,
         n: nCon,
       };
 
@@ -248,6 +259,7 @@ function renderReport(
   lines.push("|---|---|---|");
   lines.push(`| both-sides-surfaced rate | ${f3(c.idBothSidesRate)} | ${f3(c.hybridBothSidesRate)} |`);
   lines.push(`| correct-LIVE rate (adjudication) | ${f3(c.idCorrectLiveRate)} | n/a |`);
+  lines.push(`| deferred rate (adjudication) | ${f3(c.idDeferredRate)} | n/a |`);
   lines.push("");
   lines.push(
     "- **both-sides-surfaced**: fraction of contradicted (entity,attribute) pairs where BOTH the true and false " +
@@ -256,6 +268,13 @@ function renderReport(
   lines.push(
     "- **correct-LIVE** (ID only): fraction where, after `engine.adjudicate`, the strand kept LIVE is the " +
       "planted-true value (the planted-false one DEMOTED). The hybrid has no adjudication, so this is n/a.",
+  );
+  lines.push(
+    "- **deferred rate** (ID only): fraction where `engine.adjudicate` genuinely DEFERRED the dispute (the " +
+      "engine's own trust layer declined to auto-resolve — e.g. the F4a \"second independent lock\" floor, or " +
+      "the decisive-margin/earned-reputation gate — so BOTH sides stayed LIVE) rather than resolving it either " +
+      "correctly or incorrectly. A correctly-DEFERRED dispute is a DISTINCT, intentional outcome — not a miss — " +
+      "and would otherwise be invisible inside a low correct-LIVE rate.",
   );
   lines.push("");
 
