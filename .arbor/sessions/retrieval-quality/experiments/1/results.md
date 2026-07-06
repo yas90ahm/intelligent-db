@@ -13,8 +13,8 @@ Synthetic corpus of **320 facts** with planted ground truth; **80 queries** (27 
 | precision@1 | 0.340 | 0.566 | Hybrid |
 | precision@5 | 0.155 | 0.245 | Hybrid |
 | precision@10 | 0.100 | 0.134 | Hybrid |
-| MRR | 0.553 | 0.667 | Hybrid |
-| nDCG@10 | 0.550 | 0.729 | Hybrid |
+| MRR | 0.522 | 0.667 | Hybrid |
+| nDCG@10 | 0.525 | 0.729 | Hybrid |
 
 ## Per-category breakdown (recall@10 / precision@5 / nDCG@10 / MRR)
 
@@ -26,7 +26,7 @@ Synthetic corpus of **320 facts** with planted ground truth; **80 queries** (27 
 | MULTIHOP | 16 | TunedHybrid | 0.750 | 0.075 | 0.287 | 0.148 |
 | PARAPHRASE | 11 | IntelligentDB | 0.333 | 0.200 | 0.469 | 1.000 |
 | PARAPHRASE | 11 | TunedHybrid | 1.000 | 0.600 | 1.000 | 1.000 |
-| CONTRADICTION | 10 | IntelligentDB | 1.000 | 0.200 | 0.631 | 0.500 |
+| CONTRADICTION | 10 | IntelligentDB | 1.000 | 0.200 | 0.500 | 0.333 |
 | CONTRADICTION | 10 | TunedHybrid | 1.000 | 0.200 | 0.926 | 0.900 |
 
 ## Contradiction detection
@@ -36,18 +36,20 @@ Over the full contradiction set (**15 pairs**, top-10):
 | Metric | IntelligentDB | TunedHybrid |
 |---|---|---|
 | both-sides-surfaced rate | 1.000 | 1.000 |
-| correct-LIVE rate (adjudication) | 0.000 | n/a |
+| correct-LIVE rate (adjudication) | 1.000 | n/a |
+| deferred rate (adjudication) | 0.000 | n/a |
 
 - **both-sides-surfaced**: fraction of contradicted (entity,attribute) pairs where BOTH the true and false value appear in the system's top-K. Measures whether the conflict is even visible.
 - **correct-LIVE** (ID only): fraction where, after `engine.adjudicate`, the strand kept LIVE is the planted-true value (the planted-false one DEMOTED). The hybrid has no adjudication, so this is n/a.
+- **deferred rate** (ID only): fraction where `engine.adjudicate` genuinely DEFERRED the dispute (the engine's own trust layer declined to auto-resolve — e.g. the F4a "second independent lock" floor, or the decisive-margin/earned-reputation gate — so BOTH sides stayed LIVE) rather than resolving it either correctly or incorrectly. A correctly-DEFERRED dispute is a DISTINCT, intentional outcome — not a miss — and would otherwise be invisible inside a low correct-LIVE rate.
 
 ## Halting quality (ID auto-halt vs oracle best-K)
 
 | Quantity | Value |
 |---|---|
-| mean \|lit\| (auto-halted set size) | 6.019 |
-| mean F1 (auto-halt) | 0.350 |
-| mean F1 (oracle best-K) | 0.543 |
+| mean \|lit\| (auto-halted set size) | 6.208 |
+| mean F1 (auto-halt) | 0.319 |
+| mean F1 (oracle best-K) | 0.512 |
 | F1(auto) / F1(oracle) | 0.715 |
 | mean F1 @ fixed K=5 | 0.241 |
 | mean F1 @ fixed K=10 | 0.176 |
@@ -65,4 +67,4 @@ seeding: sharedSeed(q) = {nodes whose entity == a cue entity} UNION {global vect
 
 ## Verdict
 
-On nDCG@10 the overall edge goes to **TunedHybrid** (0.550 vs 0.729). By category: parity on direct (Δrecall@10 +0.000); ID wins multihop (recall@10 1.000 vs 0.750); Hybrid wins paraphrase (recall@10 0.333 vs 1.000); parity on contradiction (Δrecall@10 +0.000). The structural activation walk is strongest where relevance follows the graph (direct same-entity recall and multi-hop relation chains a pure-vector seed cannot see) and uniquely resolves contradictions by demoting the planted-false side; it is weakest on paraphrase rings that are reachable only by semantic similarity with no structural thread, where the tuned hybrid's vector channel dominates.
+On nDCG@10 the overall edge goes to **TunedHybrid** (0.525 vs 0.729). By category: parity on direct (Δrecall@10 +0.000); ID wins multihop (recall@10 1.000 vs 0.750); Hybrid wins paraphrase (recall@10 0.333 vs 1.000); parity on contradiction (Δrecall@10 +0.000). The structural activation walk is strongest where relevance follows the graph (direct same-entity recall and multi-hop relation chains a pure-vector seed cannot see) and uniquely resolves contradictions by demoting the planted-false side; it is weakest on paraphrase rings that are reachable only by semantic similarity with no structural thread, where the tuned hybrid's vector channel dominates.
