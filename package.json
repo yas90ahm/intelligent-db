@@ -48,7 +48,8 @@
     "node": ">=22.13"
   },
   "bin": {
-    "intelligent-db-mcp": "dist/mcp/server.js"
+    "intelligent-db-mcp": "dist/mcp/server.js",
+    "intelligent-db-daemon": "dist/daemon/cli.js"
   },
   "scripts": {
     "build": "tsc -p tsconfig.build.json",
