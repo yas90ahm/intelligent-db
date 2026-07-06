@@ -105,6 +105,14 @@ export type {
   StoreTxn,
 } from "./store/StrandStore.js";
 
+// Value-level AES-256-GCM encryption-at-rest adapter (docs/specs/PHASE2_DURABILITY_SPEC.md §3).
+export { createEncryptedStore, EncryptedStoreIntegrityError } from "./store/encryptedStore.js";
+
+export type {
+  KeyProvider,
+  EncryptedStoreErrorReason,
+} from "./store/encryptedStore.js";
+
 // ===========================================================================
 // traversal — spreading-activation walk + two-phase halting controller
 // ===========================================================================
