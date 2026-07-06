@@ -261,25 +261,25 @@ despite carrying the full provenance/trust/audit-chain write path those don't.
 On clean (unpoisoned) HotpotQA multi-hop questions, IntelligentDB's substrate arm matches RAG's
 answer accuracy exactly (86.0% vs 86.0%, n=100, qwen2.5:7b) — there is no retrieval-quality tax
 for carrying the trust/provenance layer when there's nothing to adjudicate, and both roughly
-double the no-retrieval baseline (54.0%). On LoCoMo retrieval quality, a genuine mem0 arm run
-in the same session beats IntelligentDB's own best (frozen, hybrid) retriever on every
-ranking metric (recall@10 0.382 vs 0.307, nDCG@10 0.242 vs 0.194) — evidence this project
-reports plainly rather than omits: mem0's cosine-similarity pipeline is a stronger day-to-day
-retriever on this dataset, even though it carries no defense against the adversarial setting
-IntelligentDB is built for.
+double the no-retrieval baseline (54.0%). On LoCoMo retrieval quality (everyday conversational recall, no attacker), a genuine mem0 arm
+run in the same session originally beat IntelligentDB's best retriever on every ranking metric
+(recall@20 0.484 vs 0.375). Three measured iterations closed that to statistical parity:
+seed-only embedder integration scored 0.366 (an honest miss, reported as such at the time),
+blended presentation ranking reached 0.419, and rank fusion plus embedder parity reached
+**0.481**. The frozen configuration now matches or beats mem0 on three of the four metrics
+(recall@10 0.385 vs 0.382, nDCG@10 0.242 vs 0.242, MRR 0.221 vs 0.215) and trails by 0.003 on
+recall@20, roughly 4 questions out of 1,319.
 
-An optional, injected embedder port (`EmbedderPort`, seed-only — similarity proposes candidates,
-it never sets belief) was measured directly against that mem0 number as a gate: could an
-embedder-seeded activation walk close the gap? **Honest result: no.** The best swept
-configuration (`embedSeedK=16`, summation reinforcement) measured recall@20 = 0.366 against
-mem0's 0.484 — a 0.118 shortfall — and didn't even beat this same run's own plain hybrid arm
-(0.366 vs 0.375). `embedSeedK=16` shipped as the frozen default anyway (it confirms a value
-already in place); nothing about default retrieval behavior changed as a result of this gate.
-The poisoning-defense numbers above are unaffected — the same embedder, actively populating
-vectors and actively winning seed slots for near-duplicate/poisoned payloads, was re-run
-through the Sybil (24/24) and FactWorld (0.0% ASR) gates with no change to either result: belief
-still comes from provenance and independence, never from cosine similarity. Full sweep,
-gate table, and reproduction commands: [`BENCH_RERUN_2026-07-06.md`](./BENCH_RERUN_2026-07-06.md),
+One detail from that sweep is worth more than the numbers. The tuning grid found a linear
+scoring configuration that measures 0.493 and would have beaten mem0 outright. It was rejected:
+every linear configuration fails the adversarial embedding-stuffing gate (a near-duplicate
+flood at cosine 1.0 can crowd the top ranks), and only rank fusion passes all gates. The config
+that shipped is the best one that survives the adversarial suite, not the best one on the
+leaderboard. Similarity proposes candidates and orders presentation; belief still comes from
+provenance and independence, never from cosine. The frozen config re-passed the Sybil (24/24)
+and FactWorld (0.0% ASR) gates, and default retrieval stays walk-mode with blend as an explicit
+opt-in. Full iteration history, gate tables, and reproduction commands:
+[`BENCH_RERUN_2026-07-06.md`](./BENCH_RERUN_2026-07-06.md),
 [`docs/BENCHMARK_NARRATIVE.md`](./docs/BENCHMARK_NARRATIVE.md).
 
 Separately, a 200-cycle crash-torture suite (`src/__torture__/`, `TORTURE=1 npm run torture`)
