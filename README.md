@@ -194,7 +194,7 @@ design-and-status document (test counts, known limitations) is [`CLAUDE.md`](./C
 
 | Benchmark | bare | RAG | mem0 | IntelligentDB |
 |---|---|---|---|---|
-| Cheap-Sybil poisoning, 11-store comparison (24 trials/store) | — | 0/24 on all 10 trust-blind stores (incl. Qdrant, Postgres+pgvector, Redis-Stack, faiss-node, hnswlib-node) | not measured (config gap, see below) | **24/24** |
+| Cheap-Sybil poisoning, 12-store comparison (24 trials/store) | — | 0/24 on all 11 trust-blind stores (incl. Qdrant, Postgres+pgvector, Redis-Stack, faiss-node, hnswlib-node, mem0) | 0/24 (see below) | **24/24** |
 | FactWorld (n=1200, 601 poisoned) — attack-success / accuracy | 0.0% / 0.0% | 98.7% / 50.3% | 78.9% / 60.2% | **0.0% / 99.8%** |
 | PoisonedRAG-nq (n=100, real attack files) — attack-success / accuracy | 4.0% / 50.0% | 93.0% / 22.0% | 96.0% / 22.0% | **6.0% / 86.0%** |
 | PoisonedRAG-hotpotqa (n=100) — attack-success / accuracy | 21.0% / 54.0% | 99.0% / 13.0% | 97.0% / 14.0% | **18.0% / 81–82%** |
@@ -207,24 +207,36 @@ embedder+vector-store retrieval carries no provenance/independence model); on Fa
 lands meaningfully between RAG's near-total collapse and IntelligentDB's clean defense,
 some internal dedup in mem0 partially resisting a near-duplicate Sybil cluster it doesn't
 resist on the PoisonedRAG attack shape. IntelligentDB is the only arm defended on every
-dataset. The crossdb mem0 adapter is not yet wired (`Memory.from_config` needs either an
-OpenAI key or explicit Ollama LLM config the harness doesn't pass) — a configuration gap,
-not a result. Full methodology, the label-free (non-oracle) structural defense, the
+dataset. The crossdb mem0 adapter is now wired (routed through the same local-Ollama config
+its other arms use, no OpenAI key needed) and scores 0/24 — same trust-blind majority-vote
+failure as every other comparator store, and by a wide margin the slowest adapter measured
+(write_hz 32/s, recall 74ms) thanks to its own LLM-mediated ingest and embedded-Qdrant search
+round-trip. Full methodology, the label-free (non-oracle) structural defense, the
 disclosed costly-independent degradation boundary, and every reproduction command:
 [`docs/ARCHITECTURE_BENCHMARKS.md`](./docs/ARCHITECTURE_BENCHMARKS.md). The complete
 re-run log for this pass: [`BENCH_RERUN_2026-07-06.md`](./BENCH_RERUN_2026-07-06.md).
 
 ### Day-to-day performance
 
-Setting the poisoning result aside, the same 11-adapter crossdb run also measured ordinary
-write/recall speed: IntelligentDB's median recall latency (0.003–0.004ms) is on par with the
-fastest raw key-value stores measured (lmdb at 0.004ms) and 10,000×+ faster than the two
-production vector databases in the comparison (Qdrant at 48ms, Postgres+pgvector at 0.69ms) —
-though IntelligentDB and the plain KV/SQL stores are doing a single-fact-by-entity lookup,
-an easier query than the vector engines' KNN-over-embeddings. Write throughput (~82k/s) sits
-mid-pack: behind the zero-index, no-durability engines (vector-bruteforce, sqlite variants)
-but ahead of every adapter doing real indexed vector storage, despite carrying the full
-provenance/trust/audit-chain write path those don't. Full table and methodology:
+Setting the poisoning result aside, the same 12-adapter crossdb run also measured ordinary
+write/recall speed: IntelligentDB's median recall latency (0.003–0.02ms across runs) is on
+par with the fastest raw key-value stores measured (lmdb) and thousands of times faster than
+every production vector database in the comparison, including mem0 (74ms recall, and by far
+the slowest write path at 32/s) — though IntelligentDB and the plain KV/SQL stores are doing a
+single-fact-by-entity lookup, an easier query than the vector engines' KNN-over-embeddings.
+Write throughput sits mid-pack: behind the zero-index, no-durability engines (vector-
+bruteforce, sqlite variants) but ahead of every adapter doing real indexed vector storage,
+despite carrying the full provenance/trust/audit-chain write path those don't.
+
+On clean (unpoisoned) HotpotQA multi-hop questions, IntelligentDB's substrate arm matches RAG's
+answer accuracy exactly (86.0% vs 86.0%, n=100, qwen2.5:7b) — there is no retrieval-quality tax
+for carrying the trust/provenance layer when there's nothing to adjudicate, and both roughly
+double the no-retrieval baseline (54.0%). On LoCoMo retrieval quality, a genuine mem0 arm run
+in the same session beats IntelligentDB's own best (frozen, hybrid) retriever on every
+ranking metric (recall@10 0.382 vs 0.307, nDCG@10 0.242 vs 0.194) — evidence this project
+reports plainly rather than omits: mem0's cosine-similarity pipeline is a stronger day-to-day
+retriever on this dataset, even though it carries no defense against the adversarial setting
+IntelligentDB is built for. Full tables and methodology:
 [`BENCH_RERUN_2026-07-06.md`](./BENCH_RERUN_2026-07-06.md).
 
 ---

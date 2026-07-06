@@ -6,17 +6,18 @@ Workload: N=5000 facts written, 250 recalls (median latency), 24 attack trials (
 
 | Engine | write_hz | recall_ms (median) | poison_correct_rate | bytes_per_fact_disk (FAIR) | bytes_per_fact_heap | footprint source |
 |---|---:|---:|---:|---:|---:|:--|
-| node:sqlite (builtin) | 888,478 | 0.006 | 0 (0/24) | 69.2 | 333.6 | on-disk file |
-| better-sqlite3 | 786,250 | 0.006 | 0 (0/24) | 69.2 | 345.4 | on-disk file |
-| lmdb | 8,687 | 0.004 | 0 (0/24) | 52.4 | 0 | on-disk file |
-| duckdb (@duckdb/node-api) | 87,265 | 0.848 | 0 (0/24) | 107.3 | 775.7 | on-disk file |
-| vector-bruteforce (in-proc) | 7,661,661 | 0.454 | 0 (0/24) | n/a | 356.8 | in-memory estimate |
-| faiss-node (IndexFlatL2) | 275,162 | 0.061 | 0 (0/24) | n/a | 0 | in-memory estimate |
-| hnswlib-node (HierarchicalNSW) | 17,695 | 0.078 | 0 (0/24) | 418.7 | 2,307.7 | on-disk file |
-| IntelligentDB (engine) | 81,818 | 0.003 | 1 (24/24) | 2,266 | 3,161.7 | on-disk file |
-| Qdrant (docker) | 12,078 | 48.083 | 0 (0/24) | 124,205.1 | 1,639.7 | db-reported size |
-| Postgres+pgvector (docker) | 80,420 | 0.691 | 0 (0/24) | 1,965.9 | 0 | db-reported size |
-| Redis-Stack (docker) | 151,230 | 0.648 | 0 (0/24) | 1,630.6 | 2,215.3 | db-reported size |
+| node:sqlite (builtin) | 540,716 | 0.009 | 0 (0/24) | 69.2 | 333.7 | on-disk file |
+| better-sqlite3 | 470,983 | 0.009 | 0 (0/24) | 69.2 | 345.3 | on-disk file |
+| lmdb | 4,412 | 0.008 | 0 (0/24) | 52.4 | 0 | on-disk file |
+| duckdb (@duckdb/node-api) | 47,568 | 1.36 | 0 (0/24) | 107.3 | 773.2 | on-disk file |
+| vector-bruteforce (in-proc) | 5,284,854 | 1.124 | 0 (0/24) | n/a | 355.4 | in-memory estimate |
+| faiss-node (IndexFlatL2) | 70,380 | 0.147 | 0 (0/24) | n/a | 0 | in-memory estimate |
+| hnswlib-node (HierarchicalNSW) | 8,501 | 0.118 | 0 (0/24) | 418.7 | 0 | on-disk file |
+| IntelligentDB (engine) | 18,038 | 0.02 | 1 (24/24) | 2,267.6 | 0 | on-disk file |
+| Qdrant (docker) | 6,304 | 60.505 | 0 (0/24) | 124,205.1 | 1,787.3 | db-reported size |
+| Postgres+pgvector (docker) | 23,171 | 1.178 | 0 (0/24) | 1,965.9 | 0 | db-reported size |
+| Redis-Stack (docker) | 40,347 | 1.232 | 0 (0/24) | 1,627.5 | 4,339.3 | db-reported size |
+| Mem0 (mem0ai, Python) | 32 | 74.003 | 0 (0/24) | 8,290.4 | 0 | on-disk file |
 
 `bytes_per_fact_disk` is the FAIR, apples-to-apples column: on-disk file size (sqlite/lmdb/duckdb/IntelligentDB) or the DB's own reported size (Qdrant/Postgres/Redis), divided by N. `n/a` = the engine is purely in-memory (vector-bruteforce) so no on-disk figure exists. `bytes_per_fact_heap` is the cycle-1 heap-delta proxy, kept for continuity but NOT comparable across engines (it only reflects what stayed on the JS heap).
 
@@ -26,7 +27,7 @@ _None — every targeted adapter installed and ran._
 
 ## BLOCKED adapters
 
-- **Mem0 (mem0ai, Python)** — mem0ai 2.0.10 installs and the local sentence-transformers embedder works, but Memory.from_config eagerly builds an LLM at init: default ⇒ OpenAIError 'Missing credentials' (no OPENAI_API_KEY); llm.provider=ollama ⇒ needs the `ollama` package + a running local LLM server. No way to run with NO LLM / NO key, and no key was supplied.
+_None._
 
 ## Notes
 

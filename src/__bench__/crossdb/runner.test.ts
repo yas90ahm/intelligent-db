@@ -39,6 +39,7 @@ import { createPgVectorAdapter } from "./adapters/pgvector.js";
 import { createRedisVectorAdapter } from "./adapters/redisVector.js";
 import { createFaissNodeAdapter } from "./adapters/faissNode.js";
 import { createHnswlibNodeAdapter } from "./adapters/hnswlibNode.js";
+import { createMem0Adapter } from "./adapters/mem0.js";
 
 // --- Fixed, identical workload across every engine -------------------------------
 
@@ -131,29 +132,15 @@ const REGISTRY: Registration[] = [
   { name: "Qdrant (docker)", footprintKind: "db-reported size", make: createQdrantAdapter },
   { name: "Postgres+pgvector (docker)", footprintKind: "db-reported size", make: createPgVectorAdapter },
   { name: "Redis-Stack (docker)", footprintKind: "db-reported size", make: createRedisVectorAdapter },
+  // Mem0 (Python, via the persistent reasoning/mem0_sidecar.py sidecar) — UNBLOCKED: the
+  // prior wall was Memory.from_config's eager LLM-client construction defaulting to OpenAI
+  // (OpenAIError: Missing credentials); routed through local Ollama for both LLM + embedder
+  // (the sidecar's existing config), so no OPENAI_API_KEY is needed. See adapters/mem0.ts.
+  { name: "Mem0 (mem0ai, Python)", footprintKind: "on-disk file", make: createMem0Adapter },
 ];
 
-/**
- * Adapters attempted but BLOCKED by an environmental wall. Mem0 (Python) was probed
- * out-of-band (it is not a JS MemoryAdapter): `pip install mem0ai` succeeds and the LOCAL
- * embedder path works (sentence-transformers `all-MiniLM-L6-v2` downloads + embeds, and
- * `add(..., infer=False)` skips LLM fact-extraction), but `mem0.Memory.from_config`
- * EAGERLY constructs an LLM client at init regardless: with no `llm` config it defaults to
- * OpenAI and raises `OpenAIError: Missing credentials` (needs `OPENAI_API_KEY`); pointing
- * `llm.provider` at `ollama` instead only swaps the wall to "`pip install ollama` + a
- * running local Ollama server + a downloaded LLM" — still an LLM, which the directive
- * forbids. No API key was supplied. So Mem0 cannot run with NO LLM and NO key.
- */
-const BLOCKED: SkipResult[] = [
-  {
-    name: "Mem0 (mem0ai, Python)",
-    reason:
-      "mem0ai 2.0.10 installs and the local sentence-transformers embedder works, but " +
-      "Memory.from_config eagerly builds an LLM at init: default ⇒ OpenAIError 'Missing " +
-      "credentials' (no OPENAI_API_KEY); llm.provider=ollama ⇒ needs the `ollama` package + a " +
-      "running local LLM server. No way to run with NO LLM / NO key, and no key was supplied.",
-  },
-];
+/** Adapters attempted but blocked by an environmental wall. None remain. */
+const BLOCKED: SkipResult[] = [];
 
 // Curated skips for adapters that could not install/build in this environment.
 const SKIPS: SkipResult[] = [];

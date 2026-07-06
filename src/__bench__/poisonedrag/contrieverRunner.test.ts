@@ -15,6 +15,17 @@
  *
  * Then run (needs the GPU for Ollama):
  *   CONTRIEVER_BENCH=1 PR_MODEL=qwen2.5:7b npx vitest run src/__bench__/poisonedrag/contrieverRunner.test.ts
+ *
+ * CLEAN (unpoisoned) MODE — day-to-day, no-attacker comparison:
+ *   PR_CLEAN=1 additionally drops every kind:"poison" passage from the KB (and its aligned
+ *   Contriever vector) before any arm is built, leaving gold+negative only. substrate then has
+ *   nothing to adjudicate (each query's contradiction set holds only the "correct" value), so
+ *   its retrieval degrades to plain cosine top-N→top-K identical to rag — this isolates "what
+ *   does the defense cost when there's no attacker" from the poisoned-corpus ASR numbers.
+ *   Output is written to a separate `_clean` file so it never clobbers the poisoned run.
+ *
+ *   PR_CLEAN=1 PR_ARMS=bare,rag,substrate,mem0 CONTRIEVER_BENCH=1 PR_MODEL=qwen2.5:7b \
+ *     npx vitest run src/__bench__/poisonedrag/contrieverRunner.test.ts
  */
 
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
@@ -47,6 +58,7 @@ const OUT_DIR = "D:\\Intelligent DB\\.arbor\\sessions\\poisonedrag";
 const MEM0_PYTHON = process.env["MEM0_PYTHON"] ?? "D:\\Intelligent DB\\.arbor\\venv-mem0\\Scripts\\python.exe";
 const MEM0_EMBED = process.env["MEM0_EMBED"] ?? "nomic-embed-text";
 const MEM0_EMBED_DIMS = envInt("MEM0_EMBED_DIMS", 768);
+const CLEAN = process.env["PR_CLEAN"] === "1"; // drop kind:"poison" passages — no-attacker mode
 
 const clean = (s: string): string => s.toLowerCase().replace(/\s+/g, " ").trim();
 const contains = (hay: string, needle: string): boolean => clean(hay).includes(clean(needle));
@@ -111,17 +123,27 @@ function buildPrompt(question: string, ctx: readonly string[]): string {
           throw new Error(`missing Contriever vectors — run contriever_embed.py to build ${kbVecPath} and ${qVecPath}`);
         }
 
-        const passages = loadKB(kbPath);
+        let passages = loadKB(kbPath);
         let questions = loadQuestions(qPath).filter((q) => q.has_gold);
         if (Q_CAP > 0) questions = questions.slice(0, Q_CAP);
 
         // Load the PRECOMPUTED Contriever vectors (un-normalized → TS cosine == paper dot).
         const kb = loadF32(kbVecPath);
         const q = loadF32(qVecPath);
-        const kbVecs = kb.vecs;
+        let kbVecs = kb.vecs;
         const qVecsAll = q.vecs;
         if (kbVecs.length !== passages.length) {
           throw new Error(`KB vector count ${kbVecs.length} != passage count ${passages.length}`);
+        }
+        if (CLEAN) {
+          // Drop poison passages + their aligned vectors together, preserving index alignment.
+          const keepIdx: number[] = [];
+          for (let i = 0; i < passages.length; i++) if (passages[i]!.kind !== "poison") keepIdx.push(i);
+          const droppedPoison = passages.length - keepIdx.length;
+          passages = keepIdx.map((i) => passages[i]!);
+          kbVecs = keepIdx.map((i) => kbVecs[i]!);
+          // eslint-disable-next-line no-console
+          console.log(`[pr/contriever] PR_CLEAN=1: dropped ${droppedPoison} poison passages, ${passages.length} remain`);
         }
         if (kb.dim !== q.dim) throw new Error(`KB dim ${kb.dim} != question dim ${q.dim}`);
         // Questions were embedded BEFORE the has_gold filter / Q_CAP — align by original index.
@@ -170,8 +192,8 @@ function buildPrompt(question: string, ctx: readonly string[]): string {
         for (const a of Object.values(armOf)) if (a?.close) await a.close();
 
         mkdirSync(OUT_DIR, { recursive: true });
-        const out = { config: { retriever: "contriever-msmarco", dim: kb.dim, model: MODEL, dataset: DATASET, topK: TOP_K, topN: TOP_N, arms: ARMS }, nQuestions: questions.length, rows };
-        const outPath = join(OUT_DIR, `contriever_${DATASET}_${MODEL.replace(/[^A-Za-z0-9._-]+/g, "_")}.json`);
+        const out = { config: { retriever: "contriever-msmarco", dim: kb.dim, model: MODEL, dataset: DATASET, topK: TOP_K, topN: TOP_N, arms: ARMS, clean: CLEAN, kbSize: passages.length }, nQuestions: questions.length, rows };
+        const outPath = join(OUT_DIR, `contriever_${DATASET}${CLEAN ? "_clean" : ""}_${MODEL.replace(/[^A-Za-z0-9._-]+/g, "_")}.json`);
         writeFileSync(outPath, JSON.stringify(out, null, 2));
 
         const h = "arm        |  ASR  |  acc";

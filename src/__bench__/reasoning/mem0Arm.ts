@@ -51,11 +51,19 @@ export class Mem0Sidecar {
 
   constructor(opts: Mem0Options) {
     const sidecar = join(dirname(fileURLToPath(import.meta.url)), "mem0_sidecar.py");
+    // mem0's telemetry path defaults to a FIXED global directory (`~/.mem0/migrations_qdrant`)
+    // regardless of the configured `vector_store.path`, which collides with ANY other
+    // concurrently-running mem0 process on the box (RuntimeError: storage folder already
+    // accessed by another Qdrant client instance). Disabling telemetry (mem0's own documented
+    // env knob) skips that shared path entirely — same fix already applied in
+    // crossdb/adapters/mem0.ts and retrieval/locomoMem0Runner.test.ts.
+    const mem0Telemetry = process.env["MEM0_TELEMETRY"] ?? "False";
     this.#proc = spawn(opts.pythonBin, [sidecar], {
       env: {
         ...process.env,
         PYTHONUTF8: "1",
         PYTHONIOENCODING: "utf-8",
+        MEM0_TELEMETRY: mem0Telemetry,
         MEM0_LLM: opts.llm,
         MEM0_EMBED: opts.embed,
         MEM0_EMBED_DIMS: String(opts.embedDims),
