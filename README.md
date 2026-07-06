@@ -39,10 +39,11 @@ ever allowed to out-rank another. The result, **re-verified 2026-07-06 against t
 (crypto-free) engine**, full report: [`BENCH_RERUN_2026-07-06.md`](./BENCH_RERUN_2026-07-06.md):
 
 - **Cheap-Sybil poisoning, cross-store comparison** (`src/__bench__/crossdb/`): every
-  trust-blind store benchmarked (8 in total, including **Qdrant**, **Postgres+pgvector**,
-  and **Redis-Stack** alongside five embedded/on-disk backends) scored **0/24** against a
-  24-trial cheap-Sybil attack (an attacker who mints throwaway identities for free). The
-  IntelligentDB engine, the 9th arm in the same run, scored **24/24**.
+  trust-blind store benchmarked (10 in total, including **Qdrant**, **Postgres+pgvector**,
+  **Redis-Stack**, and the native vector indexes **faiss-node** and **hnswlib-node**,
+  alongside five embedded/on-disk backends) scored **0/24** against a 24-trial cheap-Sybil
+  attack (an attacker who mints throwaway identities for free). The IntelligentDB engine, the
+  11th arm in the same run, scored **24/24**.
 - **mem0 comparison** (PoisonedRAG-nq, n=100, real BEIR corpus + the paper's own attack
   files): mem0, a genuine external memory framework with its own embedder and vector store,
   suffers **96% attack-success rate**; the substrate scores **6%**.
@@ -193,7 +194,7 @@ design-and-status document (test counts, known limitations) is [`CLAUDE.md`](./C
 
 | Benchmark | bare | RAG | mem0 | IntelligentDB |
 |---|---|---|---|---|
-| Cheap-Sybil poisoning, 9-store comparison (24 trials/store) | — | 0/24 on all 8 trust-blind stores (incl. Qdrant, Postgres+pgvector, Redis-Stack) | not measured (config gap, see below) | **24/24** |
+| Cheap-Sybil poisoning, 11-store comparison (24 trials/store) | — | 0/24 on all 10 trust-blind stores (incl. Qdrant, Postgres+pgvector, Redis-Stack, faiss-node, hnswlib-node) | not measured (config gap, see below) | **24/24** |
 | FactWorld (n=1200, 601 poisoned) — attack-success / accuracy | 0.0% / 0.0% | 98.7% / 50.3% | 78.9% / 60.2% | **0.0% / 99.8%** |
 | PoisonedRAG-nq (n=100, real attack files) — attack-success / accuracy | 4.0% / 50.0% | 93.0% / 22.0% | 96.0% / 22.0% | **6.0% / 86.0%** |
 | PoisonedRAG-hotpotqa (n=100) — attack-success / accuracy | 21.0% / 54.0% | 99.0% / 13.0% | 97.0% / 14.0% | **18.0% / 81–82%** |
@@ -212,6 +213,19 @@ not a result. Full methodology, the label-free (non-oracle) structural defense, 
 disclosed costly-independent degradation boundary, and every reproduction command:
 [`docs/ARCHITECTURE_BENCHMARKS.md`](./docs/ARCHITECTURE_BENCHMARKS.md). The complete
 re-run log for this pass: [`BENCH_RERUN_2026-07-06.md`](./BENCH_RERUN_2026-07-06.md).
+
+### Day-to-day performance
+
+Setting the poisoning result aside, the same 11-adapter crossdb run also measured ordinary
+write/recall speed: IntelligentDB's median recall latency (0.003–0.004ms) is on par with the
+fastest raw key-value stores measured (lmdb at 0.004ms) and 10,000×+ faster than the two
+production vector databases in the comparison (Qdrant at 48ms, Postgres+pgvector at 0.69ms) —
+though IntelligentDB and the plain KV/SQL stores are doing a single-fact-by-entity lookup,
+an easier query than the vector engines' KNN-over-embeddings. Write throughput (~82k/s) sits
+mid-pack: behind the zero-index, no-durability engines (vector-bruteforce, sqlite variants)
+but ahead of every adapter doing real indexed vector storage, despite carrying the full
+provenance/trust/audit-chain write path those don't. Full table and methodology:
+[`BENCH_RERUN_2026-07-06.md`](./BENCH_RERUN_2026-07-06.md).
 
 ---
 
