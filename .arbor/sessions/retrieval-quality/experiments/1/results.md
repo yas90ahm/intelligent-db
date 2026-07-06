@@ -36,7 +36,7 @@ Over the full contradiction set (**15 pairs**, top-10):
 | Metric | IntelligentDB | TunedHybrid |
 |---|---|---|
 | both-sides-surfaced rate | 1.000 | 1.000 |
-| correct-LIVE rate (adjudication) | 1.000 | n/a |
+| correct-LIVE rate (adjudication) | 0.000 | n/a |
 
 - **both-sides-surfaced**: fraction of contradicted (entity,attribute) pairs where BOTH the true and false value appear in the system's top-K. Measures whether the conflict is even visible.
 - **correct-LIVE** (ID only): fraction where, after `engine.adjudicate`, the strand kept LIVE is the planted-true value (the planted-false one DEMOTED). The hybrid has no adjudication, so this is n/a.

@@ -132,7 +132,7 @@
       "novelty": "Weak-influence edge filed against proxy c1 (which consulted A), so edgesConsulting(A's seed) never reaches b1; dodges the human review queue — a symmetric one-hop gap in the uncited-influence channel.",
       "outcome": "DEFENDED",
       "mechanism": "The weak-influence review queue is driven by edgesConsulting(seed={a1}), ONE HOP: only C's edge (consultedStrandId=a1) matches → c1 queued; B's edge names c1, not in A's seed → b1 never queued. The A->c1->b1 taint stops at the queue's one-hop horizon, exactly mirroring the corroboration-credit one-hop gap.",
-      "evidence": "reviewQueued=[\"strand:47ecfa32-1fbb-4062-b859-aa49fa5b2c87\",\"strand:7dabd812-4a47-4d5f-b18d-fb04d31d7f65\"]; c1 queued=true; b1 queued=true (BREACH: b1 neither demoted nor contradicted nor reviewed)."
+      "evidence": "reviewQueued=[\"strand:80121204-03bd-4690-a906-f5e918f3f141\",\"strand:29b62f3e-f85d-479f-b806-f306f344a304\"]; c1 queued=true; b1 queued=true (BREACH: b1 neither demoted nor contradicted nor reviewed)."
     },
     {
       "name": "Re-Observation Bleach",
@@ -180,7 +180,7 @@
       "novelty": "The mandatory bridge sweep guarantees one crossing per lit bridge with NO identity gate, so a planted near-hub->far CROSS_WEB_BRIDGE surfaces a false far-web fact on every recall.",
       "outcome": "BREACHED",
       "mechanism": "halting.nextBridgeCrossing() guarantees one crossing per lit bridge, seeding the far side at gamma, with NO check of the bridge author's reputation/anchor/independence. The trust layer gates ADJUDICATION but not ACTIVATION/RETRIEVAL: a false OBSERVED far fact is surfaced on demand (stamped low-corroboration), bypassing the wall-with-a-window because it is attacker-observed, not derived.",
-      "evidence": "recall lit=[\"strand:9dc97e3e-cf3c-435f-a6f4-02fbb9066005\",\"strand:9f637abe-25c4-440e-86fd-ddbe7b682c45\"]; Fpoison(FALSE_FAR_FACT) surfaced=true via a ZERO-independence bare-key bridge; halt=BRIDGE_SWEEP_CLEAR."
+      "evidence": "recall lit=[\"strand:5c109ed0-d173-4c39-b44e-f09d5b7d52f5\",\"strand:ca96bab5-a3ec-452e-8e41-59949d6012ab\"]; Fpoison(FALSE_FAR_FACT) surfaced=true via a ZERO-independence bare-key bridge; halt=BRIDGE_SWEEP_CLEAR."
     },
     {
       "name": "Bridge-Sweep Eclipse (Decoy Flood)",
@@ -236,7 +236,7 @@
       "novelty": "approve()'s distinct-approver gate rejects self-approval by AUTHORSHIP; a second key that is a different author but shares the asserter's anchor obtains the external ratification stamp without external independence.",
       "outcome": "DEFENDED",
       "mechanism": "approve() checks (a) approver != AUTHOR of any disputed member and (b) approver is registered with >=1 priced anchor — NEITHER requires the approver to be ANCHOR-DISJOINT from the disputed members. A Sybil pair sharing one cheap anchor self-ratifies: the sibling source is a distinct, registered author, so it clears both gates and promotes the lie with no genuine external witness. The cleanest invariant violation — promote without an INDEPENDENT external stamp.",
-      "evidence": "dispute deferred=true; sibling-approve succeeded=false (err: approve: approver FF42Hx4sIs4caFkP2CXG3Rceg1qsuhyH-Kmdr5IT1hg is not anchor-independent of member author wx3uDJWRRSRj-RY21pnKdTJa9gOLeozaV-I5JmZx6FY.); false=LIVE true=LIVE (breached=false). The missing check: approver must be independenceBetween>0 from every disputed member."
+      "evidence": "dispute deferred=true; sibling-approve succeeded=false (err: approve: approver Cj1mMnvNGHbL0AhrHXrnEZGOtGPWxFfvJKaLwfjI_5c is not anchor-independent of member author _DFpWLR5SMrkAipmNMUd78TUbP2FmRgMdTT6IKQQcos.); false=LIVE true=LIVE (breached=false). The missing check: approver must be independenceBetween>0 from every disputed member."
     },
     {
       "name": "RE-OBSERVATION-LAUNDERING (escape exact credit reversal)",

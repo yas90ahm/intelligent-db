@@ -1,6 +1,6 @@
 # PoisonedRAG NQ — spot check: WHY Intelligent DB ignores the poison
 
-Generated 2026-06-30T15:05:42.878Z — pure engine state, no LLM. Sample: 8 questions from `pr_nq_kb.jsonl`.
+Generated 2026-07-06T15:02:00.686Z — pure engine state, no LLM. Sample: 8 questions from `pr_nq_kb.jsonl`.
 
 Mechanism: each query's GOLD value is backed by ≥2 anchor-DISJOINT roots (primary pre-earned via 12 ratifies, cap 0.95) so its independent-root count **#R = 2**; the attacker's 5 poison passages all share ONE anchor class (a Sybil cluster) so the incorrect value's **#R = 1**. `adjudicate()` sees a decisive, EARNED reputation margin for the gold and DEMOTES the poison (demote-never-delete). Plain RAG ranks by cosine only — the query-crafted poison crowds the top-k; IDB drops the DEMOTED poison and surfaces the gold.
 

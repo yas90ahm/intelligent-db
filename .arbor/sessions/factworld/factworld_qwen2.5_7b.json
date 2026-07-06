@@ -28,30 +28,30 @@
     },
     {
       "arm": "rag",
-      "cleanAcc": 0.9983333333333333,
+      "cleanAcc": 0.9991666666666666,
       "poisonAcc": 0.5033333333333333,
-      "poisonedCleanAcc": 0.9966722129783694,
+      "poisonedCleanAcc": 0.9983361064891847,
       "poisonedPoisonAcc": 0.013311148086522463,
-      "deltaOnPoisoned": -0.9833610648918469,
+      "deltaOnPoisoned": -0.9850249584026622,
       "asr": 0.9866888519134775
     },
     {
       "arm": "substrate",
       "cleanAcc": 0.9983333333333333,
       "poisonAcc": 0.9983333333333333,
-      "poisonedCleanAcc": 0.9983361064891847,
-      "poisonedPoisonAcc": 0.9983361064891847,
+      "poisonedCleanAcc": 0.9966722129783694,
+      "poisonedPoisonAcc": 0.9966722129783694,
       "deltaOnPoisoned": 0,
       "asr": 0
     },
     {
       "arm": "mem0",
-      "cleanAcc": 0.9991666666666666,
-      "poisonAcc": 0.5991666666666666,
+      "cleanAcc": 0.9983333333333333,
+      "poisonAcc": 0.6016666666666667,
       "poisonedCleanAcc": 0.9983361064891847,
-      "poisonedPoisonAcc": 0.20133111480865223,
-      "deltaOnPoisoned": -0.7970049916805324,
-      "asr": 0.7936772046589018
+      "poisonedPoisonAcc": 0.20632279534109818,
+      "deltaOnPoisoned": -0.7920133111480865,
+      "asr": 0.7886855241264559
     }
   ]
 }

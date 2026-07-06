@@ -145,7 +145,7 @@
     "bothSidesSurfacedAtK": 10,
     "idBothSidesRate": 1,
     "hybridBothSidesRate": 1,
-    "idCorrectLiveRate": 1,
+    "idCorrectLiveRate": 0,
     "n": 15
   },
   "halting": {

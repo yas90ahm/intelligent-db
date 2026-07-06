@@ -49,7 +49,7 @@
       "novelty": "The mandatory Phase-2 bridge sweep guarantees one identity-blind crossing of every lit bridge at energy=gamma. A bare-key far-web plant gets its guaranteed crossing. The fix is a SOFT gamma down-weight by the bridge target's provenance_independence (never a hard skip — that would starve genuine convergence=1 insight bridges).",
       "outcome": "BREACHED",
       "mechanism": "Today the sweep is identity-blind: poison(indep 0) surfaces=true. Soft-gate energy poison=0.000(<floor 0.01=>dropped) vs insight=0.210(>=floor=>still crosses). PARTIAL: a HARD skip would starve the genuine convergence=1 insight bridge (violates fail-open); a SOFT down-weight demotes injected energy without hiding genuine bridges, but a patient attacker who earns a few far-side corroborations regains priority (priced, not prevented).",
-      "evidence": "recall lit=[\"strand:d1f55a51-36e9-4a8a-9bd8-8f3b029914a8\",\"strand:3b2853b2-9d3f-4e8b-be33-51b24d8d8bc8\",\"strand:8f54d8cc-6e4a-4c0f-ae3d-16cfbf6ab260\"]; poison surfaced today=true, insight surfaced today=true; halt=BRIDGE_SWEEP_CLEAR. Soft-gate: poison dropped=true, insight preserved=true."
+      "evidence": "recall lit=[\"strand:e08cb25c-59c6-4cd1-88e4-d31782b8d705\",\"strand:1195fb8e-c245-484b-8cfe-a460a1566239\",\"strand:9e7c0c29-6da2-417f-a985-6ef6e690d0af\"]; poison surfaced today=true, insight surfaced today=true; halt=BRIDGE_SWEEP_CLEAR. Soft-gate: poison dropped=true, insight preserved=true."
     },
     {
       "id": "al-c3-01",
@@ -184,7 +184,7 @@
       "novelty": "Bridgehead-Beacon: the mandatory sweep is identity-blind (pendingBridges has no reputation/earned-value filter; seedActivation is constant gamma). Order by earned_bridge_value and down-weight seed by origin reputation — PARTIAL, cannot fully close (mandatory/fail-open) and earned value is offline-earnable.",
       "outcome": "BREACHED",
       "mechanism": "Today the sweep is identity-blind: poison surfaces=true at constant gamma. Soft gate: bare-key origin (indep 0) -> seed=0.000 < assembly floor (dropped=true); earned bridges fire first. PARTIAL: the sweep is deliberately MANDATORY/fail-open so a starved bridge still gets a degraded crossing or a BRIDGE_STARVED stamp; earned_bridge_value is offline-earnable so a patient attacker buys priority; and a HARD gate would starve genuine convergence=1 insight bridges and erode 'walk never witnesses'.",
-      "evidence": "recall lit=[\"strand:21320ecb-a633-42d8-9d3e-1faedf77499b\",\"strand:3610602c-2ef3-447d-ae63-53f62f98e165\"]; poison surfaced=true via zero-independence bare-key bridge; soft-gate seed=0.000 => dropped=true; halt=BRIDGE_SWEEP_CLEAR."
+      "evidence": "recall lit=[\"strand:10cc4940-acbd-4c99-ba6e-ac8b6f4fe25f\",\"strand:ddc53901-5611-4d52-b8c7-69fdb5355926\"]; poison surfaced=true via zero-independence bare-key bridge; soft-gate seed=0.000 => dropped=true; halt=BRIDGE_SWEEP_CLEAR."
     },
     {
       "id": "pt-1",

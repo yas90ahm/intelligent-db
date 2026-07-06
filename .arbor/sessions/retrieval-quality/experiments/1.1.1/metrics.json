@@ -495,15 +495,15 @@
     "meanLitBefore": 13.05989385898408,
     "meanLitWide": 20.02729340409401,
     "latencyBefore": {
-      "totalMs": 53.3352,
-      "meanMs": 0.040436087945413195,
+      "totalMs": 51.2013,
+      "meanMs": 0.03881827141774072,
       "n": 1319
     },
     "latencyWide": {
-      "totalMs": 74.2259,
-      "meanMs": 0.056274374526156176,
+      "totalMs": 79.3821,
+      "meanMs": 0.06018354814253222,
       "n": 1319
     },
-    "latencyMultiple": 1.3916869159579413
+    "latencyMultiple": 1.5503922751961372
   }
 }

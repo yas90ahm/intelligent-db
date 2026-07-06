@@ -55,7 +55,7 @@ recall@20 gap to hybrid: ID+Rerank **-0.103** → MultiSeedID **-0.051** (narrow
 |---|---|---|---|
 | seed→evidence reachability (mean frac of evidence turns in lit set) | 0.272 | 0.324 | +0.052 |
 | mean \|lit\| (auto-halted size) | 13.060 | 13.552 | 1.04× |
-| mean recall latency / query (ms) | 0.042 | 0.274 | 6.47× |
+| mean recall latency / query (ms) | 0.041 | 0.240 | 5.82× |
 | precision@1 (PureID / ID+Rerank / MultiSeedID / hybrid) | 0.104 / 0.102 | — | MultiSeedID 0.100 vs hybrid 0.100 |
 
 k-sweep on dev (recall@20 / nDCG@10 / mean |lit| / reachability):
@@ -70,4 +70,4 @@ k-sweep on dev (recall@20 / nDCG@10 / mean |lit| / reachability):
 
 ## 4. Verdict (Q1–Q4)
 
-**Q1 (close/flip the deep-recall + adversarial gap?)** MultiSeedID recall@10 0.282 (gap to hybrid -0.026), recall@20 0.324 (gap -0.051) — the gap NARROWED but did NOT close vs ID+Rerank's pre-seed gap of -0.103. Adversarial (n=297): MultiSeedID recall@20 0.391 vs hybrid 0.502, vs ID+Rerank 0.310. **Q2 (same vector seeds: does activation-walk beat graph+RRF?)** Not on overall recall@20 — from the SAME vector-kNN entry, MultiSeedID trails/matches the hybrid (0.324 vs 0.375); the per-category rows show where activation+provenance expansion wins vs k-hop graph+RRF. Multi-hop (n=188): MultiSeedID recall@20 0.135 / nDCG@10 0.065 vs hybrid 0.149 / 0.070. **Q3 (kept ID's multi-hop edge while gaining coverage?)** PARTIALLY — multi-hop nDCG@10 0.065 vs hybrid 0.070. **Q4 (reachability rose as predicted?)** Seed→evidence reachability 0.272 → 0.324 (ROSE); reachability and recall moved in lockstep, CONFIRMING the cycle C+D seed/reach diagnosis. COST: mean |lit| 13.060 → 13.552 (1.04×), latency 6.47× per query, precision@1 0.102 (ID+Rerank) → 0.100 (MultiSeedID).
+**Q1 (close/flip the deep-recall + adversarial gap?)** MultiSeedID recall@10 0.282 (gap to hybrid -0.026), recall@20 0.324 (gap -0.051) — the gap NARROWED but did NOT close vs ID+Rerank's pre-seed gap of -0.103. Adversarial (n=297): MultiSeedID recall@20 0.391 vs hybrid 0.502, vs ID+Rerank 0.310. **Q2 (same vector seeds: does activation-walk beat graph+RRF?)** Not on overall recall@20 — from the SAME vector-kNN entry, MultiSeedID trails/matches the hybrid (0.324 vs 0.375); the per-category rows show where activation+provenance expansion wins vs k-hop graph+RRF. Multi-hop (n=188): MultiSeedID recall@20 0.135 / nDCG@10 0.065 vs hybrid 0.149 / 0.070. **Q3 (kept ID's multi-hop edge while gaining coverage?)** PARTIALLY — multi-hop nDCG@10 0.065 vs hybrid 0.070. **Q4 (reachability rose as predicted?)** Seed→evidence reachability 0.272 → 0.324 (ROSE); reachability and recall moved in lockstep, CONFIRMING the cycle C+D seed/reach diagnosis. COST: mean |lit| 13.060 → 13.552 (1.04×), latency 5.82× per query, precision@1 0.102 (ID+Rerank) → 0.100 (MultiSeedID).

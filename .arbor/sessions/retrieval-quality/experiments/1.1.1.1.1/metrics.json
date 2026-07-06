@@ -366,16 +366,16 @@
     "meanLitMulti": 13.551933282789992,
     "litMultiple": 1.037675606641124,
     "latencySingle": {
-      "totalMs": 55.8941,
-      "meanMs": 0.04237611827141774,
+      "totalMs": 54.366,
+      "meanMs": 0.04121758908263836,
       "n": 1319
     },
     "latencyMulti": {
-      "totalMs": 361.7161,
-      "meanMs": 0.2742351023502653,
+      "totalMs": 316.2598,
+      "meanMs": 0.2397724033358605,
       "n": 1319
     },
-    "latencyMultiple": 6.471454053290061,
+    "latencyMultiple": 5.81723503660376,
     "precision1": {
       "PureID": 0.10386656557998483,
       "IDRerank": 0.10159211523881728,

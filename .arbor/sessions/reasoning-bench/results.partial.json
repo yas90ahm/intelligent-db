@@ -1,18 +1,15 @@
 {
   "config": {
     "models": [
-      "qwen2.5:7b",
-      "llama3.1:8b",
-      "gemma3"
+      "qwen2.5:7b"
     ],
     "arms": [
       "bare",
       "rag",
       "substrate",
-      "hybrid",
-      "mem0"
+      "hybrid"
     ],
-    "n": 10,
+    "n": 15,
     "k": 3,
     "poisonRate": 0
   },
@@ -21,466 +18,136 @@
       "model": "qwen2.5:7b",
       "benchmark": "math",
       "arm": "bare",
-      "n": 10,
-      "correct": 7,
-      "accuracy": 0.7,
-      "avgGenMs": 2540.6378000000004,
-      "totalGenMs": 25406.378000000004
+      "n": 15,
+      "correct": 11,
+      "accuracy": 0.7333333333333333,
+      "avgGenMs": 2465.1648066666667,
+      "totalGenMs": 36977.4721
     },
     {
       "model": "qwen2.5:7b",
       "benchmark": "math",
       "arm": "rag",
-      "n": 10,
-      "correct": 6,
+      "n": 15,
+      "correct": 9,
       "accuracy": 0.6,
-      "avgGenMs": 2397.953270000001,
-      "totalGenMs": 23979.53270000001
+      "avgGenMs": 2183.9173733333328,
+      "totalGenMs": 32758.760599999994
     },
     {
       "model": "qwen2.5:7b",
       "benchmark": "math",
       "arm": "substrate",
-      "n": 10,
-      "correct": 6,
+      "n": 15,
+      "correct": 9,
       "accuracy": 0.6,
-      "avgGenMs": 2128.8017999999975,
-      "totalGenMs": 21288.017999999975
+      "avgGenMs": 2151.509773333332,
+      "totalGenMs": 32272.64659999998
     },
     {
       "model": "qwen2.5:7b",
       "benchmark": "math",
       "arm": "hybrid",
-      "n": 10,
-      "correct": 6,
+      "n": 15,
+      "correct": 9,
       "accuracy": 0.6,
-      "avgGenMs": 2123.5468900000037,
-      "totalGenMs": 21235.468900000036
+      "avgGenMs": 2158.5553800000052,
+      "totalGenMs": 32378.33070000008
     },
     {
       "model": "qwen2.5:7b",
-      "benchmark": "math",
-      "arm": "mem0",
-      "n": 10,
-      "correct": 8,
-      "accuracy": 0.8,
-      "avgGenMs": 2327.218100000003,
-      "totalGenMs": 23272.181000000026
-    },
-    {
-      "model": "llama3.1:8b",
-      "benchmark": "math",
+      "benchmark": "gpqa",
       "arm": "bare",
-      "n": 10,
+      "n": 15,
       "correct": 5,
-      "accuracy": 0.5,
-      "avgGenMs": 12508.951120000007,
-      "totalGenMs": 125089.51120000007
+      "accuracy": 0.3333333333333333,
+      "avgGenMs": 4353.609153333332,
+      "totalGenMs": 65304.13729999997
     },
     {
-      "model": "llama3.1:8b",
-      "benchmark": "math",
+      "model": "qwen2.5:7b",
+      "benchmark": "gpqa",
       "arm": "rag",
-      "n": 10,
-      "correct": 6,
+      "n": 15,
+      "correct": 9,
       "accuracy": 0.6,
-      "avgGenMs": 13477.079410000006,
-      "totalGenMs": 134770.79410000006
+      "avgGenMs": 4398.51340666666,
+      "totalGenMs": 65977.70109999989
     },
     {
-      "model": "llama3.1:8b",
-      "benchmark": "math",
+      "model": "qwen2.5:7b",
+      "benchmark": "gpqa",
       "arm": "substrate",
-      "n": 10,
+      "n": 15,
       "correct": 6,
-      "accuracy": 0.6,
-      "avgGenMs": 13767.578080000001,
-      "totalGenMs": 137675.7808
-    },
-    {
-      "model": "llama3.1:8b",
-      "benchmark": "math",
-      "arm": "hybrid",
-      "n": 10,
-      "correct": 6,
-      "accuracy": 0.6,
-      "avgGenMs": 13659.771219999995,
-      "totalGenMs": 136597.71219999995
-    },
-    {
-      "model": "llama3.1:8b",
-      "benchmark": "math",
-      "arm": "mem0",
-      "n": 10,
-      "correct": 4,
       "accuracy": 0.4,
-      "avgGenMs": 9316.31296999998,
-      "totalGenMs": 93163.12969999982
-    },
-    {
-      "model": "gemma3",
-      "benchmark": "math",
-      "arm": "bare",
-      "n": 10,
-      "correct": 7,
-      "accuracy": 0.7,
-      "avgGenMs": 3658.134220000007,
-      "totalGenMs": 36581.34220000007
-    },
-    {
-      "model": "gemma3",
-      "benchmark": "math",
-      "arm": "rag",
-      "n": 10,
-      "correct": 7,
-      "accuracy": 0.7,
-      "avgGenMs": 3211.4776999999885,
-      "totalGenMs": 32114.776999999885
-    },
-    {
-      "model": "gemma3",
-      "benchmark": "math",
-      "arm": "substrate",
-      "n": 10,
-      "correct": 7,
-      "accuracy": 0.7,
-      "avgGenMs": 2659.986269999982,
-      "totalGenMs": 26599.862699999823
-    },
-    {
-      "model": "gemma3",
-      "benchmark": "math",
-      "arm": "hybrid",
-      "n": 10,
-      "correct": 7,
-      "accuracy": 0.7,
-      "avgGenMs": 2657.3270699999994,
-      "totalGenMs": 26573.270699999994
-    },
-    {
-      "model": "gemma3",
-      "benchmark": "math",
-      "arm": "mem0",
-      "n": 10,
-      "correct": 7,
-      "accuracy": 0.7,
-      "avgGenMs": 3098.053249999997,
-      "totalGenMs": 30980.532499999972
-    },
-    {
-      "model": "qwen2.5:7b",
-      "benchmark": "gpqa",
-      "arm": "bare",
-      "n": 10,
-      "correct": 7,
-      "accuracy": 0.7,
-      "avgGenMs": 4940.9663000000055,
-      "totalGenMs": 49409.66300000006
-    },
-    {
-      "model": "qwen2.5:7b",
-      "benchmark": "gpqa",
-      "arm": "rag",
-      "n": 10,
-      "correct": 7,
-      "accuracy": 0.7,
-      "avgGenMs": 4684.918210000009,
-      "totalGenMs": 46849.18210000009
-    },
-    {
-      "model": "qwen2.5:7b",
-      "benchmark": "gpqa",
-      "arm": "substrate",
-      "n": 10,
-      "correct": 5,
-      "accuracy": 0.5,
-      "avgGenMs": 4541.830569999979,
-      "totalGenMs": 45418.30569999979
+      "avgGenMs": 4280.299293333339,
+      "totalGenMs": 64204.48940000008
     },
     {
       "model": "qwen2.5:7b",
       "benchmark": "gpqa",
       "arm": "hybrid",
-      "n": 10,
-      "correct": 5,
-      "accuracy": 0.5,
-      "avgGenMs": 4532.635719999974,
-      "totalGenMs": 45326.35719999974
-    },
-    {
-      "model": "qwen2.5:7b",
-      "benchmark": "gpqa",
-      "arm": "mem0",
-      "n": 10,
-      "correct": 3,
-      "accuracy": 0.3,
-      "avgGenMs": 4255.680569999968,
-      "totalGenMs": 42556.80569999968
-    },
-    {
-      "model": "llama3.1:8b",
-      "benchmark": "gpqa",
-      "arm": "bare",
-      "n": 10,
-      "correct": 1,
-      "accuracy": 0.1,
-      "avgGenMs": 35781.15446000001,
-      "totalGenMs": 357811.54460000014
-    },
-    {
-      "model": "llama3.1:8b",
-      "benchmark": "gpqa",
-      "arm": "rag",
-      "n": 10,
-      "correct": 2,
-      "accuracy": 0.2,
-      "avgGenMs": 38189.97083000003,
-      "totalGenMs": 381899.7083000003
-    },
-    {
-      "model": "llama3.1:8b",
-      "benchmark": "gpqa",
-      "arm": "substrate",
-      "n": 10,
-      "correct": 3,
-      "accuracy": 0.3,
-      "avgGenMs": 39621.00924000002,
-      "totalGenMs": 396210.0924000002
-    },
-    {
-      "model": "llama3.1:8b",
-      "benchmark": "gpqa",
-      "arm": "hybrid",
-      "n": 10,
-      "correct": 3,
-      "accuracy": 0.3,
-      "avgGenMs": 39377.820530000005,
-      "totalGenMs": 393778.20530000003
-    },
-    {
-      "model": "llama3.1:8b",
-      "benchmark": "gpqa",
-      "arm": "mem0",
-      "n": 10,
-      "correct": 1,
-      "accuracy": 0.1,
-      "avgGenMs": 40472.66633999986,
-      "totalGenMs": 404726.66339999856
-    },
-    {
-      "model": "gemma3",
-      "benchmark": "gpqa",
-      "arm": "bare",
-      "n": 10,
-      "correct": 2,
-      "accuracy": 0.2,
-      "avgGenMs": 6602.931149999937,
-      "totalGenMs": 66029.31149999937
-    },
-    {
-      "model": "gemma3",
-      "benchmark": "gpqa",
-      "arm": "rag",
-      "n": 10,
-      "correct": 3,
-      "accuracy": 0.3,
-      "avgGenMs": 5791.578309999965,
-      "totalGenMs": 57915.78309999965
-    },
-    {
-      "model": "gemma3",
-      "benchmark": "gpqa",
-      "arm": "substrate",
-      "n": 10,
-      "correct": 3,
-      "accuracy": 0.3,
-      "avgGenMs": 5664.963889999921,
-      "totalGenMs": 56649.638899999205
-    },
-    {
-      "model": "gemma3",
-      "benchmark": "gpqa",
-      "arm": "hybrid",
-      "n": 10,
-      "correct": 3,
-      "accuracy": 0.3,
-      "avgGenMs": 5663.681090000039,
-      "totalGenMs": 56636.81090000039
-    },
-    {
-      "model": "gemma3",
-      "benchmark": "gpqa",
-      "arm": "mem0",
-      "n": 10,
-      "correct": 3,
-      "accuracy": 0.3,
-      "avgGenMs": 5794.175969999982,
-      "totalGenMs": 57941.75969999982
+      "n": 15,
+      "correct": 6,
+      "accuracy": 0.4,
+      "avgGenMs": 4269.186606666659,
+      "totalGenMs": 64037.79909999989
     },
     {
       "model": "qwen2.5:7b",
       "benchmark": "coding",
       "arm": "bare",
-      "n": 10,
-      "correct": 7,
-      "accuracy": 0.7,
-      "avgGenMs": 1659.3733099999838,
-      "totalGenMs": 16593.733099999838
+      "n": 15,
+      "correct": 11,
+      "accuracy": 0.7333333333333333,
+      "avgGenMs": 1280.2536733333293,
+      "totalGenMs": 19203.80509999994
     },
     {
       "model": "qwen2.5:7b",
       "benchmark": "coding",
       "arm": "rag",
-      "n": 10,
-      "correct": 7,
-      "accuracy": 0.7,
-      "avgGenMs": 1576.271880000038,
-      "totalGenMs": 15762.71880000038
-    },
-    {
-      "model": "qwen2.5:7b",
-      "benchmark": "coding",
-      "arm": "substrate",
-      "n": 10,
-      "correct": 8,
+      "n": 15,
+      "correct": 12,
       "accuracy": 0.8,
-      "avgGenMs": 1427.9544300000184,
-      "totalGenMs": 14279.544300000183
+      "avgGenMs": 1660.5628600000093,
+      "totalGenMs": 24908.44290000014
+    },
+    {
+      "model": "qwen2.5:7b",
+      "benchmark": "coding",
+      "arm": "substrate",
+      "n": 15,
+      "correct": 12,
+      "accuracy": 0.8,
+      "avgGenMs": 1568.5860866666617,
+      "totalGenMs": 23528.791299999924
     },
     {
       "model": "qwen2.5:7b",
       "benchmark": "coding",
       "arm": "hybrid",
-      "n": 10,
-      "correct": 8,
+      "n": 15,
+      "correct": 12,
       "accuracy": 0.8,
-      "avgGenMs": 1420.0596799998543,
-      "totalGenMs": 14200.596799998544
-    },
-    {
-      "model": "qwen2.5:7b",
-      "benchmark": "coding",
-      "arm": "mem0",
-      "n": 10,
-      "correct": 8,
-      "accuracy": 0.8,
-      "avgGenMs": 1594.9827999999748,
-      "totalGenMs": 15949.827999999747
-    },
-    {
-      "model": "llama3.1:8b",
-      "benchmark": "coding",
-      "arm": "bare",
-      "n": 10,
-      "correct": 6,
-      "accuracy": 0.6,
-      "avgGenMs": 5918.511869999906,
-      "totalGenMs": 59185.11869999906
-    },
-    {
-      "model": "llama3.1:8b",
-      "benchmark": "coding",
-      "arm": "rag",
-      "n": 10,
-      "correct": 5,
-      "accuracy": 0.5,
-      "avgGenMs": 9077.376829999917,
-      "totalGenMs": 90773.76829999918
-    },
-    {
-      "model": "llama3.1:8b",
-      "benchmark": "coding",
-      "arm": "substrate",
-      "n": 10,
-      "correct": 6,
-      "accuracy": 0.6,
-      "avgGenMs": 8849.47259999998,
-      "totalGenMs": 88494.72599999979
-    },
-    {
-      "model": "llama3.1:8b",
-      "benchmark": "coding",
-      "arm": "hybrid",
-      "n": 10,
-      "correct": 6,
-      "accuracy": 0.6,
-      "avgGenMs": 8838.424509999948,
-      "totalGenMs": 88384.24509999948
-    },
-    {
-      "model": "llama3.1:8b",
-      "benchmark": "coding",
-      "arm": "mem0",
-      "n": 10,
-      "correct": 6,
-      "accuracy": 0.6,
-      "avgGenMs": 9033.883449999988,
-      "totalGenMs": 90338.83449999988
-    },
-    {
-      "model": "gemma3",
-      "benchmark": "coding",
-      "arm": "bare",
-      "n": 10,
-      "correct": 5,
-      "accuracy": 0.5,
-      "avgGenMs": 1950.7584300000221,
-      "totalGenMs": 19507.58430000022
-    },
-    {
-      "model": "gemma3",
-      "benchmark": "coding",
-      "arm": "rag",
-      "n": 10,
-      "correct": 5,
-      "accuracy": 0.5,
-      "avgGenMs": 1690.3806199999526,
-      "totalGenMs": 16903.806199999526
-    },
-    {
-      "model": "gemma3",
-      "benchmark": "coding",
-      "arm": "substrate",
-      "n": 10,
-      "correct": 6,
-      "accuracy": 0.6,
-      "avgGenMs": 1685.7610400000588,
-      "totalGenMs": 16857.610400000587
-    },
-    {
-      "model": "gemma3",
-      "benchmark": "coding",
-      "arm": "hybrid",
-      "n": 10,
-      "correct": 6,
-      "accuracy": 0.6,
-      "avgGenMs": 1687.6257100000512,
-      "totalGenMs": 16876.257100000512
-    },
-    {
-      "model": "gemma3",
-      "benchmark": "coding",
-      "arm": "mem0",
-      "n": 10,
-      "correct": 5,
-      "accuracy": 0.5,
-      "avgGenMs": 1634.5280600000638,
-      "totalGenMs": 16345.280600000639
+      "avgGenMs": 1567.4059466666774,
+      "totalGenMs": 23511.089200000162
     }
   ],
   "poison": {
     "math": {
-      "studyN": 490,
+      "studyN": 485,
       "poisonN": 0,
       "recall": {}
     },
     "gpqa": {
-      "studyN": 188,
+      "studyN": 183,
       "poisonN": 0,
       "recall": {}
     },
     "coding": {
-      "studyN": 154,
+      "studyN": 149,
       "poisonN": 0,
       "recall": {}
     }

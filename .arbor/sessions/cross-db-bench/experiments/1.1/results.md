@@ -6,15 +6,15 @@ Workload: N=5000 facts written, 250 recalls (median latency), 24 attack trials (
 
 | Engine | write_hz | recall_ms (median) | poison_correct_rate | bytes_per_fact_disk (FAIR) | bytes_per_fact_heap | footprint source |
 |---|---:|---:|---:|---:|---:|:--|
-| node:sqlite (builtin) | 1,006,522 | 0.006 | 0 (0/24) | 69.2 | 333.6 | on-disk file |
-| better-sqlite3 | 832,515 | 0.005 | 0 (0/24) | 69.2 | 345.3 | on-disk file |
-| lmdb | 8,091 | 0.005 | 0 (0/24) | 52.4 | 1,665.4 | on-disk file |
-| duckdb (@duckdb/node-api) | 88,264 | 0.907 | 0 (0/24) | 107.3 | 773.2 | on-disk file |
-| vector-bruteforce (in-proc) | 6,777,823 | 0.449 | 0 (0/24) | n/a | 354 | in-memory estimate |
-| IntelligentDB (engine) | 98,911 | 0.003 | 1 (24/24) | 2,267.6 | 0 | on-disk file |
-| Qdrant (docker) | 12,216 | 48.052 | 0 (0/24) | 124,205.1 | 1,545.8 | db-reported size |
-| Postgres+pgvector (docker) | 75,430 | 0.616 | 0 (0/24) | 1,965.9 | 727.2 | db-reported size |
-| Redis-Stack (docker) | 137,032 | 0.65 | 0 (0/24) | 1,630.6 | 2,277.4 | db-reported size |
+| node:sqlite (builtin) | 966,445 | 0.006 | 0 (0/24) | 69.2 | 333.7 | on-disk file |
+| better-sqlite3 | 876,516 | 0.005 | 0 (0/24) | 69.2 | 345.3 | on-disk file |
+| lmdb | 9,084 | 0.004 | 0 (0/24) | 52.4 | 0 | on-disk file |
+| duckdb (@duckdb/node-api) | 91,785 | 0.862 | 0 (0/24) | 107.3 | 775.1 | on-disk file |
+| vector-bruteforce (in-proc) | 7,702,973 | 0.46 | 0 (0/24) | n/a | 351.7 | in-memory estimate |
+| IntelligentDB (engine) | 89,258 | 0.004 | 1 (24/24) | 2,266 | 2,336.8 | on-disk file |
+| Qdrant (docker) | 11,447 | 48.162 | 0 (0/24) | 124,205.1 | 1,673.4 | db-reported size |
+| Postgres+pgvector (docker) | 74,091 | 0.673 | 0 (0/24) | 1,965.9 | 0 | db-reported size |
+| Redis-Stack (docker) | 123,633 | 0.657 | 0 (0/24) | 1,630.5 | 2,289.4 | db-reported size |
 
 `bytes_per_fact_disk` is the FAIR, apples-to-apples column: on-disk file size (sqlite/lmdb/duckdb/IntelligentDB) or the DB's own reported size (Qdrant/Postgres/Redis), divided by N. `n/a` = the engine is purely in-memory (vector-bruteforce) so no on-disk figure exists. `bytes_per_fact_heap` is the cycle-1 heap-delta proxy, kept for continuity but NOT comparable across engines (it only reflects what stayed on the JS heap).
 
