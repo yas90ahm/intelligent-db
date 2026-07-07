@@ -13,7 +13,7 @@
  *     `nomic-embed-text`, 768-d). Uses the global `fetch` (Node 18+ built-in —
  *     still zero runtime deps) against Ollama's batch `/api/embed` endpoint. A
  *     network/model failure THROWS; the caller (`api.ts`'s
- *     `writeFactWithEmbedding`) catches it and writes the fact WITHOUT a vector
+ *     `writeFactWithEmbeddingAsync`) catches it and writes the fact WITHOUT a vector
  *     — embeddings are an accelerator, never a gate (spec §2).
  *
  *   - {@link createHashingEmbedder} — the deterministic hashing-trick embedder

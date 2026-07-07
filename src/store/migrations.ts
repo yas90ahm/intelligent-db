@@ -116,7 +116,7 @@ function migrateToV1(db: DatabaseSyncType): void {
  * never silently compared against another. Pure storage, no belief: this table
  * is read ONLY by the seed-selection seam (`recall/cueResolver.ts`'s
  * `createEmbeddingCueResolver`) and written by `api.ts`'s
- * `writeFactWithEmbedding` accelerator — see `core/types.ts`'s `EmbedderPort`
+ * `writeFactWithEmbeddingAsync` accelerator — see `core/types.ts`'s `EmbedderPort`
  * doc for the non-negotiable "seeding only, never belief" constraint.
  * `CREATE TABLE IF NOT EXISTS` per this module's own "APPENDING v2" guidance,
  * so a handle where `store/vectorSidecar.ts` already created the table ad hoc

@@ -12,7 +12,7 @@
  * brute-force cosine scan. It has no opinion about belief, trust, or fact_state —
  * it is consumed EXCLUSIVELY by the seed-selection seam
  * (`recall/cueResolver.ts`'s `createEmbeddingCueResolver`) and the write-path
- * accelerator (`api.ts`'s `writeFactWithEmbedding`).
+ * accelerator (`api.ts`'s `writeFactWithEmbeddingAsync`).
  *
  * Two backends, mirroring `store/memoryStore.ts` / `store/sqliteStore.ts`:
  *  - {@link createMemoryVectorSidecar} — an in-memory `Map`, for the in-memory

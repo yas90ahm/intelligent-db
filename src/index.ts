@@ -436,11 +436,15 @@ export {
   createIntelligentDb,
   DEFAULT_QUARANTINE_THRESHOLD,
   InvalidQuarantineThresholdError,
+  RatificationNotWiredError,
+  ReputationNotWiredError,
+  UnknownStrandError,
 } from "./api.js";
 
 export type {
   IntelligentDb,
   ConsolidationPort,
+  CreateIntelligentDbOptions,
   RatificationDeps,
   RetrievalDeps,
   AdjudicateOptions,

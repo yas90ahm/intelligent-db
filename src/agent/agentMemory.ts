@@ -384,8 +384,24 @@ export interface AgentMemory {
    */
   beliefTimeline(entity: string, attribute: string): BeliefTimeline;
 
-  /** Register an additional source (multi-source case) and return its stamp.
-   * Prefer the {@link trust} registry's claim producers for the standard kinds. */
+  /**
+   * Register an additional source (multi-source case) and return its resulting
+   * {@link IdentityStamp}. A thin pass-through to the identity layer's own
+   * {@link SourceIdentityLayer.register} — same contract, same failure modes:
+   * idempotent per `source.sourceId` (re-registering the same id is a no-op on
+   * sameness; a re-supplied anchor set is ADDITIVE, never a replace or a
+   * duplicate/throw). It does NOT validate, price, or otherwise gate the
+   * supplied `anchors` beyond what the underlying `AnchorRegistryPort.bind`
+   * itself enforces (today: none) — this is a MANUAL/low-level entry point, so
+   * whatever anchor binding a caller asserts here is trusted at face value,
+   * unlike `writeFact`, which re-derives a filer's stamp from the engine's OWN
+   * registry rather than trusting a caller-supplied one (OD-8). Prefer the
+   * {@link trust} registry's claim producers (`registerOwner` /
+   * `registerSsoMember` / `registerPublisher` / `registerSystemOfRecord`) for
+   * the standard kinds — they price anchors from deployment CONFIGURATION, not
+   * an arbitrary caller claim; reach for this generic form only for manual or
+   * legacy wiring that does not fit one of those shapes.
+   */
   registerSource(source: SourceRef, anchors?: readonly AnchorBinding[]): IdentityStamp;
 
   /**

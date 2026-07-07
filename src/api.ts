@@ -617,10 +617,10 @@ export interface IntelligentDb {
    * transaction `writeFact` already uses (no `await` ever runs inside an open
    * txn). Embedding is an ACCELERATOR, NEVER A GATE: a failed/throwing embed
    * call (network error, unreachable model, …) is caught and the fact is
-   * written WITHOUT a vector — `writeFactWithEmbedding` never rejects because
-   * an embedder failed. An existing vector for the SAME `content_hash` under
-   * the SAME `embedder.modelId` is reused (no redundant embed call — echoes
-   * share one vector).
+   * written WITHOUT a vector — `writeFactWithEmbeddingAsync` never rejects
+   * because an embedder failed. An existing vector for the SAME `content_hash`
+   * under the SAME `embedder.modelId` is reused (no redundant embed call —
+   * echoes share one vector).
    *
    * When NO {@link RetrievalDeps} is wired (the default), this is IDENTICAL to
    * calling {@link writeFact} (wrapped in a resolved `Promise`) — the embedder
@@ -632,9 +632,18 @@ export interface IntelligentDb {
    * counting, reputation, or eviction — this method mints EXACTLY the same
    * strand `writeFact` would, plus one extra sidecar row.
    *
+   * NAMED `...Async` (Wave-3 `writeFactWithEmbedding-sole-async-verb`,
+   * 2026-07-07 rename): this was the ONLY `Promise`-returning method on
+   * {@link IntelligentDb} — every sibling verb (`writeFact`, `recall`, `ratify`,
+   * `adjudicate`, `approve`, `disown`, `runForgetting`, `explain`) is
+   * synchronous, so a caller skimming the interface could easily miss the one
+   * method that needs an `await` (or a `.then`) and silently get back an
+   * unresolved `Promise` instead of a `StrandId`. The `Async` suffix makes that
+   * unmissable at the call site.
+   *
    * @returns the id of the newly created strand (same semantics as {@link writeFact}).
    */
-  writeFactWithEmbedding(input: WriteFactInput): Promise<StrandId>;
+  writeFactWithEmbeddingAsync(input: WriteFactInput): Promise<StrandId>;
 
   /**
    * Run a traversal. Builds a {@link HaltingController} and a share-normalized
@@ -873,6 +882,70 @@ function assertValidQuarantineThreshold(threshold: number): void {
 }
 
 // ---------------------------------------------------------------------------
+// Engine precondition/wiring errors (Wave-3 `untyped-engine-error-taxonomy`)
+//
+// FINDING: the most-called engine verbs (`ratify`, `adjudicate`, `approve`,
+// `disown`) used to throw a plain `Error` for their precondition/wiring
+// failures, while peripheral subsystems already export named subclasses for
+// the identical KIND of failure — `SharedHandleNotWalError`
+// (store/sqliteStore.ts), `UnverifiedLedgerRestoreError` (store/backup.ts),
+// `OffLedgerReputationError` (ratification/reconcile.ts),
+// `UnknownFutureSchemaError` (store/migrations.ts), `InvalidQuarantineThresholdError`
+// (above). A caller could not `catch`/`instanceof` these four engine failures
+// without matching on message text. Fixed by adding named, exported classes
+// here matching that existing pattern, and throwing them from the same
+// call sites with the EXACT SAME message text (a stable contract for any
+// existing caller matching on `.message`) — only the runtime `constructor`/
+// `name`/`instanceof` identity changes.
+// ---------------------------------------------------------------------------
+
+/**
+ * Thrown when an engine verb needs a {@link RatificationDeps} ratification
+ * ledger to be wired at {@link createIntelligentDb} construction time but none
+ * was supplied: `adjudicate`'s DEFERRED path (nowhere to journal an
+ * INDEPENDENT_DISPUTE for the human horn — a deferral must never be silently
+ * dropped) and `approve` (nowhere to record/resolve one). See the section doc
+ * above for why this replaces a plain `Error` with an identical message.
+ */
+export class RatificationNotWiredError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "RatificationNotWiredError";
+  }
+}
+
+/**
+ * Thrown by {@link IntelligentDb.disown} when no {@link ReputationLedger} was
+ * wired at {@link createIntelligentDb} construction time — there is nothing to
+ * claw back. See the section doc above for why this replaces a plain `Error`
+ * with an identical message.
+ */
+export class ReputationNotWiredError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "ReputationNotWiredError";
+  }
+}
+
+/**
+ * Thrown by {@link IntelligentDb.ratify} when `input.strandId` does not resolve
+ * in the store — the ONLY promotion verb cannot ratify a strand that does not
+ * exist. `verb`/`strandId` are carried as fields (not just interpolated into the
+ * message) so a catcher can inspect which id was unknown without re-parsing the
+ * message string. See the section doc above for why this replaces a plain
+ * `Error` with an identical message.
+ */
+export class UnknownStrandError extends Error {
+  constructor(
+    public readonly verb: string,
+    public readonly strandId: StrandId,
+  ) {
+    super(`${verb}: unknown strand ${String(strandId)}`);
+    this.name = "UnknownStrandError";
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Factory
 // ---------------------------------------------------------------------------
 
@@ -902,20 +975,70 @@ function assertValidQuarantineThreshold(threshold: number): void {
  * The {@link RetrievalDeps} `retrieval` param (Phase-1 retrieval spec §1) is the
  * OPTIONAL embedder + vector-sidecar wiring. OMITTED (or null, the default)
  * means behavior is BIT-FOR-BIT today's: the core ships no embedder and never
- * calls one. When supplied, ONLY {@link IntelligentDb.writeFactWithEmbedding}
+ * calls one. When supplied, ONLY {@link IntelligentDb.writeFactWithEmbeddingAsync}
  * consults it (`writeFact` itself is UNCHANGED) — see that method's doc and
  * `core/types.ts`'s `EmbedderPort` doc for the non-negotiable "seeding only,
  * never belief" constraint.
+ *
+ * TWO CALL FORMS (Wave-3 `createIntelligentDb-positional-nullable-params`,
+ * 2026-07-07): the classic 7-parameter POSITIONAL form above (five of them
+ * nullable) is error-prone at a call site with several deps — `createIntelligentDb(
+ * store, identity, null, null, ratification)` reads fine once you have counted
+ * the `null`s, and reads WRONG the moment a caller miscounts them. An
+ * OPTIONS-OBJECT overload, {@link CreateIntelligentDbOptions}, lets the caller
+ * name each dependency instead: `createIntelligentDb(store, identity, {
+ * ratification })`. Both forms construct the IDENTICAL engine — the options
+ * bag is a pure ergonomic wrapper around the SAME five optional slots — and the
+ * positional form is UNCHANGED / still fully supported (every existing call
+ * site keeps working byte-for-byte; this is additive, not a replacement).
+ * Discriminated at runtime by shape: the third positional argument is treated
+ * as the options bag UNLESS it looks like a real {@link ConsolidationPort} (has
+ * a callable `onExternalRatification` — the one method that interface defines,
+ * which the options bag never carries).
  */
 export function createIntelligentDb(
   store: StrandStore,
   identity: SourceIdentityLayer,
-  consolidation: ConsolidationPort | null = null,
-  reputation: ReputationLedger | null = null,
-  ratification: RatificationDeps | null = null,
-  ingest: IngestPolicy | null = null,
-  retrieval: RetrievalDeps | null = null,
+  options?: CreateIntelligentDbOptions,
+): IntelligentDb;
+export function createIntelligentDb(
+  store: StrandStore,
+  identity: SourceIdentityLayer,
+  consolidation?: ConsolidationPort | null,
+  reputation?: ReputationLedger | null,
+  ratification?: RatificationDeps | null,
+  ingest?: IngestPolicy | null,
+  retrieval?: RetrievalDeps | null,
+): IntelligentDb;
+export function createIntelligentDb(
+  store: StrandStore,
+  identity: SourceIdentityLayer,
+  arg3?: ConsolidationPort | CreateIntelligentDbOptions | null,
+  reputationArg: ReputationLedger | null = null,
+  ratificationArg: RatificationDeps | null = null,
+  ingestArg: IngestPolicy | null = null,
+  retrievalArg: RetrievalDeps | null = null,
 ): IntelligentDb {
+  let consolidation: ConsolidationPort | null;
+  let reputation: ReputationLedger | null;
+  let ratification: RatificationDeps | null;
+  let ingest: IngestPolicy | null;
+  let retrieval: RetrievalDeps | null;
+
+  if (isCreateIntelligentDbOptions(arg3)) {
+    consolidation = arg3.consolidation ?? null;
+    reputation = arg3.reputation ?? null;
+    ratification = arg3.ratification ?? null;
+    ingest = arg3.ingest ?? null;
+    retrieval = arg3.retrieval ?? null;
+  } else {
+    consolidation = arg3 ?? null;
+    reputation = reputationArg;
+    ratification = ratificationArg;
+    ingest = ingestArg;
+    retrieval = retrievalArg;
+  }
+
   return new IntelligentDbImpl(
     store,
     identity,
@@ -928,6 +1051,35 @@ export function createIntelligentDb(
 }
 
 /**
+ * The named-dependency-bag form of {@link createIntelligentDb}'s five OPTIONAL
+ * trailing parameters (`consolidation`/`reputation`/`ratification`/`ingest`/
+ * `retrieval`) — every field mirrors that positional parameter's own doc
+ * exactly (see the factory's doc above), just addressable by name instead of
+ * position. Omitting a field is IDENTICAL to passing `null` for it positionally.
+ */
+export interface CreateIntelligentDbOptions {
+  readonly consolidation?: ConsolidationPort | null;
+  readonly reputation?: ReputationLedger | null;
+  readonly ratification?: RatificationDeps | null;
+  readonly ingest?: IngestPolicy | null;
+  readonly retrieval?: RetrievalDeps | null;
+}
+
+/**
+ * Runtime discriminant between {@link createIntelligentDb}'s two call forms'
+ * shared third argument: a real {@link ConsolidationPort} (positional form) has
+ * exactly one callable method, `onExternalRatification`; the options bag never
+ * defines a property by that name, so its absence (or non-function-ness) is
+ * what marks the argument as the options bag instead.
+ */
+function isCreateIntelligentDbOptions(
+  arg: ConsolidationPort | CreateIntelligentDbOptions | null | undefined,
+): arg is CreateIntelligentDbOptions {
+  if (arg === null || arg === undefined) return false;
+  return typeof (arg as Partial<ConsolidationPort>).onExternalRatification !== "function";
+}
+
+/**
  * OPTIONAL retrieval wiring (Phase-1 retrieval spec §1-2): the injected
  * {@link EmbedderPort} plus the {@link VectorSidecar} it writes into. Passed as
  * ONE bag (rather than two separate params) because they are always used
@@ -935,9 +1087,9 @@ export function createIntelligentDb(
  * with no embedder to populate it, is not a coherent wiring.
  */
 export interface RetrievalDeps {
-  /** The injected embedder. Never called by anything except {@link IntelligentDb.writeFactWithEmbedding}. */
+  /** The injected embedder. Never called by anything except {@link IntelligentDb.writeFactWithEmbeddingAsync}. */
   readonly embedder: EmbedderPort;
-  /** The vector sidecar {@link IntelligentDb.writeFactWithEmbedding} populates. */
+  /** The vector sidecar {@link IntelligentDb.writeFactWithEmbeddingAsync} populates. */
   readonly vectors: VectorSidecar;
 }
 
@@ -1588,8 +1740,8 @@ class IntelligentDbImpl implements IntelligentDb {
   /**
    * OPTIONAL retrieval wiring (Phase-1 retrieval spec §1-2): the embedder + the
    * vector sidecar it writes into. `null` (the default) means
-   * {@link writeFactWithEmbedding} degrades to a plain {@link writeFact} call —
-   * the embedder is never invoked and no vector is ever written.
+   * {@link writeFactWithEmbeddingAsync} degrades to a plain {@link writeFact}
+   * call — the embedder is never invoked and no vector is ever written.
    */
   readonly #retrieval: RetrievalDeps | null;
 
@@ -1897,10 +2049,13 @@ class IntelligentDbImpl implements IntelligentDb {
   }
 
   // -------------------------------------------------------------------------
-  // writeFactWithEmbedding — writeFact + the optional vector-sidecar accelerator
+  // writeFactWithEmbeddingAsync — writeFact + the optional vector-sidecar
+  // accelerator (renamed 2026-07-07, Wave-3 `writeFactWithEmbedding-sole-async-verb`
+  // — the `Async` suffix makes the ONE Promise-returning verb on this interface
+  // unmissable at the call site; see the interface doc above)
   // -------------------------------------------------------------------------
 
-  async writeFactWithEmbedding(input: WriteFactInput): Promise<StrandId> {
+  async writeFactWithEmbeddingAsync(input: WriteFactInput): Promise<StrandId> {
     if (this.#retrieval === null) {
       // No retrieval wiring: BIT-FOR-BIT writeFact (the embedder is never
       // referenced, matching "absent => today's behavior").
@@ -2065,7 +2220,7 @@ class IntelligentDbImpl implements IntelligentDb {
 
     const strand: Strand | null = this.#store.getStrand(input.strandId);
     if (strand === null) {
-      throw new Error(`ratify: unknown strand ${String(input.strandId)}`);
+      throw new UnknownStrandError("ratify", input.strandId);
     }
 
     const at = now();
@@ -2397,7 +2552,7 @@ class IntelligentDbImpl implements IntelligentDb {
         // immortal checksum-chained ledger for the second-admin horn. Refuse to
         // silently drop a deferral when no ledger is wired.
         if (this.#ratification === null) {
-          throw new Error(
+          throw new RatificationNotWiredError(
             "adjudicate: an INDEPENDENT_DISPUTE was DEFERRED but no ratification ledger is wired; " +
               "pass a RatificationDeps to createIntelligentDb so the dispute is recorded for a human.",
           );
@@ -2547,7 +2702,7 @@ class IntelligentDbImpl implements IntelligentDb {
     opts?: ApproveOptions,
   ): ResolvedDispute {
     if (this.#ratification === null) {
-      throw new Error("approve: no ratification ledger is wired.");
+      throw new RatificationNotWiredError("approve: no ratification ledger is wired.");
     }
     const when = at ?? now();
 
@@ -2767,7 +2922,7 @@ class IntelligentDbImpl implements IntelligentDb {
 
   disown(sourceId: SourceId, opts?: DisownOptions): DownstreamDisownResult {
     if (this.#reputation === null) {
-      throw new Error(
+      throw new ReputationNotWiredError(
         "disown: no reputation ledger is wired; there is nothing to claw back. " +
           "Pass a ReputationLedger to createIntelligentDb.",
       );

@@ -298,7 +298,7 @@ export interface IdentityStamp {
  * independence counting, reputation, eviction, or what the walk does after
  * seeding. An `EmbedderPort` is consumed EXCLUSIVELY by the seed-selection step
  * (`recall/cueResolver.ts`'s `createEmbeddingCueResolver`) and the vector sidecar
- * writer (`api.ts`'s `writeFactWithEmbedding`) — nowhere else.
+ * writer (`api.ts`'s `writeFactWithEmbeddingAsync`) — nowhere else.
  *
  * `createIntelligentDb(..., retrieval?: { embedder, vectors })` — absent (the
  * default) means behavior is bit-for-bit today's; the engine never calls this
