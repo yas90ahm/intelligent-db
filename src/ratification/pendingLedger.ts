@@ -875,12 +875,17 @@ class InMemoryPendingLedger implements PendingLedger {
   // with total ledger history. These three structures are updated INCREMENTALLY,
   // exclusively inside `append()` (the chain's single mutation point), so a read
   // never re-derives them from the chain:
-  //   - `approvedCsids`  — csids that have EVER had an APPROVAL recorded. Once a
-  //     csid is added it is NEVER removed — mirrors the old full-scan's `approved`
-  //     set, which was built by walking the WHOLE chain (so a csid stays
-  //     permanently "closed" even against a PENDING appended after the approval —
-  //     the exact semantics a re-open, which always mints a FRESH csid via a new
-  //     adjudication, never collides with).
+  //   - `approvedCsids`  — csids whose MOST RECENT record is an APPROVAL (i.e.
+  //     currently resolved, not "ever approved" — RE-AUDIT FIX, 2026-07-07: a csid
+  //     is REMOVED from this set the moment a FRESH PENDING is appended for it, so
+  //     it toggles open/closed with the true "last record wins" semantics a full
+  //     chain scan would compute. This matters because HARDENING-3's disown-driven
+  //     re-open (`disown.ts`) deliberately REUSES the ORIGINAL `contradictionSetId`
+  //     rather than minting a fresh one — a csid can legitimately cycle
+  //     PENDING -> APPROVAL -> PENDING (reopened) -> APPROVAL -> PENDING (reopened
+  //     again) an unbounded number of times, and each reopen must be genuinely
+  //     visible to `listPending()`/`approve()`, not silently swallowed by a
+  //     one-way-forever "already resolved" latch.
   //   - `openPendingList` — every currently-open PENDING LedgerRecord, in append
   //     order, sized to the CURRENT open-dispute count (not total history).
   //   - `latestOpenByCsid` — csid -> its most recent OPEN pending payload, for O(1)
@@ -1133,12 +1138,22 @@ class InMemoryPendingLedger implements PendingLedger {
     // Maintain the incremental open-PENDING index (add on a fresh PENDING, remove
     // on a resolving APPROVAL) — see the field doc comment above for the exact
     // semantics this reproduces from the old O(n) full-chain scan.
+    //
+    // RE-AUDIT FIX (2026-07-07, the double-reopen open-index latch): a fresh PENDING
+    // for a csid that was PREVIOUSLY approved must RE-OPEN it — `approvedCsids` is
+    // "was the MOST RECENT record for this csid an APPROVAL", not "has this csid
+    // EVER been approved". Without clearing it here, HARDENING-3's re-open
+    // (`disown.ts`, which deliberately REUSES the original `contradictionSetId`
+    // rather than minting a fresh one) would durably append a real PENDING record to
+    // the chain that `listPending()`/`approve()` could never see again once that
+    // csid had been approved even once before — permanently capping every dispute
+    // at exactly one lifetime reopen, no matter how many times it was subsequently
+    // re-resolved to an equally-tainted winner.
     if (kind === "PENDING") {
       const csid = String((payload as PendingPayload).contradictionSetId);
-      if (!this.approvedCsids.has(csid)) {
-        this.openPendingList.push(record);
-        this.latestOpenByCsid.set(csid, payload as PendingPayload);
-      }
+      this.approvedCsids.delete(csid);
+      this.openPendingList.push(record);
+      this.latestOpenByCsid.set(csid, payload as PendingPayload);
     } else if (kind === "APPROVAL") {
       const csid = String((payload as ApprovalPayload).contradictionSetId);
       this.approvedCsids.add(csid);
@@ -1441,11 +1456,15 @@ class SqlitePendingLedgerImpl implements SqlitePendingLedger {
     record: LedgerRecord,
   ): void {
     if (kind === "PENDING") {
+      // RE-AUDIT FIX (see the in-memory `append()`'s matching comment): a fresh
+      // PENDING RE-OPENS a previously-approved csid — clear the "currently
+      // resolved" mark rather than skipping the index update, so a disown-driven
+      // reopen that REUSES the original contradictionSetId is genuinely visible to
+      // `listPending()`/`approve()` again, unboundedly many times.
       const csid = String((payload as PendingPayload).contradictionSetId);
-      if (!this.#approvedCsids.has(csid)) {
-        this.#openPendingList.push(record);
-        this.#latestOpenByCsid.set(csid, payload as PendingPayload);
-      }
+      this.#approvedCsids.delete(csid);
+      this.#openPendingList.push(record);
+      this.#latestOpenByCsid.set(csid, payload as PendingPayload);
     } else if (kind === "APPROVAL") {
       const csid = String((payload as ApprovalPayload).contradictionSetId);
       this.#approvedCsids.add(csid);

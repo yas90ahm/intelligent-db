@@ -122,7 +122,10 @@ import {
   mutationReceipt,
 } from "./ratification/mutationReceipt.js";
 import type { CorroborationLedger } from "./ratification/corroboration.js";
-import type { AdjudicationProvenanceLedger } from "./ratification/adjudicationProvenance.js";
+import type {
+  AdjudicationProvenanceInput,
+  AdjudicationProvenanceLedger,
+} from "./ratification/adjudicationProvenance.js";
 import type { WeakInfluenceLedger } from "./ratification/weakInfluence.js";
 import { assertRatifyEmitsEvent } from "./ratification/reconcile.js";
 import {
@@ -2442,6 +2445,11 @@ class IntelligentDbImpl implements IntelligentDb {
           corroboratingStrandIds: [...corroborating],
           beneficiarySourceId: canonicalStamp.source_id,
           reputationDelta: deltaAlpha,
+          // The raw MIS depth (#R) THIS event snapshotted — the depth-floor-reversal
+          // recompute's input (a later disown's `survivingDepth` is the max of this
+          // field over every OTHER, still-unreversed event for the same beneficiary;
+          // see disown.ts's corroboration-reversal step).
+          corroborationDepthAtEvent: depth,
           at,
         });
         recorded = true;
@@ -2693,30 +2701,39 @@ class IntelligentDbImpl implements IntelligentDb {
   }
 
   /**
-   * HARDENING 3 — record the {@link AdjudicationProvenance} of a RESOLVED dispute so a
-   * later disown can RE-OPEN it if a tainted strand merely tipped its margin.
+   * HARDENING 3 — build an {@link AdjudicationProvenance} record (shared by BOTH
+   * producers, see below) so a later disown can RE-OPEN this dispute if a tainted
+   * strand merely tipped its margin.
    *
-   *  - `winner`: the un-demoted member.
+   *  - `winner`: the caller-designated winning member (already resolved to LIVE).
    *  - `margin`: the LCB gap = winner's best-source reputation minus the strongest
    *    NON-winner member's best-source reputation (the gap that cleared the decision;
    *    clamped at 0).
    *  - `contributingStrandIds`: the winner strand PLUS every member that shares a
    *    backing source with the winner (the support that supplied the winner's margin).
    *    These are the strands whose taint would erode the recorded margin.
+   *
+   * RE-AUDIT FIX (2026-07-07, `promote()`d winners never protected by a future
+   * HARDENING-3 reopen): this used to be inlined into `#recordAdjudicationProvenance`,
+   * whose ONLY caller was `adjudicate()`'s auto-resolve branch — so a winner installed
+   * by `approve()` (an ordinary human resolution, OR the `disown-reopen-winner-flip`
+   * `promote()` path) got NO provenance record at all, making it permanently invisible
+   * to a later disown's re-open sweep (`recordsContributedBy` has nothing to find).
+   * Extracted so `approve()` can call it too — see the call site in `approve()` below.
+   *
+   * @returns the record to append, or `null` if `winnerId` is not among `members`
+   *          (defensive; should not happen for a real resolution).
    */
-  #recordAdjudicationProvenance(
+  #buildAdjudicationProvenance(
     contradictionSetId: ContradictionSetId,
     attribute: AttributeKey,
     members: readonly Strand[],
-    outcome: ConsolidationOutcome,
+    winnerId: StrandId,
+    losingMemberIds: readonly StrandId[],
     at: EpochMs,
-  ): void {
-    const ledger = this.#ratification?.adjudicationProvenance;
-    if (ledger === undefined) return;
-    const winnerId = this.#winnerOf(members, outcome);
-    if (winnerId === null) return;
+  ): AdjudicationProvenanceInput | null {
     const winner = members.find((m) => m.id === winnerId);
-    if (winner === undefined) return;
+    if (winner === undefined) return null;
 
     // The winner's backing sources (its margin's owners) and best reputation.
     const repOf = (s: Strand): number => {
@@ -2769,22 +2786,48 @@ class IntelligentDbImpl implements IntelligentDb {
       if (shares) contributingStrandIds.push(m.id);
     }
 
-    // The ORIGINAL losing member ids (this resolution's demotions) — threaded
-    // through so a later disown's RE-OPEN can offer them as members of the
-    // reopened dispute (disown.ts), letting a genuinely surviving claim be picked
-    // instead of structurally reconfirming this exact winner.
-    const losingMemberIds: StrandId[] =
-      outcome.kind === "RESOLVED" ? outcome.demotions.map((d) => d.demoted) : [];
-
-    ledger.record({
+    return {
       contradictionSetId,
       attribute,
       winner: winnerId,
       margin,
       contributingStrandIds,
+      // The ORIGINAL losing member ids (this resolution's demotions) — threaded
+      // through so a later disown's RE-OPEN can offer them as members of the
+      // reopened dispute (disown.ts), letting a genuinely surviving claim be picked
+      // instead of structurally reconfirming this exact winner.
+      losingMemberIds: [...losingMemberIds],
+      at,
+    };
+  }
+
+  /**
+   * HARDENING 3 (adjudicate() producer) — records the {@link AdjudicationProvenance}
+   * of an auto-RESOLVED dispute. See {@link #buildAdjudicationProvenance} for the
+   * shared record-building logic (also called from `approve()`, below).
+   */
+  #recordAdjudicationProvenance(
+    contradictionSetId: ContradictionSetId,
+    attribute: AttributeKey,
+    members: readonly Strand[],
+    outcome: ConsolidationOutcome,
+    at: EpochMs,
+  ): void {
+    const ledger = this.#ratification?.adjudicationProvenance;
+    if (ledger === undefined) return;
+    const winnerId = this.#winnerOf(members, outcome);
+    if (winnerId === null) return;
+    const losingMemberIds: StrandId[] =
+      outcome.kind === "RESOLVED" ? outcome.demotions.map((d) => d.demoted) : [];
+    const rec = this.#buildAdjudicationProvenance(
+      contradictionSetId,
+      attribute,
+      members,
+      winnerId,
       losingMemberIds,
       at,
-    });
+    );
+    if (rec !== null) ledger.record(rec);
   }
 
   // -------------------------------------------------------------------------
@@ -2884,17 +2927,22 @@ class IntelligentDbImpl implements IntelligentDb {
     let resolved: ResolvedDispute;
     try {
       resolved = withTxn(this.#store, () => {
+        // Resolve the dispute's ORIGINAL pending record (members + attribute) BEFORE
+        // the ledger resolves it (`listPending()` no longer shows it afterwards).
+        // Needed for the A1 reputation-effect snapshot below AND for the HARDENING-3
+        // adjudication-provenance record this method now writes (see below).
+        const pendingBefore = this.#ratification!.ledger
+          .listPending()
+          .find((p) => p.contradictionSetId === contradictionSetId);
+        const memberIds: readonly StrandId[] = pendingBefore?.members ?? [];
+
         // A1 — snapshot the dispute authors' reputation BEFORE the ledger drives its moves
         // (winner ratified / losers contradicted happen INSIDE `ledger.approve`), so the
-        // EFFECT receipts can carry an exact before/after. Members come from the open
-        // pending; authors are resolved through the same `ctx` the gate uses.
+        // EFFECT receipts can carry an exact before/after. Authors are resolved through
+        // the same `ctx` the gate uses.
         const repBefore = new Map<SourceId, ReputationState | null>();
         if (this.#reputation !== null) {
-          const members =
-            this.#ratification!.ledger
-              .listPending()
-              .find((p) => p.contradictionSetId === contradictionSetId)?.members ?? [];
-          for (const m of members) {
+          for (const m of memberIds) {
             for (const a of ctx.authorsOf(m)) {
               if (!repBefore.has(a)) repBefore.set(a, this.#reputation.stateOf(a));
             }
@@ -2965,6 +3013,38 @@ class IntelligentDbImpl implements IntelligentDb {
               ),
             );
           }
+        }
+
+        // HARDENING 3 (RE-AUDIT FIX, 2026-07-07 — "winner-flip promotions never
+        // protected by a future HARDENING-3 reopen"): record adjudication provenance
+        // for THIS resolution's winner, mirroring `adjudicate()`'s auto-resolve
+        // producer (`#recordAdjudicationProvenance`). Pre-fix, `approve()` NEVER
+        // wrote this record, so a winner it installed — an ordinary human
+        // resolution, or (since the disown-reopen-winner-flip fix) a `promote()`d
+        // strand that FLIPPED a reopened dispute's winner to a different strand —
+        // was permanently invisible to a LATER disown's own re-open sweep
+        // (`recordsContributedBy` had nothing naming it). Resolve the member
+        // strands through the SAME `ctx.memberStrand` the ledger used (so a
+        // clone-on-read backend sees the post-resolution objects, not stale
+        // re-reads); a dangling member id is skipped fail-closed, matching the
+        // ledger's own missing-strand discipline.
+        const adjProvenanceLedger = this.#ratification!.adjudicationProvenance;
+        if (adjProvenanceLedger !== undefined && pendingBefore !== undefined) {
+          const memberStrands: Strand[] = [];
+          for (const id of memberIds) {
+            const s = ctx.memberStrand(id);
+            if (s !== null) memberStrands.push(s);
+          }
+          const losingMemberIds = plan.demotions.map((d) => d.demoted);
+          const rec = this.#buildAdjudicationProvenance(
+            contradictionSetId,
+            pendingBefore.attribute,
+            memberStrands,
+            winnerStrandId,
+            losingMemberIds,
+            when,
+          );
+          if (rec !== null) adjProvenanceLedger.record(rec);
         }
 
         // A1 — journal the reputation EFFECTS the ledger drove (one receipt per distinct

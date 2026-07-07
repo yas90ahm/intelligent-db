@@ -53,7 +53,22 @@ export type AdjudicationProvenanceInput = AdjudicationProvenance;
  * re-opens each dispute at most once, durable across any number of sweeps.
  */
 export interface AdjudicationProvenanceLedger {
-  /** Record one adjudication-provenance entry. Append-only: never mutated afterwards. */
+  /**
+   * Record one adjudication-provenance entry. Append-only: never mutated afterwards.
+   *
+   * RE-AUDIT FIX (2026-07-07, "winner-flip promotions never protected by a FUTURE
+   * HARDENING-3 reopen"): if `contradictionSetId` was previously marked
+   * {@link markReopened}, that mark is CLEARED by this call. A fresh record for the
+   * SAME contradiction set means the dispute was just RE-RESOLVED (either
+   * `adjudicate()`'s auto-resolve on a brand-new dispute, or `approve()` re-deciding
+   * a `REOPENED_BY_DISOWN` dispute — possibly with a FLIPPED winner via `promote()`).
+   * That new resolution's support is entirely different from whatever was reopened
+   * before, so it deserves its OWN fresh at-most-once reopen eligibility — the OLD
+   * mark must not permanently block a disown of the NEW winner's OWN backing source
+   * from ever reopening this contradiction set again. Without this, a dispute could
+   * be reopened AT MOST ONCE in its entire lifetime no matter how many times it was
+   * subsequently re-resolved to a new, equally-tainted winner.
+   */
   record(record: AdjudicationProvenanceInput): AdjudicationProvenance;
 
   /** Every recorded entry, in append order. Never mutated after append. */
@@ -113,6 +128,10 @@ class InMemoryAdjudicationProvenanceLedger
     };
     this.posOf.set(finalRecord, this.chain.length);
     this.chain.push(finalRecord);
+    // RE-AUDIT FIX (see the interface doc on `record`): a fresh record for this
+    // contradiction set supersedes whatever was reopened before — clear the mark so
+    // the NEW resolution gets its own fresh at-most-once reopen eligibility.
+    this.reopened.delete(finalRecord.contradictionSetId);
     const seen = new Set<StrandId>();
     for (const sid of finalRecord.contributingStrandIds) {
       if (seen.has(sid)) continue;
@@ -226,6 +245,7 @@ class SqliteAdjudicationProvenanceLedgerImpl
   readonly #all;
   readonly #isReopened;
   readonly #markReopened;
+  readonly #clearReopened;
 
   constructor(db: DatabaseSyncType, ownsDb: boolean) {
     this.#db = db;
@@ -278,6 +298,9 @@ class SqliteAdjudicationProvenanceLedgerImpl
     this.#markReopened = this.#db.prepare(
       "INSERT OR IGNORE INTO adjudication_reopened (contradiction_set_id) VALUES (?)",
     );
+    this.#clearReopened = this.#db.prepare(
+      "DELETE FROM adjudication_reopened WHERE contradiction_set_id = ?",
+    );
 
     // BACKFILL for a database written by a pre-index version of this ledger: if the
     // child index table is empty but records already exist, populate it once from
@@ -328,6 +351,10 @@ class SqliteAdjudicationProvenanceLedgerImpl
     };
     const info = this.#insert.run(JSON.stringify(finalRecord));
     const seq = Number(info.lastInsertRowid);
+    // RE-AUDIT FIX (see the interface doc on `record`): a fresh record for this
+    // contradiction set supersedes whatever was reopened before — clear the mark so
+    // the NEW resolution gets its own fresh at-most-once reopen eligibility.
+    this.#clearReopened.run(String(finalRecord.contradictionSetId));
     const seen = new Set<StrandId>();
     for (const sid of finalRecord.contributingStrandIds) {
       if (seen.has(sid)) continue;
