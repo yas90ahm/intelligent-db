@@ -203,6 +203,12 @@ interface Wired {
 
 function wire(path: string, opts?: { withCorroboration?: boolean }): Wired {
   const db: DatabaseSyncType = new DatabaseSync(path);
+  // The OWNER of this shared handle sets WAL before any shared-handle store/ledger
+  // constructor borrows it (see store/sqliteStore.ts's assertSharedHandleWal): those
+  // constructors now VERIFY journal_mode=WAL and throw if it never took. WAL mode is
+  // recorded in the database file header, so every later reopen of this SAME path
+  // (the crash-recovery / corruption-detection tests below) inherits it automatically.
+  db.exec("PRAGMA journal_mode=WAL");
   trackClose(() => db.close());
 
   const sources = makeSourceRegistry();

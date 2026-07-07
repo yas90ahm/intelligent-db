@@ -153,6 +153,10 @@ function openDb(path: string): DatabaseSyncType {
     DatabaseSync: new (p: string) => DatabaseSyncType;
   };
   const db = new DatabaseSync(path);
+  // The OWNER of this shared handle sets WAL before any shared-handle store/ledger
+  // constructor borrows it (see store/sqliteStore.ts's assertSharedHandleWal): those
+  // constructors now VERIFY journal_mode=WAL and throw if it never took.
+  db.exec("PRAGMA journal_mode=WAL");
   closers.push(() => db.close());
   return db;
 }

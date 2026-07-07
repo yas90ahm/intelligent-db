@@ -197,6 +197,10 @@ describe("END-TO-END SYSTEM COHERENCE — the whole pipeline over one shared SQL
 
     const path = freshPath();
     const db: DatabaseSyncType = new DatabaseSync(path);
+    // The OWNER of this shared handle sets WAL before any shared-handle store/ledger
+    // constructor borrows it (see store/sqliteStore.ts's assertSharedHandleWal): those
+    // constructors now VERIFY journal_mode=WAL and throw if it never took.
+    db.exec("PRAGMA journal_mode=WAL");
     cleanups.push(() => {
       try {
         db.close();
