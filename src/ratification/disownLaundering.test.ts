@@ -90,7 +90,6 @@ function makeStrand(opts: {
     contradiction_set: null,
     co_equal_claim_cardinality: 0,
     last_tier_reason: null,
-    register: null,
   };
 }
 

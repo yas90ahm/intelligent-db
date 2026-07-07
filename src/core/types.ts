@@ -392,26 +392,23 @@ export interface Salience {
 }
 
 // ---------------------------------------------------------------------------
-// Per-traversal mutable register
-// ---------------------------------------------------------------------------
-
-/**
- * Per-traversal activation register (CLAUDE.md strand model). Reset / scoped to a
- * single traversal. `refractoryUntil` implements the refractory lock that kills
- * A->B->A echo within one walk.
- */
-export interface ActivationRegister {
-  /** Energy currently held by this strand in the active traversal. */
-  activation: Activation;
-  /** Until this (logical) time the strand will not re-fire — kills echo. */
-  refractoryUntil: EpochMs;
-  /** Count of distinct independent-provenance ancestors — ORDERING ONLY, never a stop gate. */
-  convergence_factor: number;
-}
-
-// ---------------------------------------------------------------------------
 // The Strand (node)
 // ---------------------------------------------------------------------------
+//
+// REMOVED (Wave-2 hardening, `convergence-ordering-dead`): a per-traversal
+// `ActivationRegister` (activation / refractoryUntil / convergence_factor) used
+// to live here as a `Strand.register` field. It was NEVER populated to anything
+// but `null` anywhere in the engine (`api.ts`'s strand constructor, every bench
+// fixture), so `traversal/walk.ts`'s convergence-ordered pop-priority tiebreak
+// always compared `0` to `0` — a shipped, tested-sounding feature that never
+// actually ordered a single pop. Rather than half-wire an unproven feature, the
+// dead tiebreak plumbing (`FrontierCandidate.orderingKey`, `orderingKeyFor`, the
+// unused `makeChildCandidate` helper) and this now-fully-unused field were
+// removed together. Removal is a NO-OP on observable walk behavior: the
+// tiebreak compared two values that were always 0, so a plain energy-only
+// comparator decides pop order identically (`traversal/__tests__`'s
+// `convergenceOrderingDead.test.ts` proves byte-identical walk output). See
+// CLAUDE.md KNOWN LIMITATIONS for the historical record of this finding.
 
 /**
  * A strand: one latent memory node. Carries at least every field the council
@@ -474,9 +471,6 @@ export interface Strand {
 
   /** Reason stamped by the last tier-move affecting this strand, if any. */
   last_tier_reason: ReasonCode | null;
-
-  /** Per-traversal register; null when no traversal currently touches it. */
-  register: ActivationRegister | null;
 }
 
 // ---------------------------------------------------------------------------

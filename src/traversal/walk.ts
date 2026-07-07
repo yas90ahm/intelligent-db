@@ -25,21 +25,25 @@
  *    makes high-degree junk hubs self-starve: each of a hub's N out-edges gets a
  *    `1/N`-style share, so spam fans out to nothing.
  *
- *  - **Refractory lock.** A per-traversal refractory lock
- *    ({@link import('../core/types.js').ActivationRegister.refractoryUntil}) kills
- *    the A→B→A echo: a strand that has fired cannot re-fire within the same walk.
+ *  - **Refractory lock.** A per-traversal `fired` set kills the A→B→A echo: a
+ *    strand that has fired cannot re-fire within the same walk.
  *
  *  - **Monotone non-increasing energy.** Because `γ < 1` and every normalized
  *    share is in `[0,1]`, child energy is strictly ≤ parent energy. Energy is
  *    therefore monotone non-increasing along any path, which makes TERMINATION
  *    PROVABLE (combined with the refractory lock and the hard pop-cap backstop).
  *
- *  - **Ordering is NOT stopping.** `convergence_factor` (count of independent
- *    ancestors) may ORDER which strand to pop next, but it must NEVER gate
- *    stopping — a genuine insight bridge has convergence=1 and would be starved.
- *    ALL stop decisions are delegated to the {@link HaltingController}: this walk
- *    asks the controller after every expansion and never decides to stop on its
- *    own except at the structural backstops the controller itself owns.
+ *  - **Ordering is NOT stopping.** Pop order is decided by energy ALONE (the
+ *    best-first heap). ALL stop decisions are delegated to the
+ *    {@link HaltingController}: this walk asks the controller after every
+ *    expansion and never decides to stop on its own except at the structural
+ *    backstops the controller itself owns. (An earlier revision also broke
+ *    energy ties on a `convergence_factor` ordering key sourced from a
+ *    per-traversal `Strand.register`; that register was never populated to
+ *    anything but `null` anywhere in the engine, so the tiebreak always compared
+ *    `0` to `0` and never actually ordered a single pop. Removed as dead code —
+ *    Wave-2 `convergence-ordering-dead` — rather than half-wired; see CLAUDE.md
+ *    KNOWN LIMITATIONS.)
  *
  * STACK NOTE: ESM + NodeNext means relative imports carry the `.js` extension;
  * `verbatimModuleSyntax` means every type-only import MUST use `import type`.
@@ -50,7 +54,6 @@ import {
   ReasonCode,
   asEpochMs,
   type Activation,
-  type Edge,
   type EdgeId,
   type LitStrand,
   type HaltStamp,
@@ -266,9 +269,15 @@ export interface WalkResult {
  * would receive if expanded now. Carried in the {@link MaxPriorityQueue}.
  *
  * Exported so the crack-A implementor (and tests) can construct/inspect frontier
- * candidates against a stable shape. `orderingKey` lets `convergence_factor`
- * influence POP ORDER without ever touching the stop decision (see
- * {@link frontierComparator}).
+ * candidates against a stable shape.
+ *
+ * REMOVED (Wave-2 `convergence-ordering-dead`): this used to also carry an
+ * `orderingKey` field (a `convergence_factor`-derived secondary sort key meant to
+ * break energy ties toward better-corroborated strands). `convergence_factor` was
+ * never populated to anything but 0 anywhere in the engine, so the tiebreak always
+ * compared `0` to `0` — dead weight, never an actual ordering signal. Dropped
+ * along with `frontierComparator`'s secondary key, `orderingKeyFor`, and the
+ * unused `makeChildCandidate` helper. See CLAUDE.md KNOWN LIMITATIONS.
  */
 export interface FrontierCandidate {
   /** The strand this candidate would expand. */
@@ -279,28 +288,17 @@ export interface FrontierCandidate {
    * relative to the parent (share ∈ [0,1], γ < 1).
    */
   readonly energy: Activation;
-  /**
-   * ORDERING-ONLY secondary key, derived from `convergence_factor` (independent
-   * ancestor count). Breaks energy ties toward better-corroborated strands. MUST
-   * NOT participate in any stop decision — corroboration orders, it never gates.
-   */
-  readonly orderingKey: number;
 }
 
 /**
- * The frontier comparator for the best-first heap. Primary key is `energy`
- * (highest energy pops first — this is what makes the walk "best-first" and what
- * the monotone-non-increasing guarantee is stated against). Ties break on
- * `orderingKey` (the convergence-derived ordering signal).
- *
- * NOTE: convergence appears ONLY here, as a tiebreaker on POP ORDER. It is
- * structurally incapable of affecting STOPPING because stopping is owned entirely
- * by the {@link HaltingController}, which this comparator never consults.
+ * The frontier comparator for the best-first heap: highest energy pops first —
+ * this is what makes the walk "best-first" and what the monotone-non-increasing
+ * guarantee is stated against. Equal-energy candidates are popped in whatever
+ * order {@link MaxPriorityQueue} happens to hold ties in (unspecified, never a
+ * correctness dependency — termination and the monotone-non-increasing proof
+ * don't depend on tie order).
  */
-export const frontierComparator: Comparator<FrontierCandidate> = (a, b) => {
-  if (a.energy !== b.energy) return a.energy - b.energy;
-  return a.orderingKey - b.orderingKey;
-};
+export const frontierComparator: Comparator<FrontierCandidate> = (a, b) => a.energy - b.energy;
 
 // ===========================================================================
 // activationWalk — HARD CORE. Signature + doc complete; body is crack-A.
@@ -340,29 +338,25 @@ const VIRTUAL_SIBLING_FANOUT_CAP = 32;
  *
  * THE LOOP the body must implement (CLAUDE.md "Share-normalized best-first walk"):
  *
- *  1. **Seed.** For each {@link WalkSeed}, fetch the strand from `store`, attach a
- *     fresh per-traversal {@link import('../core/types.js').ActivationRegister}
- *     (activation = seed energy, `refractoryUntil` = walk start, convergence = its
- *     independent-ancestor count), and push a {@link FrontierCandidate} onto a
- *     {@link MaxPriorityQueue} ordered by {@link frontierComparator}.
+ *  1. **Seed.** For each {@link WalkSeed}, fetch the strand from `store` and push
+ *     a {@link FrontierCandidate} (seed energy) onto a {@link MaxPriorityQueue}
+ *     ordered by {@link frontierComparator}.
  *
  *  2. **Expand.** While the frontier is non-empty AND the
  *     {@link HaltingController} has not told us to stop:
  *       a. POP the max-priority unexpanded candidate.
- *       b. Skip it if its strand is under the refractory lock
- *          (`register.refractoryUntil` in the future relative to the walk's
- *          logical clock) — this is the A→B→A echo killer.
- *       c. Mark the strand fired: record its final activation, set
- *          `refractoryUntil` so it cannot re-fire this traversal, and add it to
- *          the lit set.
+ *       b. Skip it if its strand already fired this traversal (the `fired` set
+ *          is the refractory lock) — this is the A→B→A echo killer.
+ *       c. Mark the strand fired: record its final activation, add it to the
+ *          `fired` set so it cannot re-fire this traversal, and add it to the
+ *          lit set.
  *       d. For each out-edge `e` of the strand (read its `Edge` from `store`):
  *          compute the child energy
  *            `childEnergy = parentEnergy * (e.w / e.out_weight_sum) * config.gamma`.
  *          Share-normalization (`e.w / e.out_weight_sum`) is what starves
  *          high-degree hubs. Push a new {@link FrontierCandidate} for `e.to`
  *          (folding energy into any existing un-expanded candidate as the
- *          implementor sees fit), with `orderingKey` derived from the target's
- *          `convergence_factor`.
+ *          implementor sees fit).
  *       e. After the expansion, CALL the {@link HaltingController} with the
  *          observed novelty / corroboration so it can run its two-phase gates
  *          (phase 1 local saturation at `epsilon`; phase 2 the mandatory bridge
@@ -379,9 +373,8 @@ const VIRTUAL_SIBLING_FANOUT_CAP = 32;
  * the absolute pop-cap backstop guarantees termination even on pathological graphs.
  *
  * SEPARATION OF CONCERNS: this function NEVER decides to stop on its own. The
- * frontier (and `convergence_factor`) only ORDER pops. Stopping is delegated
- * entirely to `halting`. The walk must not gate on `convergence_factor` or on the
- * frontier being "good enough".
+ * frontier only ORDERS pops (by energy). Stopping is delegated entirely to
+ * `halting`. The walk must not gate on the frontier being "good enough".
  *
  * @param store   - pluggable strand/edge store (in-memory today; swappable later).
  * @param seeds   - initial energized strands (the cue's entry points).
@@ -395,8 +388,8 @@ export function activationWalk(
   config: WalkConfig,
   halting: HaltingController,
 ): WalkResult {
-  // The frontier is a best-first max-heap of reachable candidates. Energy orders
-  // pops; convergence_factor only breaks ties (frontierComparator) — never stops.
+  // The frontier is a best-first max-heap of reachable candidates, ordered by
+  // energy alone (frontierComparator) — never a stop decision.
   const frontier = new MaxPriorityQueue<FrontierCandidate>(frontierComparator);
 
   // Fired strands = the refractory lock. Best-first guarantees the FIRST candidate
@@ -476,7 +469,6 @@ export function activationWalk(
     frontier.push({
       strandId: seed.strandId,
       energy: seed.energy,
-      orderingKey: orderingKeyFor(s),
     });
   }
 
@@ -586,7 +578,6 @@ export function activationWalk(
       frontier.push({
         strandId: nv.edge.to,
         energy: childEnergy,
-        orderingKey: orderingKeyFor(nv.strand),
       });
     }
 
@@ -628,7 +619,6 @@ export function activationWalk(
           frontier.push({
             strandId: sib.id,
             energy: siblingEnergy,
-            orderingKey: orderingKeyFor(sib),
           });
           pushed += 1;
         }
@@ -698,50 +688,14 @@ export function activationWalk(
   return { lit, halt, unresolvedSeeds, seedsResolved };
 }
 
-/**
- * Build a {@link FrontierCandidate} for a child strand reached across one edge,
- * applying share-normalization and per-hop decay:
- *
- *   `childEnergy = parentEnergy * (edge.w / edge.out_weight_sum) * gamma`
- *
- * Pure and total: this is the single place the child-energy formula lives, so the
- * crack-A body and tests share one definition and the monotone-non-increasing
- * property is auditable in isolation. When `edge.out_weight_sum <= 0` the share is
- * treated as 0 (an isolated / weightless hub contributes nothing).
- *
- * @param parentEnergy - the firing parent's activation.
- * @param edge         - the traversed out-edge (carries `w` and `out_weight_sum`).
- * @param gamma        - per-hop decay γ (~0.6); must be in `[0,1)` for termination.
- * @param convergenceFactor - target strand's independent-ancestor count, used ONLY
- *   to derive the ordering tiebreaker (never the energy, never a stop gate).
- * @returns a frontier candidate targeting `edge.to`.
- */
-export function makeChildCandidate(
-  parentEnergy: Activation,
-  edge: Edge,
-  gamma: number,
-  convergenceFactor: number,
-): FrontierCandidate {
-  const share = edge.out_weight_sum > 0 ? edge.w / edge.out_weight_sum : 0;
-  const childEnergy = parentEnergy * share * gamma;
-  return {
-    strandId: edge.to,
-    energy: childEnergy,
-    orderingKey: convergenceFactor,
-  };
-}
-
-/**
- * Resolve the independent-ancestor ordering signal for a strand's frontier
- * candidate. Reads `register.convergence_factor` when a per-traversal register is
- * attached, else 0. Centralized so it is obvious this value feeds ORDERING ONLY.
- *
- * @param strand - the target strand (may have no register yet).
- * @returns the convergence-derived ordering key (≥ 0).
- */
-export function orderingKeyFor(strand: Strand): number {
-  return strand.register?.convergence_factor ?? 0;
-}
+// REMOVED (Wave-2 `convergence-ordering-dead`): `makeChildCandidate` (a
+// standalone child-energy-formula helper taking a `convergenceFactor` param
+// that only ever fed the now-removed `orderingKey`) and `orderingKeyFor` (which
+// read `strand.register?.convergence_factor ?? 0` — always 0, since
+// `Strand.register` was never populated to anything but `null` anywhere in the
+// engine). Neither was called from `activationWalk` itself (which always
+// inlined the child-energy formula directly) or from any test. See CLAUDE.md
+// KNOWN LIMITATIONS for the historical record of this finding.
 
 // ===========================================================================
 // Internal walk helpers (not exported).

@@ -113,7 +113,6 @@ describe("no provenance → no voice (facade recall never returns ungrounded)", 
         contradiction_set: null,
         co_equal_claim_cardinality: 0,
         last_tier_reason: null,
-        register: null,
       };
       raw
         .prepare("INSERT INTO strands (id, json, entity, attribute) VALUES (?, ?, ?, ?)")

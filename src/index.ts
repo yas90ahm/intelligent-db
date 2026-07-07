@@ -76,7 +76,6 @@ export type {
   Edge,
   BridgeAccounting,
   Salience,
-  ActivationRegister,
   Strand,
   // undo-engine hardening records
   WeakInfluenceEdge,
@@ -172,8 +171,6 @@ export {
   MaxPriorityQueue,
   frontierComparator,
   activationWalk,
-  makeChildCandidate,
-  orderingKeyFor,
 } from "./traversal/walk.js";
 
 export type {

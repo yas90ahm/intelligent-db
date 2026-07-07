@@ -84,7 +84,6 @@ function strandWithRoots(id: StrandId, entity: EntityId, roots: ProvenanceRoot[]
     contradiction_set: null,
     co_equal_claim_cardinality: 0,
     last_tier_reason: null,
-    register: null,
   };
 }
 

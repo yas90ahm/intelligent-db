@@ -215,7 +215,6 @@ function disputeStrand(idRaw: string, sourceId: SourceId): Strand {
     contradiction_set: CSID,
     co_equal_claim_cardinality: 0,
     last_tier_reason: null,
-    register: null,
   };
 }
 

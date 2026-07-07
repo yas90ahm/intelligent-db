@@ -70,7 +70,7 @@ function makeStrand(idRaw: string, attrKey: string, value: string, contentHash: 
     provenance: roots, outEdges: [], inEdges: [], outranked_by: null,
     bridge: { earned_bridge_value: 0, far_side_potential: 0 }, salience: { s: 1, last_fire_time: NOW, lambda: 0.05, fire_count: 0 },
     description_value: 0, observedAt: NOW, external_reobservation_count: 0, contradiction_set: null,
-    co_equal_claim_cardinality: 0, last_tier_reason: null, register: null,
+    co_equal_claim_cardinality: 0, last_tier_reason: null,
   };
 }
 const bind = (c: AnchorClass): AnchorBinding => ({ anchorClass: c, realizedCost: 0.5 as Unit, independenceWeight: 0.5 as Unit });

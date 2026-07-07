@@ -162,7 +162,6 @@ function strandIn(idRaw: string, entityRaw: string, cls: string): Strand {
     contradiction_set: null,
     co_equal_claim_cardinality: 0,
     last_tier_reason: null,
-    register: null,
   };
 }
 

@@ -377,7 +377,6 @@ export class Harness {
       contradiction_set: null,
       co_equal_claim_cardinality: 0,
       last_tier_reason: null,
-      register: null,
     };
     this.store.putStrand(strand);
     return id;

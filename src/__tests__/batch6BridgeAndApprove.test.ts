@@ -205,7 +205,6 @@ describe("B1 — bridge-seed down-weight (gated, fail-open)", () => {
       contradiction_set: null,
       co_equal_claim_cardinality: 0,
       last_tier_reason: null,
-      register: null,
     });
 
     // DIFFERENT entities so the ONLY path to `sib` is the explicit SHARED_ENTITY
@@ -392,7 +391,6 @@ function disputeStrand(idRaw: string, sourceId: SourceId): Strand {
     contradiction_set: CSID,
     co_equal_claim_cardinality: 0,
     last_tier_reason: null,
-    register: null,
   };
 }
 

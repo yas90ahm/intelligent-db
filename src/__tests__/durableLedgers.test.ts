@@ -140,7 +140,6 @@ function memberStrand(idRaw: string, sourceId: SourceId | null, payload: unknown
     contradiction_set: null,
     co_equal_claim_cardinality: 0,
     last_tier_reason: null,
-    register: null,
   };
 }
 
