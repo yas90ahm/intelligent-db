@@ -45,6 +45,7 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import {
   asEpochMs,
   asStrandId,
+  createAdjudicationProvenanceLedger,
   createIntelligentDb,
   createSourceIdentityLayer,
   createSqliteStore,
@@ -65,10 +66,12 @@ import type {
   AnchorBinding,
   AnchorRegistryPort,
   AttributeKey,
+  ContradictionSetId,
   CorroborationLedger,
   EdgeId,
   EntityId,
   IntelligentDb,
+  PendingLedger,
   SourceRegistryPort,
   SourceRef,
   RatificationDeps,
@@ -476,6 +479,96 @@ describe("atomic compound writes — a forced mid-op error rolls back fully (no 
     expect(w.reputation.scoreOf(bad.sourceId)).toBeGreaterThan(0);
 
     expect(w.store.integrityCheck()).toBe(true);
+  });
+
+  it("downstreamDisownSweep HARDENING-3 reopen: an appendPending throw mid-sweep resyncs the pending ledger's index instead of leaving it stale (disown-reopen index-staleness)", () => {
+    // Wave-2 fix mirroring ebaced0 (approve()'s atomicity fix), one layer deeper:
+    // HARDENING 3's re-opening path calls `pending.appendPending(...)` for a
+    // REOPENED_BY_DISOWN dispute INSIDE the sweep's own transaction. The
+    // shared-handle SQLite ledger both durably INSERTs the row AND incrementally
+    // updates its OWN in-memory open-pending index (a plain JS Map/Set). If a
+    // LATER step in the SAME sweep throws, the surrounding txn rolls back the SQL
+    // row — but the in-memory index update does not self-undo unless the caller
+    // calls `resyncIndex()` on the rollback path.
+    const path = freshPath("disown-reopen-resync");
+    const w = wire(path);
+
+    const bad = newSource(w);
+    const seedId = asStrandId("strand:reopen-seed");
+    const winnerId = asStrandId("strand:reopen-winner");
+    const seed = makeStrand(seedId, ENTITY, ATTR, bad.sourceId, "class:bad");
+    const winner = makeStrand(winnerId, ENTITY, ATTR, bad.sourceId, "class:bad");
+    w.store.putStrand(seed);
+    w.store.putStrand(winner);
+
+    const adj = createAdjudicationProvenanceLedger();
+    const csid = "cset:reopen-resync" as ContradictionSetId;
+    // The winner's margin (0.4) was supplied SOLELY by tainted contributors (the
+    // seed + the winner itself): removing them collapses it well below the 0.3
+    // decisiveMargin, so the sweep's HARDENING-3 gate re-opens this dispute.
+    adj.record({
+      contradictionSetId: csid,
+      attribute: ATTR,
+      winner: winnerId,
+      margin: 0.4,
+      contributingStrandIds: [winnerId, seedId],
+      at: NOW,
+    });
+
+    // BEFORE the sweep: nothing pending for this csid (the pre-op truth).
+    expect(
+      w.ratification.ledger.listPending().some((p) => p.contradictionSetId === csid),
+    ).toBe(false);
+
+    // Rig the REAL SQLite pending ledger's appendPending to perform the REAL work
+    // (the durable INSERT + the ledger's own in-memory index update) and THEN
+    // throw — simulating a later step in the same disown-sweep transaction
+    // failing. `withSweepTxn` rolls the WHOLE store transaction back (undoing the
+    // `ratification_records` INSERT, since the ledger rides the SAME shared db
+    // handle), but the ledger's in-memory index update does not self-undo without
+    // the fix.
+    const realLedger = w.ratification.ledger;
+    const realAppendPending = realLedger.appendPending.bind(realLedger);
+    const rigged: PendingLedger = {
+      appendPending(pending, systemSource, opts) {
+        realAppendPending(pending, systemSource, opts);
+        throw new Error("INJECTED mid-sweep crash after reopen appendPending");
+      },
+      listPending: realLedger.listPending.bind(realLedger),
+      approve: realLedger.approve.bind(realLedger),
+      appendMutation: realLedger.appendMutation.bind(realLedger),
+      verifyChain: realLedger.verifyChain.bind(realLedger),
+      chainHead: realLedger.chainHead.bind(realLedger),
+      records: realLedger.records.bind(realLedger),
+      ...(realLedger.resyncIndex !== undefined
+        ? { resyncIndex: realLedger.resyncIndex.bind(realLedger) }
+        : {}),
+    };
+
+    expect(() =>
+      downstreamDisownSweep(bad.sourceId, [seedId], w.store, w.reputation, NOW, undefined, undefined, {
+        adjudicationProvenance: adj,
+        pending: rigged,
+        systemSource: w.ratification.systemSource,
+        decisiveMargin: 0.3,
+      }),
+    ).toThrow(/INJECTED/);
+
+    // THE ASSERTION: listPending() reflects the PRE-OP TRUTH — the reopen never
+    // durably happened (the whole sweep transaction rolled back), so it must not
+    // report OPEN. Pre-fix, the ledger's in-memory index still (incorrectly)
+    // reported it open even though the underlying SQL row was rolled back.
+    expect(
+      realLedger.listPending().some((p) => p.contradictionSetId === csid),
+    ).toBe(false);
+    // The audit chain itself is untouched by the rolled-back append.
+    expect(realLedger.verifyChain()).toEqual({ ok: true, firstBrokenSeq: null });
+    // No PENDING record for this csid was left durably persisted either.
+    expect(
+      realLedger
+        .records()
+        .some((r) => r.kind === "PENDING" && (r.payload as { contradictionSetId?: unknown }).contradictionSetId === csid),
+    ).toBe(false);
   });
 
   it("ratify: a reputation.ratify throwing mid-op leaves NO promotion, credit, or corroboration event", () => {

@@ -492,6 +492,54 @@ describe("HARDENING 4 — false-disown survival check", () => {
     expect(store.getStrand(derived.id)!.fact_state).toBe(FactState.DEMOTED);
   });
 
+  it("bug fix (hardening4-skips-reputation-contradiction): a SURVIVED strand's tainted-class backer from a DIFFERENT source is STILL contradicted", () => {
+    // The audit's exact untested interaction: the SURVIVED strand ALSO carries a
+    // THIRD provenance root in the disowned source's TAINTED class, attributed to
+    // a DIFFERENT source ("accomplice") — not just two clean independent roots.
+    // Pre-fix, the HARDENING-4 `continue` on a survived strand skipped straight
+    // past the CONTRADICT loop, so the accomplice's tainted-class-backed
+    // reputation credit was NEVER clawed back, silently defeating the "reputation
+    // reversal stays a SEPARATE, class-bounded decision" the code comment claimed.
+    const store: StrandStore = createMemoryStore();
+    const ledger = ledgerWithCap();
+    const fraud = "src:fraud" as SourceId;
+    const accomplice = "src:accomplice" as SourceId;
+    for (let i = 0; i < 20; i++) ledger.ratify(accomplice, NOW);
+    const before = ledger.scoreOf(accomplice);
+    expect(before).toBeGreaterThan(0);
+
+    const seed = makeStrand({ idRaw: "s:seed", roots: [{ classRaw: "class:A", sourceIdRaw: fraud }] });
+    const derived = makeStrand({
+      idRaw: "s:derived",
+      origin: FactOrigin.DERIVED,
+      roots: [
+        { classRaw: "class:IND1", sourceIdRaw: "src:i1", rootIdRaw: "r1" },
+        { classRaw: "class:IND2", sourceIdRaw: "src:i2", rootIdRaw: "r2" },
+        // TAINTED class ("class:A", the class fraud sourced), but a DIFFERENT
+        // source (accomplice, not fraud) backs it here.
+        { classRaw: "class:A", sourceIdRaw: accomplice, rootIdRaw: "r3" },
+      ],
+    });
+    store.putStrand(seed);
+    store.putStrand(derived);
+    store.putEdge(derivationEdge(derived.id, seed.id));
+
+    const res = downstreamDisownSweep(fraud, [seed.id], store, ledger, NOW, undefined, undefined, {
+      checkSurvivingSupport: true,
+    });
+
+    // Demotion is correctly gated on survival — unchanged by this fix: the two
+    // non-tainted independent classes (IND1, IND2) still clear the floor.
+    expect(res.survivedDemotion).toContain(derived.id);
+    expect(res.demotedDownstream).not.toContain(derived.id);
+    expect(store.getStrand(derived.id)!.fact_state).toBe(FactState.LIVE);
+
+    // THE FIX: the accomplice's tainted-class-backed reputation is STILL clawed
+    // back even though the strand itself survived demotion.
+    expect(res.contradictedSources).toContain(accomplice);
+    expect(ledger.scoreOf(accomplice)).toBeLessThan(before);
+  });
+
   it("with the check OFF (default), a single-independent-class derivative is DEMOTED (back-compat)", () => {
     const store: StrandStore = createMemoryStore();
     const ledger = ledgerWithCap();

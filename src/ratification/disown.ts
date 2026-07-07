@@ -484,7 +484,23 @@ export function downstreamDisownSweep(
     }
   };
 
-  return withSweepTxn(store, () => {
+  // RESYNC ON ROLLBACK (disown-reopen index-staleness, Wave-2 — mirrors the fix
+  // ebaced0 shipped for `approve()` in api.ts): HARDENING 3's re-opening path
+  // below calls `pending.appendPending(...)` for a `REOPENED_BY_DISOWN` dispute
+  // INSIDE this same sweep transaction. On the shared-handle SQLite ledger that
+  // durably INSERTs a row AND incrementally updates the ledger's OWN in-memory
+  // open-pending index — a plain JS Map/Set, not itself transactional. If a LATER
+  // step in this SAME sweep throws (another reopen, or any other write), the
+  // outer `withSweepTxn` ROLLS BACK the whole store transaction (undoing that
+  // INSERT too, since the ledger rides the SAME shared db handle), but the
+  // in-memory index update does NOT self-undo — a durable-store-vs-in-memory-
+  // cache desync one layer deeper than the one Wave-1 closed at the api.ts
+  // boundary. `resyncIndex()` (optional; only the shared-handle SQLite ledger
+  // implements it) re-derives the index from what is ACTUALLY persisted, so a
+  // caught rollback here never leaves `listPending()` believing a reopen that
+  // never durably happened.
+  try {
+    return withSweepTxn(store, () => {
   // --- 1. DIRECT SEED + authoritative idempotency ----------------------------
   // Capture the disowned source's PRE-crater reputation state for the receipt.
   const craterBefore = ledger.stateOf(sourceId);
@@ -613,68 +629,81 @@ export function downstreamDisownSweep(
         // that SURVIVES removal of the tainted set, its existence does NOT solely
         // rest on the tainted input — keep it LIVE and do NOT continue the BFS
         // through it (its derivatives are not tainted via this surviving strand).
-        // Reputation reversal stays a SEPARATE, class-bounded decision (untouched).
-        if (
+        //
+        // BUG FIX (hardening4-skips-reputation-contradiction, Wave-2): "reputation
+        // reversal stays a SEPARATE, class-bounded decision" was the COMMENT here,
+        // but the code's `continue` skipped straight past the CONTRADICT loop below
+        // too — so a survived (spared-from-demotion) strand's tainted-class backers
+        // were NEVER contradicted, silently defeating the clawback the comment
+        // claims is independent. DEMOTION and the BFS continuation genuinely ARE
+        // gated on survival (a spared strand's derivatives are not tainted via it),
+        // but CONTRADICTION must run UNCONDITIONALLY regardless of the demotion
+        // outcome — moved to run after this branch, unconditionally, below.
+        const survived =
           checkSurvivingSupport &&
           survivingIndependentSupport(derived, sourceId, taintedClasses) >=
-            minSurvivingSupport
-        ) {
+            minSurvivingSupport;
+
+        if (survived) {
           survivedDemotion.push(derived.id);
-          continue;
+        } else {
+          // This derived strand's existence rests on tainted input: it joins the
+          // tainted closure (for the adjudication margin recompute) and is demoted.
+          taintedStrandIds.add(derived.id);
+
+          // -- DEMOTE (existence rests on tainted input; never delete) --------
+          const stubEdge: Edge = {
+            id: mintEdgeId(sentinel, derived.id),
+            from: sentinel,
+            to: derived.id,
+            edgeType: EdgeType.OUTRANKS,
+            link_confidence: 1 as Unit,
+            provenance_independence: 1 as Unit,
+            recency: 1 as Unit,
+            w: 1 as Unit,
+            out_weight_sum: 1 as Unit,
+          };
+          const demoteBefore = hashStrandState(derived); // pre-mutation audit state
+          store.putEdge(stubEdge);
+          demote(derived, stubEdge); // mutates fact_state + outranked_by in place
+          store.putStrand(derived);
+          demotedDownstream.push(derived.id);
+
+          // A1 — journal the demotion (its OUTRANKS edge is covered by the
+          // after-state's `outranked_by` + the edge id in `refEventId`; no
+          // separate per-edge receipt).
+          emitMut(
+            mutationReceipt(
+              "DEMOTE",
+              String(derived.id),
+              String(derived.content_hash),
+              demoteBefore,
+              hashStrandState(derived),
+              now,
+              String(stubEdge.id),
+            ),
+          );
+
+          // -- Continue the BFS from this newly-tainted derived strand --------
+          const fp = rootFingerprint(derived);
+          if (!nextSeenFp.has(fp)) {
+            nextSeenFp.add(fp);
+            nextFrontier.push(derived);
+          }
         }
 
-        // This derived strand's existence rests on tainted input: it joins the
-        // tainted closure (for the adjudication margin recompute) and is demoted.
-        taintedStrandIds.add(derived.id);
-
-        // -- DEMOTE (existence rests on tainted input; never delete) ----------
-        const stubEdge: Edge = {
-          id: mintEdgeId(sentinel, derived.id),
-          from: sentinel,
-          to: derived.id,
-          edgeType: EdgeType.OUTRANKS,
-          link_confidence: 1 as Unit,
-          provenance_independence: 1 as Unit,
-          recency: 1 as Unit,
-          w: 1 as Unit,
-          out_weight_sum: 1 as Unit,
-        };
-        const demoteBefore = hashStrandState(derived); // pre-mutation audit state
-        store.putEdge(stubEdge);
-        demote(derived, stubEdge); // mutates fact_state + outranked_by in place
-        store.putStrand(derived);
-        demotedDownstream.push(derived.id);
-
-        // A1 — journal the demotion (its OUTRANKS edge is covered by the after-state's
-        // `outranked_by` + the edge id in `refEventId`; no separate per-edge receipt).
-        emitMut(
-          mutationReceipt(
-            "DEMOTE",
-            String(derived.id),
-            String(derived.content_hash),
-            demoteBefore,
-            hashStrandState(derived),
-            now,
-            String(stubEdge.id),
-          ),
-        );
-
         // -- CONTRADICT downstream sources, BOUNDED BY TAINTED CLASS ----------
-        // Only claw back credit from a source whose OWN provenance class is in the
-        // tainted set. A backer in a genuinely independent class merely co-occurs
-        // (coincidental agreement) and is NOT punished, even though `derived` is
-        // demoted because its EXISTENCE rested on tainted input.
+        // UNCONDITIONAL (the fix): runs whether `derived` was demoted OR survived.
+        // Only claws back credit from a source whose OWN provenance class is in
+        // the tainted set. A backer in a genuinely independent class merely
+        // co-occurs (coincidental agreement) and is NOT punished — but a survived
+        // strand can STILL carry a tainted-class-backed root from a DISTINCT
+        // source (its survival came from OTHER, non-tainted roots clearing the
+        // support floor), and that source's reputation must still be clawed back.
         for (const root of derived.provenance) {
           if (root.sourceId === null) continue;
           if (!taintedClasses.has(root.independenceClass)) continue;
           contradictedSources.add(root.sourceId);
-        }
-
-        // -- Continue the BFS from this newly-tainted derived strand ----------
-        const fp = rootFingerprint(derived);
-        if (!nextSeenFp.has(fp)) {
-          nextSeenFp.add(fp);
-          nextFrontier.push(derived);
         }
       }
     }
@@ -839,5 +868,9 @@ export function downstreamDisownSweep(
     survivedDemotion,
     visitedCount: visited.size,
   };
-  });
+    });
+  } catch (err) {
+    pending?.resyncIndex?.();
+    throw err;
+  }
 }
