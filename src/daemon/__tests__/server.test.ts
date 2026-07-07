@@ -7,7 +7,7 @@
  * `recoverStaleSocket`), not exercised here.
  */
 
-import { describe, it, expect, beforeEach, afterEach } from "vitest";
+import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import * as net from "node:net";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -45,7 +45,12 @@ interface Harness {
 }
 
 async function setupServer(
-  overrides: Partial<Pick<DaemonServerOptions, "maxConnections" | "maxQueueDepth">> = {},
+  overrides: Partial<
+    Pick<
+      DaemonServerOptions,
+      "maxConnections" | "maxQueueDepth" | "maxPendingHandshakes" | "factChainHead" | "verifyFactChain"
+    >
+  > = {},
 ): Promise<Harness> {
   const dataDir = mkdtempSync(join(tmpdir(), "iddb-daemon-srv-"));
   const memory = createAgentMemory({});
@@ -380,24 +385,370 @@ async function waitForConnectionCount(h: Harness, n: number, timeoutMs = 2000): 
   }
 }
 
-describe("DaemonServer: connection cap (R5/H6)", () => {
-  it("refuses a connection beyond maxConnections with a typed error, before handshake", async () => {
-    harness = await setupServer({ maxConnections: 1 });
+/** Fully authenticate one fresh connection with `token`; returns the open socket + reader. */
+async function authenticate(endpoint: string, token: string): Promise<{ socket: net.Socket; reader: LineReader }> {
+  const socket = connect(endpoint);
+  const reader = new LineReader(socket);
+  socket.write(JSON.stringify({ method: "auth", token }) + "\n");
+  const resp = await reader.nextJson();
+  expect(resp.ok).toBe(true);
+  return { socket, reader };
+}
 
-    const first = connect(harness.endpoint);
-    await new Promise<void>((resolve) => first.once("connect", () => resolve()));
-    // Wait for the SERVER side to actually register the accepted connection
-    // (client-side 'connect' can fire a tick before the server's own
-    // 'connection' handler runs) before relying on connectionCount.
-    await waitForConnectionCount(harness, 1);
+describe("DaemonServer: connection cap (R5/H6, daemon-connection-slot-exhaustion)", () => {
+  it("maxConnections caps AUTHENTICATED connections; a further authenticated attempt is rejected", async () => {
+    harness = await setupServer({ maxConnections: 2, maxPendingHandshakes: 8 });
+    const owner = readOwnerTokenFile(harness.dataDir)!;
+    const agentA = harness.tokens.mint(AnchorClass.EMAIL_OAUTH, "agent-a");
+    const agentB = harness.tokens.mint(AnchorClass.EMAIL_OAUTH, "agent-b");
 
-    const second = connect(harness.endpoint);
-    const secondReader = new LineReader(second);
-    const resp = await secondReader.nextJson();
+    const first = await authenticate(harness.endpoint, owner.token);
+    const second = await authenticate(harness.endpoint, agentA.raw);
+
+    // A third AUTHENTICATED attempt genuinely exceeds the reservation.
+    const thirdSocket = connect(harness.endpoint);
+    const thirdReader = new LineReader(thirdSocket);
+    thirdSocket.write(JSON.stringify({ method: "auth", token: agentB.raw }) + "\n");
+    const resp = await thirdReader.nextJson();
     expect(resp.ok).toBe(false);
     expect(resp.error).toBe(DAEMON_ERR_CONNECTION_CAP);
-    await waitClose(second);
+    await waitClose(thirdSocket);
 
-    first.destroy();
+    first.socket.destroy();
+    second.socket.destroy();
+  });
+
+  it(
+    "daemon-connection-slot-exhaustion fix: a flood of UNAUTHENTICATED (silent) sockets never " +
+      "draws down the authenticated reservation — a legitimate, token-holding caller still connects",
+    async () => {
+      // Before the fix, every accepted socket (auth'd or not) counted against
+      // the SAME `maxConnections` ceiling, so a trivial local attacker opening
+      // silent connections and never sending a byte could starve every real
+      // client with CONNECTION_CAP forever. Here `maxConnections: 1` but
+      // `maxPendingHandshakes` is generous enough to admit the flood as
+      // PENDING — the regression is that the flood must NOT block the one
+      // legitimate authenticated slot.
+      harness = await setupServer({ maxConnections: 1, maxPendingHandshakes: 5 });
+      const owner = readOwnerTokenFile(harness.dataDir)!;
+
+      const floodSockets: net.Socket[] = [];
+      for (let i = 0; i < 4; i++) {
+        const s = connect(harness.endpoint);
+        floodSockets.push(s);
+        await new Promise<void>((resolve) => s.once("connect", () => resolve()));
+      }
+      await waitForConnectionCount(harness, 4);
+      // None of the flood ever sent a byte — all 4 are still pending, none
+      // authenticated, and (the regression) the AUTHENTICATED reservation is
+      // still fully available:
+      expect(harness.server.pendingHandshakeCount).toBe(4);
+
+      const legit = await authenticate(harness.endpoint, owner.token);
+      expect(harness.server.pendingHandshakeCount).toBe(4);
+      expect(harness.server.connectionCount).toBe(5);
+
+      legit.socket.destroy();
+      for (const s of floodSockets) s.destroy();
+    },
+  );
+
+  it(
+    "daemon-connection-slot-exhaustion fix: a SEPARATE maxPendingHandshakes ceiling still bounds " +
+      "the unauthenticated pool itself (its own, smaller resource limit)",
+    async () => {
+      harness = await setupServer({ maxConnections: 32, maxPendingHandshakes: 2 });
+
+      const a = connect(harness.endpoint);
+      const b = connect(harness.endpoint);
+      await Promise.all(
+        [a, b].map((s) => new Promise<void>((resolve) => s.once("connect", () => resolve()))),
+      );
+      await waitForConnectionCount(harness, 2);
+      expect(harness.server.pendingHandshakeCount).toBe(2);
+
+      // A third, still-unauthenticated connection exceeds the PENDING cap even
+      // though `maxConnections` (32) is nowhere near exhausted.
+      const thirdSocket = connect(harness.endpoint);
+      const thirdReader = new LineReader(thirdSocket);
+      const resp = await thirdReader.nextJson();
+      expect(resp.ok).toBe(false);
+      expect(resp.error).toBe(DAEMON_ERR_CONNECTION_CAP);
+      await waitClose(thirdSocket);
+
+      a.destroy();
+      b.destroy();
+    },
+  );
+});
+
+// ---------------------------------------------------------------------------
+// shutdown-close-deadlock — stop() must never hang, even with abruptly
+// destroyed clients and pre-auth-rejected sockets outstanding
+// ---------------------------------------------------------------------------
+
+describe("DaemonServer: stop() completes promptly (shutdown-close-deadlock)", () => {
+  it(
+    "stop() resolves quickly even when live connections were abruptly destroyed and a " +
+      "pre-auth-rejected connection is outstanding (found via the raw-error-message-passthrough test)",
+    async () => {
+      // Reproduces the exact shape that hung indefinitely pre-fix: TWO real
+      // authenticated connections, client-side ABRUPTLY `.destroy()`ed (no
+      // graceful FIN exchange) with ZERO delay before `stop()` runs, PLUS a
+      // THIRD connection that was rejected pre-auth (CONNECTION_CAP) and
+      // whose server-side half is left half-open on this platform's
+      // named-pipe transport unless `stop()` force-closes it too.
+      harness = await setupServer({ maxConnections: 2, maxPendingHandshakes: 8 });
+      const owner = readOwnerTokenFile(harness.dataDir)!;
+      const agentA = harness.tokens.mint(AnchorClass.EMAIL_OAUTH, "agent-a");
+      const agentB = harness.tokens.mint(AnchorClass.EMAIL_OAUTH, "agent-b");
+
+      const first = await authenticate(harness.endpoint, owner.token);
+      const second = await authenticate(harness.endpoint, agentA.raw);
+
+      const thirdSocket = connect(harness.endpoint);
+      const thirdReader = new LineReader(thirdSocket);
+      thirdSocket.write(JSON.stringify({ method: "auth", token: agentB.raw }) + "\n");
+      const resp = await thirdReader.nextJson();
+      expect(resp.ok).toBe(false);
+      await waitClose(thirdSocket);
+
+      // Zero delay, matching the reproduced hang exactly.
+      first.socket.destroy();
+      second.socket.destroy();
+
+      const start = Date.now();
+      const stopPromise = harness.server.stop({ clean: true });
+      const timedOut = await Promise.race([
+        stopPromise.then(() => false),
+        new Promise<boolean>((resolve) => setTimeout(() => resolve(true), 5000)),
+      ]);
+      expect(timedOut).toBe(false);
+      expect(Date.now() - start).toBeLessThan(5000);
+
+      // `afterEach` would otherwise call stop() again on an already-stopped
+      // server; mark it handled by clearing the harness (stop() is expected
+      // to be idempotent-safe to call once here — clearing avoids a second call).
+      await stopPromise;
+      harness.memory.close();
+      rmSync(harness.dataDir, { recursive: true, force: true });
+      harness = null;
+    },
+  );
+});
+
+// ---------------------------------------------------------------------------
+// no-health-status-surface — the lightly-authenticated status/ping verb
+// ---------------------------------------------------------------------------
+
+describe("DaemonServer: status/ping verb (no-health-status-surface)", () => {
+  it("status: ANY authenticated connection (not just OWNER) gets connectionCount/queueDepth/uptimeMs/daemonChainHead", async () => {
+    harness = await setupServer();
+    const lowGrade = harness.tokens.mint(AnchorClass.EMAIL_OAUTH, "agent-status-probe");
+    const { socket, reader } = await authenticate(harness.endpoint, lowGrade.raw);
+
+    await new Promise((resolve) => setTimeout(resolve, 20)); // ensure uptimeMs > 0
+    socket.write(JSON.stringify({ id: 1, method: "status" }) + "\n");
+    const resp = await reader.nextJson();
+    expect(resp.ok).toBe(true);
+    expect(typeof resp.result.connectionCount).toBe("number");
+    expect(resp.result.connectionCount).toBeGreaterThanOrEqual(1);
+    expect(typeof resp.result.queueDepth).toBe("number");
+    expect(typeof resp.result.uptimeMs).toBe("number");
+    expect(resp.result.uptimeMs).toBeGreaterThan(0);
+    expect(resp.result.daemonChainHead).toEqual(harness.auditChain.chainHead());
+    // No factChainHead was wired for this harness — reported unavailable, never invented.
+    expect(resp.result.factChainHead).toBeNull();
+
+    socket.destroy();
+  });
+
+  it("ping is an alias for status (same payload shape)", async () => {
+    harness = await setupServer();
+    const owner = readOwnerTokenFile(harness.dataDir)!;
+    const { socket, reader } = await authenticate(harness.endpoint, owner.token);
+
+    socket.write(JSON.stringify({ id: 1, method: "ping" }) + "\n");
+    const resp = await reader.nextJson();
+    expect(resp.ok).toBe(true);
+    expect(typeof resp.result.connectionCount).toBe("number");
+    expect(typeof resp.result.daemonChainHead.headHash).toBe("string");
+
+    socket.destroy();
+  });
+
+  it("status reports the wired factChainHead when the caller (cli.ts) supplies one", async () => {
+    const fakeFactChainHead = { seq: 42, headHash: "deadbeef" };
+    harness = await setupServer({ factChainHead: () => fakeFactChainHead });
+    const owner = readOwnerTokenFile(harness.dataDir)!;
+    const { socket, reader } = await authenticate(harness.endpoint, owner.token);
+
+    socket.write(JSON.stringify({ id: 1, method: "status" }) + "\n");
+    const resp = await reader.nextJson();
+    expect(resp.result.factChainHead).toEqual(fakeFactChainHead);
+
+    socket.destroy();
+  });
+
+  it("status is dispatched OUTSIDE the FIFO queue: it answers immediately even with the queue backed up", async () => {
+    harness = await setupServer({ maxQueueDepth: 1 });
+    const owner = readOwnerTokenFile(harness.dataDir)!;
+    const { socket, reader } = await authenticate(harness.endpoint, owner.token);
+
+    // Fill the single queue slot with a real in-flight call, then ask for
+    // status WHILE it is still executing — status must not queue behind it.
+    socket.write(JSON.stringify({ id: 1, method: "recall", params: "anything" }) + "\n");
+    socket.write(JSON.stringify({ id: 2, method: "status" }) + "\n");
+    const first = await reader.nextJson();
+    const second = await reader.nextJson();
+    // Whichever ordering the transport delivers, both must succeed — status
+    // was never itself rejected/backpressured by the queue's own depth cap.
+    expect([first.id, second.id].sort()).toEqual([1, 2]);
+    expect(first.ok).toBe(true);
+    expect(second.ok).toBe(true);
+
+    socket.destroy();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// verifychain-never-invoked-by-product — the on-demand verifyChains admin verb
+// ---------------------------------------------------------------------------
+
+// ---------------------------------------------------------------------------
+// fifo-backpressure-id-loss — the rejected request's OWN wire id is echoed
+// ---------------------------------------------------------------------------
+
+describe("DaemonServer: fifo-backpressure-id-loss fix", () => {
+  it("a BACKPRESSURE rejection echoes the REJECTED request's own wire id, never a hardcoded -1", async () => {
+    harness = await setupServer({ maxQueueDepth: 2 });
+    const owner = readOwnerTokenFile(harness.dataDir)!;
+    const { socket, reader } = await authenticate(harness.endpoint, owner.token);
+
+    // Flood far more requests than the tiny queue depth, back-to-back on ONE
+    // connection, without awaiting between writes — a real flood over the
+    // real socket (mirrors the E2E H6 backpressure test's technique).
+    const TOTAL = 30;
+    for (let i = 0; i < TOTAL; i++) {
+      socket.write(JSON.stringify({ id: i, method: "recall", params: "flood" }) + "\n");
+    }
+
+    let backpressureId: number | null = null;
+    let seen = 0;
+    while (seen < TOTAL && backpressureId === null) {
+      const resp = await reader.nextJson(5000);
+      seen += 1;
+      if (!resp.ok && resp.error?.code === "BACKPRESSURE") {
+        backpressureId = resp.id;
+      }
+    }
+
+    expect(backpressureId).not.toBeNull();
+    // The pre-fix bug hardcoded -1 (a value the client's own id sequence,
+    // starting at 0 here / 1 in the real client, never produces) — proving
+    // the fix threads the REAL rejected request's id, not a sentinel that
+    // never matches any pending entry client-side.
+    expect(backpressureId).not.toBe(-1);
+    expect(backpressureId).toBeGreaterThanOrEqual(0);
+    expect(backpressureId).toBeLessThan(TOTAL);
+
+    socket.destroy();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// socket-error-swallowed — post-handshake socket errors are counted + logged
+// ---------------------------------------------------------------------------
+
+describe("DaemonServer: socket-error-swallowed fix", () => {
+  it("socketErrorCount stays 0 with no errors, and the getter reflects real observed errors", async () => {
+    harness = await setupServer();
+    expect(harness.server.socketErrorCount).toBe(0);
+    const { socket } = await authenticate(harness.endpoint, readOwnerTokenFile(harness.dataDir)!.token);
+    expect(harness.server.socketErrorCount).toBe(0);
+    socket.destroy();
+  });
+
+  it("a post-handshake socket error is counted and logged (never silently discarded)", async () => {
+    harness = await setupServer();
+    const owner = readOwnerTokenFile(harness.dataDir)!;
+    const { socket } = await authenticate(harness.endpoint, owner.token);
+
+    const stderrSpy = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+    // Force a genuine socket-level error: fire many requests, then abruptly
+    // destroy the client's connection without reading any response — the
+    // server's subsequent attempt(s) to write a queued response onto the
+    // now-gone peer surface as a real 'error' event (EPIPE), not merely
+    // 'close' (reliably reproduced this way — verified over repeated runs).
+    // Deliberately plain `.destroy()`, not `resetAndDestroy()`: the latter is
+    // TCP-only and was found (during this fix's own verification) to trigger
+    // an unrelated low-level write-completion escape over this platform's
+    // named-pipe transport — a footgun in the TEST technique, not in the
+    // daemon code under test, so avoided here.
+    for (let i = 0; i < 20; i++) {
+      socket.write(JSON.stringify({ id: i, method: "recall", params: "x" }) + "\n");
+    }
+    socket.destroy();
+
+    // Give the server a moment to observe the broken connection.
+    const deadline = Date.now() + 2000;
+    while (harness.server.socketErrorCount === 0 && Date.now() < deadline) {
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+    const loggedLines = stderrSpy.mock.calls.map((c) => String(c[0]));
+    stderrSpy.mockRestore();
+
+    expect(harness.server.socketErrorCount).toBeGreaterThan(0);
+    const socketErrorLine = loggedLines
+      .map((l) => {
+        try {
+          return JSON.parse(l) as Record<string, unknown>;
+        } catch {
+          return null;
+        }
+      })
+      .find((r) => r?.["event"] === "socket_error");
+    expect(socketErrorLine).toBeDefined();
+    expect(socketErrorLine!["level"]).toBe("warn");
+    expect(typeof socketErrorLine!["message"]).toBe("string");
+  });
+});
+
+describe("DaemonServer: verifyChains admin verb (verifychain-never-invoked-by-product)", () => {
+  it("verifyChains is OWNER-only and reports both chains' verification result", async () => {
+    const fakeVerify = { ok: true, firstBrokenSeq: null };
+    harness = await setupServer({ verifyFactChain: () => fakeVerify });
+    const owner = readOwnerTokenFile(harness.dataDir)!;
+    const lowGrade = harness.tokens.mint(AnchorClass.EMAIL_OAUTH, "agent-verify-probe");
+
+    const low = await authenticate(harness.endpoint, lowGrade.raw);
+    low.socket.write(JSON.stringify({ id: 1, method: "verifyChains", params: {} }) + "\n");
+    const forbidden = await low.reader.nextJson();
+    expect(forbidden.ok).toBe(false);
+    expect(forbidden.error.code).toBe(DAEMON_ERR_ADMIN_FORBIDDEN);
+
+    const owned = await authenticate(harness.endpoint, owner.token);
+    owned.socket.write(JSON.stringify({ id: 1, method: "verifyChains", params: {} }) + "\n");
+    const resp = await owned.reader.nextJson();
+    expect(resp.ok).toBe(true);
+    expect(resp.result.daemonChain.ok).toBe(true);
+    expect(resp.result.factChain).toEqual(fakeVerify);
+
+    low.socket.destroy();
+    owned.socket.destroy();
+  });
+
+  it("verifyChains reports factChain: null when no fact-chain verifier was wired", async () => {
+    harness = await setupServer();
+    const owner = readOwnerTokenFile(harness.dataDir)!;
+    const { socket, reader } = await authenticate(harness.endpoint, owner.token);
+
+    socket.write(JSON.stringify({ id: 1, method: "verifyChains", params: {} }) + "\n");
+    const resp = await reader.nextJson();
+    expect(resp.ok).toBe(true);
+    expect(resp.result.daemonChain.ok).toBe(true);
+    expect(resp.result.factChain).toBeNull();
+
+    socket.destroy();
   });
 });

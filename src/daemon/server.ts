@@ -80,26 +80,58 @@ import type {
 } from "../core/types.js";
 import { ANCHOR_TABLE, STAKE_INDEPENDENCE_MAX } from "../identity/anchors.js";
 import type { Cue } from "../recall/cueResolver.js";
+import { InvalidQuarantineThresholdError } from "../api.js";
 import type { AdjudicateOptions, DisownOptions } from "../api.js";
 import type { AgentMemory, RememberInput } from "../agent/agentMemory.js";
 import type { SourceRef } from "../identity/sources.js";
 import type { TrustRegistry } from "../identity/trustRegistry.js";
+import { OffLedgerReputationError } from "../ratification/reconcile.js";
+import { UnverifiedLedgerRestoreError } from "../store/backup.js";
+import { EncryptedStoreIntegrityError } from "../store/encryptedStore.js";
+import { UnknownFutureSchemaError } from "../store/migrations.js";
+import { SharedHandleNotWalError } from "../store/sqliteStore.js";
 
 import { fingerprintToken } from "./tokens.js";
 import type { TokenStore } from "./tokens.js";
 import type { DaemonAuditChain, DaemonLedgerRecord } from "./auditChain.js";
+import type { ChainHead as FactChainHead, ChainVerification as FactChainVerification } from "../ratification/pendingLedger.js";
 import { daemonLog } from "./log.js";
 
 // ---------------------------------------------------------------------------
 // Resource-limit defaults (R5 / H6)
 // ---------------------------------------------------------------------------
 
-/** R5: "Connection cap 32, enforced". */
+/**
+ * R5: "Connection cap 32, enforced" — daemon-connection-slot-exhaustion fix:
+ * this cap now bounds only AUTHENTICATED connections (see `#onConnection`), so
+ * it is a genuine reservation for token-holding callers, never a pool an
+ * unauthenticated flood can exhaust.
+ */
 export const DEFAULT_MAX_CONNECTIONS = 32;
+/**
+ * daemon-connection-slot-exhaustion fix: a SEPARATE, smaller ceiling on
+ * sockets that have NOT yet completed the handshake. Without this, an
+ * unauthenticated connection was previously indistinguishable from an
+ * authenticated one for capacity purposes — a trivial local attacker holding
+ * open `maxConnections` silent sockets (each occupying its slot for up to
+ * `handshakeTimeoutMs + authFailureDelayMs`) starved every legitimate,
+ * token-holding client with `CONNECTION_CAP` forever. This ceiling is
+ * independent of (and does not draw down) `maxConnections`.
+ */
+export const DEFAULT_MAX_PENDING_HANDSHAKES = 8;
 /** H6: "max queue depth (default 1024, over → typed backpressure error)". */
 export const DEFAULT_MAX_QUEUE_DEPTH = 1024;
-/** H1: "5 seconds of handshake silence → connection dropped". */
-export const DEFAULT_HANDSHAKE_TIMEOUT_MS = 5000;
+/**
+ * H1: "5 seconds of handshake silence → connection dropped" — tightened
+ * (40%) by the daemon-connection-slot-exhaustion fix: a shorter
+ * unauthenticated-handshake window bounds how long a silent/slow-loris socket
+ * can occupy one of the `maxPendingHandshakes` slots above, on top of the
+ * separate capacity fix. Still generous for a real client (auth is one local
+ * round trip) and for a deliberately-throttled/chunked one (the existing
+ * slow-loris E2E regression trickles a real ~94-byte auth line one byte
+ * every 20ms — ~1.9s — and must keep succeeding).
+ */
+export const DEFAULT_HANDSHAKE_TIMEOUT_MS = 3000;
 /** H1: "fixed 1s delay before the failure response". */
 export const DEFAULT_AUTH_FAILURE_DELAY_MS = 1000;
 
@@ -272,10 +304,35 @@ interface ConnectionState {
 // AgentMemory-only DaemonMethod union, but riding the SAME envelope shape.
 // ---------------------------------------------------------------------------
 
-const ADMIN_VERBS = new Set(["issueToken", "revokeToken", "revokeAllTokens", "reloadTokens"]);
+const ADMIN_VERBS = new Set([
+  "issueToken",
+  "revokeToken",
+  "revokeAllTokens",
+  "reloadTokens",
+  // verifychain-never-invoked-by-product fix: an on-demand, OWNER-gated verb
+  // that self-verifies BOTH checksum chains (see `#executeAdminVerb`'s
+  // "verifyChains" case) — a caller no longer has to know to script this.
+  "verifyChains",
+]);
 
 function isAdminVerb(method: string): boolean {
   return ADMIN_VERBS.has(method);
+}
+
+// ---------------------------------------------------------------------------
+// no-health-status-surface fix: a LIGHTLY-AUTHENTICATED status/ping verb —
+// reachable by ANY authenticated connection regardless of grade (unlike the
+// OWNER-only admin verbs above), since a monitoring/health-check caller need
+// not hold a privileged token. Dispatched OUTSIDE the FIFO queue (see
+// `#dispatchStatusVerb`): it is a pure read of in-memory counters (plus an
+// optional external chain lookup), so it must never be forced to wait behind
+// a backlog it exists to report on.
+// ---------------------------------------------------------------------------
+
+const STATUS_VERBS = new Set(["status", "ping"]);
+
+function isStatusVerb(method: string): boolean {
+  return STATUS_VERBS.has(method);
 }
 
 function parseGrade(v: unknown): AnchorClass | null {
@@ -345,6 +402,45 @@ function validateAnchorBindings(anchors: readonly AnchorBinding[]): void {
       throw new AnchorValidationError(`registerSource: anchor binding for ${a.anchorClass} has a negative weight/cost.`);
     }
   }
+}
+
+// ---------------------------------------------------------------------------
+// raw-error-message-passthrough fix: an ALLOW-LIST of error constructors this
+// codebase defines specifically to carry safe, hand-authored, PATH-FREE
+// messages suitable for forwarding verbatim to a remote caller. Anything NOT
+// an `instanceof` one of these (a raw `node:sqlite`/`node:fs` throw with a
+// filesystem path in its message, or any other unclassified internal
+// exception) is replaced with a generic message at the transport boundary —
+// never forwarded verbatim, so this process's paths / driver-internal text
+// can never leak to a daemon client. Every entry below was read at the time
+// it was added and confirmed to never interpolate a path/stack/raw-token.
+// ---------------------------------------------------------------------------
+
+const SAFE_ERROR_TYPES: readonly (abstract new (...args: never[]) => Error)[] = [
+  AnchorValidationError,
+  FifoBackpressureError,
+  InvalidQuarantineThresholdError,
+  OffLedgerReputationError,
+  UnverifiedLedgerRestoreError,
+  EncryptedStoreIntegrityError,
+  UnknownFutureSchemaError,
+  SharedHandleNotWalError,
+];
+
+function isKnownSafeError(err: unknown): err is Error {
+  return err instanceof Error && SAFE_ERROR_TYPES.some((ctor) => err instanceof ctor);
+}
+
+const GENERIC_INTERNAL_ERROR_MESSAGE =
+  "Internal error while processing this request (see the daemon's own logs for detail).";
+
+/**
+ * The client-safe rendering of a caught error: the exact message for a
+ * known-safe typed error, else a fixed generic message. Never `err.message`
+ * verbatim for anything unrecognized (raw-error-message-passthrough fix).
+ */
+function safeErrorMessage(err: unknown): string {
+  return isKnownSafeError(err) ? err.message : GENERIC_INTERNAL_ERROR_MESSAGE;
 }
 
 // ---------------------------------------------------------------------------
@@ -490,9 +586,21 @@ export interface DaemonServerOptions {
   readonly endpointBase: string;
   readonly maxConnections?: number;
   readonly maxQueueDepth?: number;
+  /** daemon-connection-slot-exhaustion fix — see {@link DEFAULT_MAX_PENDING_HANDSHAKES}. */
+  readonly maxPendingHandshakes?: number;
   readonly handshakeTimeoutMs?: number;
   readonly authFailureDelayMs?: number;
   readonly clock?: () => number;
+  /**
+   * no-health-status-surface / verifychain-never-invoked-by-product fixes:
+   * OPTIONAL read-only access to the fact/ratification chain (a SEPARATE
+   * checksum chain from `auditChain` above, living inside the shared memory
+   * db — see `daemon/cli.ts`'s wiring). Omit to report the fact chain as
+   * unavailable in `status`/`verifyChains` rather than throwing — this server
+   * class stays decoupled from SQLite specifics either way.
+   */
+  readonly factChainHead?: () => FactChainHead;
+  readonly verifyFactChain?: () => FactChainVerification;
 }
 
 export interface DaemonStartResult {
@@ -506,17 +614,35 @@ export class DaemonServer {
   readonly #trustRegistry: TrustRegistry;
   readonly #endpointBase: string;
   readonly #maxConnections: number;
+  readonly #maxPendingHandshakes: number;
   readonly #handshakeTimeoutMs: number;
   readonly #authFailureDelayMs: number;
   readonly #clock: () => number;
   readonly #queue: FifoQueue;
+  readonly #factChainHead: (() => FactChainHead) | null;
+  readonly #verifyFactChain: (() => FactChainVerification) | null;
 
   #server: net.Server | null = null;
   #endpoint: string | null = null;
   #nextConnId = 1;
+  #startedAtMs: number | null = null;
+  #socketErrorCount = 0;
   readonly #connections = new Map<number, ConnectionState>();
   readonly #fingerprintToConnIds = new Map<string, Set<number>>();
   #shuttingDown = false;
+  /**
+   * shutdown-close-deadlock fix: EVERY raw socket `net.Server` ever handed to
+   * `#onConnection`, tracked from the instant it is accepted — including a
+   * socket rejected pre-auth (connection cap / pending-handshake cap), which
+   * `#connections` never holds. Reproduced (against the real transport, not a
+   * mock): such a rejected socket's server-side half — written to and
+   * `.end()`ed, then the CLIENT closes its own side after reading the
+   * rejection — can be left forever `readable / !writable` (a stuck half-open
+   * handle) on this platform's named-pipe transport, which `net.Server#close`'s
+   * callback waits on indefinitely. `stop()` force-destroys every entry here,
+   * not only the ones promoted into `#connections`.
+   */
+  readonly #allSockets = new Set<net.Socket>();
 
   constructor(opts: DaemonServerOptions) {
     this.#memory = opts.memory;
@@ -525,10 +651,13 @@ export class DaemonServer {
     this.#trustRegistry = opts.trustRegistry;
     this.#endpointBase = opts.endpointBase;
     this.#maxConnections = opts.maxConnections ?? DEFAULT_MAX_CONNECTIONS;
+    this.#maxPendingHandshakes = opts.maxPendingHandshakes ?? DEFAULT_MAX_PENDING_HANDSHAKES;
     this.#handshakeTimeoutMs = opts.handshakeTimeoutMs ?? DEFAULT_HANDSHAKE_TIMEOUT_MS;
     this.#authFailureDelayMs = opts.authFailureDelayMs ?? DEFAULT_AUTH_FAILURE_DELAY_MS;
     this.#clock = opts.clock ?? Date.now;
     this.#queue = new FifoQueue(opts.maxQueueDepth ?? DEFAULT_MAX_QUEUE_DEPTH);
+    this.#factChainHead = opts.factChainHead ?? null;
+    this.#verifyFactChain = opts.verifyFactChain ?? null;
   }
 
   get connectionCount(): number {
@@ -541,6 +670,27 @@ export class DaemonServer {
 
   get endpoint(): string | null {
     return this.#endpoint;
+  }
+
+  /** daemon-connection-slot-exhaustion fix: how many currently-open sockets have
+   *  NOT yet completed the handshake (exposed for tests; also read by `#onConnection`). */
+  get pendingHandshakeCount(): number {
+    return this.#pendingHandshakeCount();
+  }
+
+  /** socket-error-swallowed fix: count of post-handshake socket 'error' events observed. */
+  get socketErrorCount(): number {
+    return this.#socketErrorCount;
+  }
+
+  #authenticatedConnectionCount(): number {
+    let n = 0;
+    for (const c of this.#connections.values()) if (c.authenticated) n++;
+    return n;
+  }
+
+  #pendingHandshakeCount(): number {
+    return this.#connections.size - this.#authenticatedConnectionCount();
   }
 
   /** R6: bind + listen. Stale-socket recovery (POSIX) + owner-token provisioning (R1/R9). */
@@ -560,22 +710,49 @@ export class DaemonServer {
       });
     });
     this.#endpoint = endpoint;
+    this.#startedAtMs = this.#clock();
     return { endpoint };
   }
 
   /** R6: graceful shutdown — stop accepting, drain the queue, close connections, mark the chain. */
   async stop(opts?: { clean?: boolean }): Promise<void> {
     this.#shuttingDown = true;
+    // zero-structured-logging fix: an unconditional shutdown event (previously
+    // this event category only ever appeared as a side effect of the marker
+    // WRITE failing — a clean shutdown left no structured trace at all).
+    daemonLog({
+      event: "daemon_shutdown",
+      level: "info",
+      clean: opts?.clean ?? true,
+      connectionCount: this.#connections.size,
+    });
+    // shutdown-close-deadlock fix (found while verifying the
+    // raw-error-message-passthrough fix's own test — a REAL hang, reproduced
+    // reliably against the actual `DaemonServer`/named-pipe transport, not a
+    // hypothetical, both under vitest and as a standalone compiled script):
+    // `net.Server#close`'s callback fires ONLY once every EXISTING connection
+    // has fully closed — it does NOT itself close them, and on this
+    // platform's named-pipe transport a socket can be left forever stuck
+    // half-open (see `#allSockets`'s doc) rather than ever emitting 'close' on
+    // its own. The previous shape here ALSO `await`ed `close()`'s promise
+    // BEFORE ever touching a single connection, which alone could hang
+    // forever with any client still connected. Both are fixed: `close()`
+    // still stops ACCEPTING new connections immediately and synchronously
+    // (R6's "stop accepting" happens right here, unchanged); the AWAIT of its
+    // connection-drain completion is deferred to AFTER this method has
+    // FORCEFULLY destroyed EVERY socket it has ever accepted (`#allSockets`
+    // — tracked and pending alike, not only the ones promoted into
+    // `#connections`).
     const server = this.#server;
-    if (server !== null) {
-      await new Promise<void>((resolve) => server.close(() => resolve()));
-    }
+    const closed =
+      server !== null ? new Promise<void>((resolve) => server.close(() => resolve())) : Promise.resolve();
     await this.#queue.whenDrained();
-    for (const conn of this.#connections.values()) {
-      this.#endSocketSafely(conn.socket);
+    for (const socket of [...this.#allSockets]) {
+      this.#destroySocketSafely(socket);
     }
     this.#connections.clear();
     this.#fingerprintToConnIds.clear();
+    await closed;
     // daemon-auditchain-write-crashes-process fix: a failed shutdown-marker
     // write must never prevent the CALLER (cli.ts) from reaching its own
     // cleanup (`auditChain.close()`, `memory.close()`) — before this fix, a
@@ -595,11 +772,45 @@ export class DaemonServer {
   // ---- connection lifecycle ------------------------------------------------
 
   #onConnection(socket: net.Socket): void {
+    // shutdown-close-deadlock fix: track EVERY accepted socket from this
+    // instant, regardless of what happens next (rejected, authenticated, or
+    // never authenticated) — see `#allSockets`'s doc.
+    this.#allSockets.add(socket);
+    socket.once("close", () => this.#allSockets.delete(socket));
+
     if (this.#shuttingDown) {
       socket.destroy();
       return;
     }
-    if (this.#connections.size >= this.#maxConnections) {
+    // daemon-connection-slot-exhaustion fix: TWO SEPARATE ceilings. The
+    // AUTHENTICATED count (never drawn down by a silent/unauthenticated
+    // socket) is checked against `#maxConnections` — the reservation a
+    // token-holding caller is guaranteed. A SEPARATE, smaller
+    // `#maxPendingHandshakes` bounds sockets that haven't authenticated YET,
+    // so an unauthenticated flood can exhaust only its own small pool, never
+    // the authenticated reservation.
+    const authenticatedCount = this.#authenticatedConnectionCount();
+    if (authenticatedCount >= this.#maxConnections) {
+      daemonLog({
+        event: "connection_rejected",
+        level: "warn",
+        reason: "CONNECTION_CAP",
+        authenticatedCount,
+        maxConnections: this.#maxConnections,
+      });
+      this.#writeLine(socket, authErr(DAEMON_ERR_CONNECTION_CAP));
+      socket.end();
+      return;
+    }
+    const pendingCount = this.#connections.size - authenticatedCount;
+    if (pendingCount >= this.#maxPendingHandshakes) {
+      daemonLog({
+        event: "connection_rejected",
+        level: "warn",
+        reason: "PENDING_HANDSHAKE_CAP",
+        pendingCount,
+        maxPendingHandshakes: this.#maxPendingHandshakes,
+      });
       this.#writeLine(socket, authErr(DAEMON_ERR_CONNECTION_CAP));
       socket.end();
       return;
@@ -625,8 +836,20 @@ export class DaemonServer {
 
     socket.on("data", (chunk: Buffer) => this.#onData(state, chunk));
     socket.on("close", () => this.#onClose(state));
-    socket.on("error", () => {
-      /* the "close" handler performs cleanup; nothing else to do here */
+    socket.on("error", (err: Error) => {
+      // socket-error-swallowed fix: previously discarded entirely (no log, no
+      // counter) — the "close" handler still performs cleanup (a socket
+      // 'error' is always followed by 'close' in `node:net`), but an operator
+      // now has a structured trace + a live counter for post-handshake socket
+      // errors (ECONNRESET, EPIPE, ...) instead of total silence.
+      this.#socketErrorCount++;
+      daemonLog({
+        event: "socket_error",
+        level: "warn",
+        message: err.message,
+        resolvedSourceId: state.sourceId !== null ? String(state.sourceId) : undefined,
+        fingerprint: state.fingerprint ?? undefined,
+      });
     });
   }
 
@@ -701,11 +924,48 @@ export class DaemonServer {
       return;
     }
 
+    // no-health-status-surface fix: lightly-authenticated (any grade), and
+    // dispatched OUTSIDE the FIFO queue — see STATUS_VERBS's doc comment.
+    if (isStatusVerb(method)) {
+      this.#dispatchStatusVerb(state, id);
+      return;
+    }
+
     if (isAdminVerb(method)) {
       this.#dispatchAdminVerb(state, id, method, (req.params ?? {}) as Record<string, unknown>);
       return;
     }
     this.#dispatchMemoryCall(state, id, method, req.params);
+  }
+
+  // ---- status / health (lightly-authenticated) ------------------------------
+
+  #dispatchStatusVerb(state: ConnectionState, id: number): void {
+    const now = this.#clock();
+    const uptimeMs = this.#startedAtMs !== null ? Math.max(0, now - this.#startedAtMs) : 0;
+    let factChainHead: FactChainHead | null = null;
+    if (this.#factChainHead !== null) {
+      try {
+        factChainHead = this.#factChainHead();
+      } catch (err) {
+        daemonLog({
+          event: "status_fact_chain_head_failed",
+          level: "warn",
+          message: err instanceof Error ? err.message : String(err),
+        });
+        factChainHead = null;
+      }
+    }
+    this.#writeLine(
+      state.socket,
+      envOk(id, {
+        connectionCount: this.#connections.size,
+        queueDepth: this.#queue.depth,
+        uptimeMs,
+        daemonChainHead: this.#auditChain.chainHead(),
+        factChainHead,
+      }),
+    );
   }
 
   // ---- handshake (H1) -------------------------------------------------------
@@ -794,6 +1054,18 @@ export class DaemonServer {
     state.fingerprint = record.fingerprint;
     this.#trackFingerprint(record.fingerprint, state.id);
 
+    // zero-structured-logging fix: the "connect" category — a successful
+    // handshake, structurally distinct from the CONNECTION_ACCEPTED audit-
+    // chain record above (that is the tamper-evident receipt; this is the
+    // operator-facing stderr trace an operator can grep/tail live).
+    daemonLog({
+      event: "connection_authenticated",
+      level: "info",
+      fingerprint: record.fingerprint,
+      resolvedSourceId: String(ref.sourceId),
+      grade: record.grade,
+    });
+
     this.#writeLine(state.socket, authOk(String(ref.sourceId)));
   }
 
@@ -808,6 +1080,18 @@ export class DaemonServer {
       clearTimeout(state.handshakeTimer);
       state.handshakeTimer = null;
     }
+    // zero-structured-logging fix: the "reject"/"auth-fail" category —
+    // UNCONDITIONAL (previously a log line only ever appeared as a side effect
+    // of the AUTH_FAILURE audit-chain WRITE itself failing, below; an ordinary
+    // rejected handshake left no operator-visible trace at all).
+    // fingerprint-not-raw-token: only ever a sha256 fingerprint here, never
+    // `msg.token` (the raw bearer value never reaches this method).
+    daemonLog({
+      event: "handshake_rejected",
+      level: "warn",
+      reason,
+      fingerprint,
+    });
     // daemon-auditchain-write-crashes-process fix: never let a broken audit
     // chain block delivering the (already-decided) failure response — this is
     // already a rejection path, so there's nothing further to fail closed on.
@@ -854,6 +1138,13 @@ export class DaemonServer {
     // approve/adjudicate/ratify) — checked BEFORE enqueueing, so a rejected
     // call never even occupies a FIFO slot.
     if (isTrustMutatingVerb(method) && state.grade !== AnchorClass.OWNER) {
+      daemonLog({
+        event: "trust_mutating_verb_forbidden",
+        level: "warn",
+        method,
+        resolvedSourceId: state.sourceId !== null ? String(state.sourceId) : undefined,
+        fingerprint: state.fingerprint ?? undefined,
+      });
       this.#writeLine(
         state.socket,
         envErr(
@@ -864,29 +1155,48 @@ export class DaemonServer {
       );
       return;
     }
-    this.#enqueue(state, () => {
+    this.#enqueue(state, id, () => {
       try {
         const result = handler(this.#memory, params, state.sourceId!);
         this.#writeLine(state.socket, envOk(id, result));
       } catch (err) {
         const code = err instanceof AnchorValidationError ? DAEMON_ERR_INVALID_ANCHOR : DAEMON_ERR_INTERNAL;
-        this.#writeLine(state.socket, envErr(id, code, err instanceof Error ? err.message : String(err)));
+        if (code === DAEMON_ERR_INTERNAL) {
+          // zero-structured-logging / raw-error-message-passthrough fixes: a
+          // failing data verb previously wrote the error ONLY back to the
+          // calling socket, with no log line anywhere (audit finding 2's
+          // evidence) and no vetting of the message forwarded to the client.
+          daemonLog({
+            event: "memory_call_failed",
+            level: "error",
+            method,
+            message: err instanceof Error ? err.message : String(err),
+          });
+        }
+        this.#writeLine(state.socket, envErr(id, code, safeErrorMessage(err)));
       }
     });
   }
 
   #dispatchAdminVerb(state: ConnectionState, id: number, method: string, params: Record<string, unknown>): void {
     if (state.grade !== AnchorClass.OWNER) {
+      daemonLog({
+        event: "admin_verb_forbidden",
+        level: "warn",
+        method,
+        resolvedSourceId: state.sourceId !== null ? String(state.sourceId) : undefined,
+        fingerprint: state.fingerprint ?? undefined,
+      });
       this.#writeLine(
         state.socket,
         envErr(id, DAEMON_ERR_ADMIN_FORBIDDEN, "Admin verbs require an OWNER-grade connection."),
       );
       return;
     }
-    this.#enqueue(state, () => this.#executeAdminVerb(state, id, method, params));
+    this.#enqueue(state, id, () => this.#executeAdminVerb(state, id, method, params));
   }
 
-  #enqueue(state: ConnectionState, run: () => void): void {
+  #enqueue(state: ConnectionState, requestId: number, run: () => void): void {
     try {
       this.#queue.enqueue(state.id, () => {
         run();
@@ -894,8 +1204,13 @@ export class DaemonServer {
       });
     } catch (err) {
       if (err instanceof FifoBackpressureError) {
-        // H6: typed backpressure — ONLY the submitting connection is told.
-        this.#writeLine(state.socket, envErr(-1, DAEMON_ERR_BACKPRESSURE, err.message));
+        // H6/fifo-backpressure-id-loss fix: echo the REQUEST's own wire `id`
+        // (not a hardcoded -1, which the client's `#nextId` sequence never
+        // issues) so the submitting connection's pending promise for THIS
+        // call resolves instead of silently timing out into a slow, ambiguous
+        // UNKNOWN outcome — see daemon/client.ts's `#handleResponseLine`,
+        // which drops any response whose `id` has no matching pending entry.
+        this.#writeLine(state.socket, envErr(requestId, DAEMON_ERR_BACKPRESSURE, err.message));
         return;
       }
       throw err;
@@ -911,6 +1226,17 @@ export class DaemonServer {
 
   #executeAdminVerb(state: ConnectionState, id: number, method: string, params: Record<string, unknown>): void {
     const actorSourceId = String(state.sourceId!);
+    // zero-structured-logging fix: the "admin-verb" category — every OWNER-
+    // authorized admin-verb INVOCATION (success or failure decided below),
+    // not only a failure. Never the raw token — `actorSourceId`/`fingerprint`
+    // only.
+    daemonLog({
+      event: "admin_verb_invoked",
+      level: "info",
+      verb: method,
+      resolvedSourceId: actorSourceId,
+      fingerprint: state.fingerprint ?? undefined,
+    });
     // daemon-auditchain-write-crashes-process fix: every branch below used to
     // call `#auditChain.record*` completely unguarded — a throw there (e.g. a
     // disk-full/EACCES/corrupt-chain write) propagated straight out of the
@@ -992,19 +1318,47 @@ export class DaemonServer {
           this.#writeLine(state.socket, envOk(id, { ok: true }));
           return;
         }
+        case "verifyChains": {
+          // verifychain-never-invoked-by-product fix: an on-demand escape
+          // hatch alongside the mandatory startup check (`daemon/cli.ts`) —
+          // self-verifies BOTH checksum chains without an operator having to
+          // know to script a call to `verifyChain()` themselves.
+          const daemonResult = this.#auditChain.verifyChain();
+          let factResult: FactChainVerification | null = null;
+          if (this.#verifyFactChain !== null) {
+            try {
+              factResult = this.#verifyFactChain();
+            } catch (err) {
+              daemonLog({
+                event: "verify_chains_fact_check_failed",
+                level: "error",
+                message: err instanceof Error ? err.message : String(err),
+              });
+              factResult = null;
+            }
+          }
+          this.#auditChain.recordAdminVerb(
+            {
+              verb: "verifyChains",
+              actorSourceId,
+              detail: `daemon:${String(daemonResult.ok)},fact:${factResult === null ? "unavailable" : String(factResult.ok)}`,
+            },
+            this.#clock(),
+          );
+          this.#writeLine(state.socket, envOk(id, { daemonChain: daemonResult, factChain: factResult }));
+          return;
+        }
         default:
           this.#writeLine(state.socket, envErr(id, DAEMON_ERR_METHOD_NOT_FOUND, `Unknown admin verb: ${method}`));
       }
     } catch (err) {
       daemonLog({
         event: "admin_verb_failed",
+        level: "error",
         method,
         message: err instanceof Error ? err.message : String(err),
       });
-      this.#writeLine(
-        state.socket,
-        envErr(id, DAEMON_ERR_INTERNAL, err instanceof Error ? err.message : String(err)),
-      );
+      this.#writeLine(state.socket, envErr(id, DAEMON_ERR_INTERNAL, safeErrorMessage(err)));
     }
   }
 
@@ -1043,6 +1397,28 @@ export class DaemonServer {
   #endSocketSafely(socket: net.Socket): void {
     try {
       socket.end();
+    } catch {
+      // best-effort
+    }
+  }
+
+  /**
+   * shutdown-close-deadlock fix: a FORCEFUL close, used only by `stop()`.
+   * `#endSocketSafely`'s graceful `socket.end()` depends on both sides
+   * completing a FIN-equivalent exchange — reliably reproduced (against the
+   * REAL `net.Server`/named-pipe transport, not a mock) to hang INDEFINITELY
+   * when the peer already vanished (e.g. a client that itself called
+   * `.destroy()`), leaving the handle "active" forever and `net.Server#close`'s
+   * callback (which waits for every connection to fully end) never firing —
+   * so `stop()` could hang the whole daemon shutdown forever. At shutdown
+   * time there is nothing left to gracefully flush (the process is going
+   * away), so a forceful `.destroy()` — which tears down the OS handle
+   * immediately regardless of the peer's state — is the correct, safe choice
+   * here specifically.
+   */
+  #destroySocketSafely(socket: net.Socket): void {
+    try {
+      socket.destroy();
     } catch {
       // best-effort
     }

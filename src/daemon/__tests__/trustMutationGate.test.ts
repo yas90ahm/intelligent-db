@@ -19,7 +19,7 @@
  *       a cheap class name is rejected (`INVALID_ANCHOR`), even from OWNER.
  */
 
-import { describe, it, expect, afterEach } from "vitest";
+import { describe, it, expect, afterEach, vi } from "vitest";
 import * as net from "node:net";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -115,6 +115,36 @@ class LineReader {
 
   async nextJson(timeoutMs?: number): Promise<any> {
     return JSON.parse(await this.next(timeoutMs));
+  }
+}
+
+/**
+ * raw-error-message-passthrough fix companion: the CLIENT-facing message for
+ * an unrecognized internal error is now a fixed generic string (never the raw
+ * engine message) — see `server.ts`'s `safeErrorMessage`. The real message
+ * still reaches an operator via the structured `daemonLog` stderr line this
+ * lane's `zero-structured-logging` fix added (`event: "memory_call_failed"`).
+ * This helper captures those JSON lines during `fn()` so a test can assert on
+ * the REAL underlying error without requiring it to leak to the wire.
+ */
+async function captureDaemonLogs<T>(fn: () => Promise<T>): Promise<{ result: T; lines: unknown[] }> {
+  const spy = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+  try {
+    const result = await fn();
+    const lines = spy.mock.calls
+      .map((c) => String(c[0]))
+      .filter((s) => s.trim().length > 0)
+      .map((s) => {
+        try {
+          return JSON.parse(s) as unknown;
+        } catch {
+          return null;
+        }
+      })
+      .filter((v): v is unknown => v !== null);
+    return { result, lines };
+  } finally {
+    spy.mockRestore();
   }
 }
 
@@ -248,16 +278,30 @@ describe("DaemonServer: trust-mutating verb authorization (daemon-unauthorized-t
 
   it("disown: non-OWNER rejected with INSUFFICIENT_GRADE; OWNER call reaches the engine", async () => {
     harness = await setupServer();
-    const { lowResp, ownerResp, ownerSock, lowSock } = await callAsBothGrades(harness, "disown", {
-      sourceId: "src:daemon-trustgate-disown-target",
-    });
+    // raw-error-message-passthrough fix: the CLIENT no longer sees the raw
+    // engine message (it is not an allow-listed typed error) — proof that the
+    // OWNER call genuinely reached `memory.disown` (a business-logic error,
+    // never INSUFFICIENT_GRADE) now comes from the structured `daemonLog` line
+    // this lane's zero-structured-logging fix emits alongside the sanitized
+    // client response.
+    const { result, lines } = await captureDaemonLogs(() =>
+      callAsBothGrades(harness!, "disown", { sourceId: "src:daemon-trustgate-disown-target" }),
+    );
+    const { lowResp, ownerResp, ownerSock, lowSock } = result;
 
     expect(lowResp.ok).toBe(false);
     expect(lowResp.error.code).toBe(DAEMON_ERR_INSUFFICIENT_GRADE);
 
     expect(ownerResp.ok).toBe(false);
     expect(ownerResp.error.code).not.toBe(DAEMON_ERR_INSUFFICIENT_GRADE);
-    expect(String(ownerResp.error.message)).toMatch(/reputation ledger/i);
+    expect(String(ownerResp.error.message)).not.toMatch(/reputation ledger/i);
+
+    const failedLog = lines.find(
+      (l) => (l as { event?: string }).event === "memory_call_failed",
+    ) as { method?: string; message?: string } | undefined;
+    expect(failedLog).toBeDefined();
+    expect(failedLog!.method).toBe("disown");
+    expect(failedLog!.message).toMatch(/reputation ledger/i);
 
     ownerSock.destroy();
     lowSock.destroy();
@@ -265,17 +309,27 @@ describe("DaemonServer: trust-mutating verb authorization (daemon-unauthorized-t
 
   it("approve: non-OWNER rejected with INSUFFICIENT_GRADE; OWNER call reaches the engine", async () => {
     harness = await setupServer();
-    const { lowResp, ownerResp, ownerSock, lowSock } = await callAsBothGrades(harness, "approve", {
-      contradictionSetId: "csid:daemon-trustgate-nonexistent",
-      winnerStrandId: "strand:none",
-    });
+    const { result, lines } = await captureDaemonLogs(() =>
+      callAsBothGrades(harness!, "approve", {
+        contradictionSetId: "csid:daemon-trustgate-nonexistent",
+        winnerStrandId: "strand:none",
+      }),
+    );
+    const { lowResp, ownerResp, ownerSock, lowSock } = result;
 
     expect(lowResp.ok).toBe(false);
     expect(lowResp.error.code).toBe(DAEMON_ERR_INSUFFICIENT_GRADE);
 
     expect(ownerResp.ok).toBe(false);
     expect(ownerResp.error.code).not.toBe(DAEMON_ERR_INSUFFICIENT_GRADE);
-    expect(String(ownerResp.error.message)).toMatch(/no open dispute/i);
+    expect(String(ownerResp.error.message)).not.toMatch(/no open dispute/i);
+
+    const failedLog = lines.find(
+      (l) => (l as { event?: string }).event === "memory_call_failed",
+    ) as { method?: string; message?: string } | undefined;
+    expect(failedLog).toBeDefined();
+    expect(failedLog!.method).toBe("approve");
+    expect(failedLog!.message).toMatch(/no open dispute/i);
 
     ownerSock.destroy();
     lowSock.destroy();

@@ -16,7 +16,7 @@
  * process survives and the affected caller gets a typed error.
  */
 
-import { describe, it, expect, afterEach } from "vitest";
+import { describe, it, expect, afterEach, vi } from "vitest";
 import * as net from "node:net";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -291,11 +291,23 @@ describe("DaemonServer: a throwing audit-chain write never crashes the process (
       await reader.nextJson();
 
       // reloadTokens' own logic succeeds; only the audit write throws.
+      // raw-error-message-passthrough fix: the CLIENT-facing message is now a
+      // fixed generic string (never the raw internal error) — captured via
+      // the structured `daemonLog` stderr line instead (this lane's
+      // zero-structured-logging fix's "admin_verb_failed" event), which still
+      // carries the real underlying message for an operator.
+      const stderrSpy = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
       socket.write(JSON.stringify({ id: 1, method: "reloadTokens", params: {} }) + "\n");
       const first = await reader.nextJson();
       expect(first.ok).toBe(false);
       expect(first.error.code).toBe("INTERNAL");
-      expect(String(first.error.message)).toMatch(/simulated audit-chain write failure/i);
+      expect(String(first.error.message)).not.toMatch(/simulated audit-chain write failure/i);
+      const loggedLines = stderrSpy.mock.calls
+        .map((c) => String(c[0]))
+        .filter((s) => s.includes("admin_verb_failed"));
+      expect(loggedLines.length).toBeGreaterThan(0);
+      expect(loggedLines.some((l) => /simulated audit-chain write failure/i.test(l))).toBe(true);
+      stderrSpy.mockRestore();
 
       // Fire a SECOND admin verb right after: proves the FIFO queue was not
       // wedged by the first failure (the FifoQueue#drain fix) — the pre-fix

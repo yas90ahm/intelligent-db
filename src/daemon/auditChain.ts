@@ -83,7 +83,14 @@ export interface RevocationPayload {
 
 /** R3: an admin verb was invoked over an authenticated OWNER-grade connection. */
 export interface AdminVerbPayload {
-  readonly verb: "issueToken" | "revokeToken" | "revokeAllTokens" | "reloadTokens";
+  readonly verb:
+    | "issueToken"
+    | "revokeToken"
+    | "revokeAllTokens"
+    | "reloadTokens"
+    // verifychain-never-invoked-by-product fix: the on-demand chain-verification
+    // admin verb (`server.ts`'s `#executeAdminVerb`, "verifyChains" case).
+    | "verifyChains";
   readonly actorSourceId: string;
   readonly at: number;
   /** Optional detail — e.g. the affected fingerprint. NEVER a raw token. */
