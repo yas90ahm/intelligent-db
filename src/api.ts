@@ -97,6 +97,14 @@ import type {
   HighImpactContext,
   PendingRatificationReason,
 } from "./forgetting/consolidation.js";
+import { evaluateEviction, DEFAULT_FORGETTING_CONFIG } from "./forgetting/tiers.js";
+import type {
+  EvictionEvidence,
+  EvictionGate,
+  ForgettingConfig,
+  NeighborView as EvictionNeighborView,
+} from "./forgetting/tiers.js";
+import type { ReasonCode } from "./core/types.js";
 
 import type {
   PendingLedger,
@@ -688,6 +696,38 @@ export interface IntelligentDb {
   disown(sourceId: SourceId, opts?: DisownOptions): DownstreamDisownResult;
 
   /**
+   * RUN THE FORGETTING MAINTENANCE SWEEP (`forgetting/tiers.ts`'s `evaluateEviction`
+   * / `nextTierDown`, wired at last — see KNOWN LIMITATIONS' `forgetting-never-wired`).
+   * An EXPLICIT, caller-invoked maintenance operation (mirroring `disown()`'s
+   * downstream sweep pattern) — it is NEVER run automatically on a write, so default
+   * behavior (every strand minted WARM, per {@link writeFact}) is unchanged unless a
+   * caller actually schedules this.
+   *
+   * For each targeted strand (every strand via `store.allStrands()`, or exactly
+   * {@link ForgettingOptions.strandIds} when supplied):
+   *   - HOT/WARM strands step down on PRESSURE alone (`decayPressure`), no gates;
+   *   - a COLD strand crosses to ARCHIVE only if it clears ALL SIX fail-closed
+   *     eviction gates, whose evidence this method assembles for REAL from the
+   *     wired identity layer (never self-computed): the strand's stamp
+   *     (`identity.stampFor` off its primary provenance root), its
+   *     TEMPORALLY-DISCOUNTED independent-source count (`identity.independentRootCount`
+   *     over its OWN provenance — invariant 2), and the OUTRANKS winner's fact_state
+   *     (resolved by following `outranked_by`) — a strand missing/lacking any of
+   *     these is KEPT, never evicted on withheld evidence;
+   *   - ARCHIVE is the immortal fixed point (untouched).
+   *
+   * Movement is DOWNWARD ONLY and NEVER deletion (`putStrand` with a lowered
+   * `tier` — the archive stub's content hash + provenance stay intact). Every
+   * move stamps `Strand.last_tier_reason`. Runs inside ONE transaction over the
+   * shared handle (a compound multi-strand write, same discipline as `disown`).
+   *
+   * @returns a {@link ForgettingResult} receipt: every strand evaluated, every move
+   *          made (with its reason), and every strand KEPT (with the gates that
+   *          failed it) — fully auditable, mirroring `DownstreamDisownResult`.
+   */
+  runForgetting(opts?: ForgettingOptions): ForgettingResult;
+
+  /**
    * The OPEN deferred disputes awaiting a human/second-admin decision (the doorbell
    * queue), reputation-ranked for a reviewer. Requires a ratification ledger to be
    * wired; returns `[]` otherwise.
@@ -959,6 +999,46 @@ export interface DisownOptions {
   readonly decisiveMargin?: number;
   /** Witness time of the disown (defaults to now). */
   readonly at?: EpochMs;
+}
+
+/**
+ * Options for {@link IntelligentDb.runForgetting}. Omitting everything sweeps EVERY
+ * strand in the store (`store.allStrands()`) at `now()` under the default forgetting
+ * config — the maintenance-tick default a scheduler would call unattended.
+ */
+export interface ForgettingOptions {
+  /** Witness time the sweep evaluates pressure/gates against (defaults to now). */
+  readonly at?: EpochMs;
+  /** Forgetting tunables (defaults to {@link DEFAULT_FORGETTING_CONFIG}). */
+  readonly cfg?: ForgettingConfig;
+  /** Restrict the sweep to exactly these strand ids; omitted = every strand. */
+  readonly strandIds?: readonly StrandId[];
+}
+
+/** One strand actually MOVED down a tier by {@link IntelligentDb.runForgetting}. */
+export interface ForgettingMove {
+  readonly strandId: StrandId;
+  readonly from: Tier;
+  readonly to: Tier;
+  readonly reason: ReasonCode;
+}
+
+/** One strand KEPT (not moved) by {@link IntelligentDb.runForgetting}, with why. */
+export interface ForgettingKept {
+  readonly strandId: StrandId;
+  readonly tier: Tier;
+  /** Empty for a HOT/WARM strand under-pressure (gates were never consulted). */
+  readonly failedGates: readonly EvictionGate[];
+}
+
+/** The full, auditable receipt of one {@link IntelligentDb.runForgetting} sweep. */
+export interface ForgettingResult {
+  /** Total strands evaluated (the target set size). */
+  readonly evaluated: number;
+  /** Every strand actually moved down a tier, in evaluation order. */
+  readonly moved: readonly ForgettingMove[];
+  /** Every strand evaluated but KEPT at its current tier, in evaluation order. */
+  readonly kept: readonly ForgettingKept[];
 }
 
 // ---------------------------------------------------------------------------
@@ -2677,6 +2757,127 @@ class IntelligentDbImpl implements IntelligentDb {
       undefined,
       hardening,
     );
+  }
+
+  // -------------------------------------------------------------------------
+  // runForgetting — the eviction/tier-movement maintenance sweep (wires
+  // forgetting/tiers.ts's evaluateEviction/nextTierDown; see the interface doc)
+  // -------------------------------------------------------------------------
+
+  /**
+   * Resolve the {@link EvictionEvidence} bundle for one strand from the wired
+   * identity layer — NEVER self-computed (CLAUDE.md invariant 2: "the web cannot
+   * compute this about itself"). A strand with no resolvable provenance root
+   * (`sourceId` null on every root) gets a `null` stamp, so
+   * FRESH_INDEPENDENCE_STAMP fails closed. `independentSourceCount` is always the
+   * identity layer's OWN count over the strand's OWN provenance (never
+   * self-computed here). `outrankerState` follows `strand.outranked_by` to the
+   * winning strand's CURRENT `fact_state`; a dangling edge or unresolvable winner
+   * leaves it `null` (fail-closed, matching NOT_OUTRANKED_SIDE's allowlist).
+   */
+  #evictionEvidenceFor(strand: Strand): EvictionEvidence {
+    let primarySourceId: SourceId | null = null;
+    for (const root of strand.provenance) {
+      if (root.sourceId !== null) {
+        primarySourceId = root.sourceId;
+        break;
+      }
+    }
+    const stamp = primarySourceId !== null ? this.#identity.stampFor(primarySourceId) : null;
+    const independentSourceCount = this.#identity.independentRootCount(strand.provenance);
+
+    let outrankerState: FactState | null = null;
+    if (strand.outranked_by !== null) {
+      const edge = this.#store.getEdge(strand.outranked_by);
+      const winner = edge !== null ? this.#store.getStrand(edge.from) : null;
+      outrankerState = winner !== null ? winner.fact_state : null;
+    }
+
+    return { stamp, independentSourceCount, outrankerState };
+  }
+
+  /** True iff a CONFIRMED CROSS_WEB_BRIDGE edge connects `a` and `b` (either direction). */
+  #isBridgeBetween(a: StrandId, b: StrandId): boolean {
+    const isBridge = (e: Edge): boolean => e.edgeType === EdgeType.CROSS_WEB_BRIDGE;
+    for (const e of this.#store.outEdges(a)) if (e.to === b && isBridge(e)) return true;
+    for (const e of this.#store.inEdges(a)) if (e.from === b && isBridge(e)) return true;
+    return false;
+  }
+
+  /**
+   * The LOW_UNIQUE_VALUE gate's candidate neighbor pool for `strand`: every OTHER
+   * strand sharing its `entity` — the SAME connectivity notion `writeFact`'s
+   * SHARED_ENTITY attachment and the activation walk already use ("threads connect
+   * only on shared entity"). A narrower candidate pool only ever RAISES the
+   * strand's computed unique value (biasing toward KEEP — the gate's own
+   * fail-closed direction), and the gate itself filters to
+   * OBSERVED+LIVE+class-disjoint+has-provenance qualifiers, so non-qualifying
+   * candidates here are simply inert.
+   */
+  #forgettingNeighborsOf(strand: Strand): EvictionNeighborView[] {
+    const out: EvictionNeighborView[] = [];
+    for (const n of this.#store.strandsByEntity(strand.entity)) {
+      if (n.id === strand.id) continue;
+      out.push({
+        id: n.id,
+        fact_state: n.fact_state,
+        origin: n.origin,
+        provenance: n.provenance,
+        description_value: n.description_value,
+        bridgesToSubject: this.#isBridgeBetween(strand.id, n.id),
+      });
+    }
+    return out;
+  }
+
+  runForgetting(opts?: ForgettingOptions): ForgettingResult {
+    const at = opts?.at ?? now();
+    const cfg = opts?.cfg ?? DEFAULT_FORGETTING_CONFIG;
+
+    // TARGET SET: every strand (the maintenance-tick default), or exactly the
+    // caller-supplied ids — mirroring `disown()`'s `allStrands()` full-scan
+    // (OFFLINE maintenance is exactly what that primitive is for).
+    const targets: Strand[] =
+      opts?.strandIds !== undefined
+        ? opts.strandIds
+            .map((id) => this.#store.getStrand(id))
+            .filter((s): s is Strand => s !== null)
+        : [...this.#store.allStrands()];
+
+    const moved: ForgettingMove[] = [];
+    const kept: ForgettingKept[] = [];
+
+    // ATOMIC: every tier move in this sweep commits (or rolls back) as ONE unit
+    // over the shared handle, the same discipline as `disown`/`adjudicate`/`approve`.
+    withTxn(this.#store, () => {
+      for (const strand of targets) {
+        if (strand.tier === Tier.ARCHIVE) continue; // immortal fixed point: untouched
+
+        const neighbors = this.#forgettingNeighborsOf(strand);
+        const evidence = this.#evictionEvidenceFor(strand);
+        const decision = evaluateEviction(strand, neighbors, evidence, at, cfg);
+
+        if (!decision.allowed) {
+          kept.push({
+            strandId: strand.id,
+            tier: strand.tier,
+            failedGates: decision.failedGates,
+          });
+          continue;
+        }
+
+        // DEMOTE-NEVER-DELETE: a tier move is just `putStrand` with a lowered
+        // `tier` (StrandStore.putStrand's own doc) — content_hash + provenance
+        // (the archive stub) are untouched.
+        const from = strand.tier;
+        strand.tier = decision.toTier;
+        strand.last_tier_reason = decision.reason;
+        this.#store.putStrand(strand);
+        moved.push({ strandId: strand.id, from, to: decision.toTier, reason: decision.reason });
+      }
+    });
+
+    return { evaluated: targets.length, moved, kept };
   }
 
   // -------------------------------------------------------------------------
