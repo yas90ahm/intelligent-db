@@ -43,8 +43,12 @@
  *    transitive closure lives in `ratification/disown.ts`.
  *  - {@link ReputationLedger.reverseCredit} / {@link applyCreditReversal}: the
  *    PRECISE per-event credit reversal — subtract EXACTLY the recorded `w` back out
- *    of `α` (clamped at the prior 1, never sub-prior). This is the exact-disown
- *    unwind the corroboration-event ledger drives.
+ *    of `α` (clamped at the prior 1, never sub-prior), AND set the NON-DECAYING
+ *    `corroborationDepth` floor to its exact recomputed value (the max recorded
+ *    depth over every OTHER, still-unreversed corroboration event for the same
+ *    beneficiary — supplied by the caller, since only the corroboration-event
+ *    ledger knows the survivors). This is the exact-disown unwind the
+ *    corroboration-event ledger drives.
  *
  * STACK NOTE: ESM + NodeNext (relative imports carry `.js`); `verbatimModuleSyntax`
  * (every type-only import uses `import type`); `exactOptionalPropertyTypes`. No
@@ -557,25 +561,50 @@ export function applyContradiction(
  * 1 so repeated/over-reversal can never drive `α` below the valid Beta pseudocount.
  * Does NOT bump `contradictedCount` (it is a precise undo, not a contradiction).
  *
- * M2 DEPTH-FLOOR UNWIND (the fix for the "exact reversal doesn't move the LCB"
- * defect): `lcbReadout`'s `alphaFloor = 1 + floorMass(corroborationDepth − scarBeta)`
- * PINS the effective α regardless of the live (reversed) `α` — so subtracting `w`
- * from `α` alone is a no-op on the READOUT whenever the source is well-corroborated
- * (`corroborationDepth >= floorDeadband`), even though the raw `α` genuinely moved.
+ * M2 DEPTH-FLOOR UNWIND (RE-AUDIT FIX, 2026-07-07 — supersedes the earlier
+ * proportional-subtraction attempt below): `lcbReadout`'s `alphaFloor = 1 +
+ * floorMass(corroborationDepth − scarBeta)` PINS the effective α regardless of the
+ * live (reversed) `α`, so the floor must ALSO be unwound or the readout never moves.
+ * The first fix (subtracting the SAME `w` from `corroborationDepth` that was
+ * subtracted from `α`) was ITSELF only partially correct: `α` is an ADDITIVE
+ * evidence mass (`w` per event, typically <= 1) while `corroborationDepth` is a
+ * `Math.max` over independent-root-count SNAPSHOTS (up to `MAX_EXACT_ROOTS`) — the
+ * two are not commensurable, so a single event can snapshot a LARGE depth (e.g. 10)
+ * while contributing only `w = 1` of fresh α, and subtracting `w` from depth barely
+ * moves a well-corroborated source's floor (independently re-derived by the re-audit
+ * from these exact source constants: depth 10 -> 9 moves the LCB from 0.7839 to only
+ * 0.7654). Worse, in the other direction, subtracting a FIXED `w` from the single
+ * shared `corroborationDepth` scalar can erode an UNRELATED, still-valid event's own
+ * depth contribution (two independent corroborations sharing one source's scalar
+ * floor).
+ *
+ * THE FIX: the caller (the disown sweep, which alone knows every OTHER surviving
+ * corroboration event for this beneficiary via the corroboration-event ledger's
+ * `eventsByBeneficiary`) supplies `newCorroborationDepth` — the beneficiary's TRUE
+ * recomputed floor: the max `corroborationDepthAtEvent` over every event that is
+ * NOT being reversed. This is provably `<= ` the current stored depth (a max over a
+ * SUBSET can only be smaller or equal), so it can only ever LOWER or preserve the
+ * floor, never raise it, and it leaves an untouched sibling event's own recorded
+ * depth fully intact (no collateral erosion). When `newCorroborationDepth` is
+ * omitted (e.g. a raw ledger-level call with no corroboration-event bookkeeping),
+ * the legacy proportional subtraction (`corroborationDepth - w`, floored at 0) is
+ * kept as a documented, less-precise fallback — never worse than doing nothing, but
+ * not claimed exact.
+ *
  * `craterState` (the DISOWNED source's own direct-seed crater, below) already knows
- * to wipe `corroborationDepth` to 0; this mirrors that pattern for the OTHER side of
- * a disown — a beneficiary's precise, per-event credit reversal — but PROPORTIONALLY
- * rather than a full wipe: `corroborationDepth` is reduced by the SAME exact mass `w`
- * being subtracted from `α` (floored at 0, never negative), so a reversal that undoes
- * `w` worth of earned depth also undoes `w` worth of the floor that depth pinned. A
- * beneficiary with MORE independently-earned depth than this one event contributed
- * keeps the remainder of its floor (never over-wiped by an unrelated reversal).
+ * to wipe `corroborationDepth` to 0 outright — that remains correct and untouched;
+ * this function is the OTHER side of a disown, a beneficiary's precise per-event
+ * credit reversal.
  *
  * @param state  the source's current state.
  * @param w      the exact `α`-mass to subtract (the recorded earned `w`).
  * @param repCap the source's reputation ceiling (for the refreshed readout).
  * @param now    witness time of this reversal.
  * @param params Beta-model coefficients (for decay + readout).
+ * @param newCorroborationDepth OPTIONAL: the exact recomputed `corroborationDepth`
+ *   this reversal should set (the max over every OTHER, still-unreversed
+ *   corroboration event's recorded depth for this beneficiary). When omitted, falls
+ *   back to the legacy `max(0, corroborationDepth - w)` proportional subtraction.
  * @returns a NEW state (pure; input untouched).
  */
 export function applyCreditReversal(
@@ -584,15 +613,19 @@ export function applyCreditReversal(
   repCap: Unit,
   now: EpochMs,
   params: ReputationParams = DEFAULT_REPUTATION_PARAMS,
+  newCorroborationDepth?: number,
 ): ReputationState {
   const decayed = decay(state, repCap, now, params);
   const d = Number.isFinite(w) ? w : 0;
   const alpha = Math.max(1, decayed.alpha - d);
-  // M2 — unwind the NON-DECAYING depth-floor mass this same reversal's `w` funded,
-  // proportional to the exact credit being reversed (never below 0). Without this,
-  // `lcbReadout`'s `alphaFloor` keeps pinning the readout to the pre-reversal LCB
-  // even though `alpha` genuinely dropped (see the doc comment above).
-  const corroborationDepth = Math.max(0, decayed.corroborationDepth - d);
+  // M2 — unwind the NON-DECAYING depth-floor mass this reversal funded. Prefer the
+  // caller-supplied EXACT recomputed floor (see the doc comment above); fall back to
+  // the legacy proportional subtraction only when the caller has no per-event depth
+  // bookkeeping to recompute from.
+  const corroborationDepth =
+    typeof newCorroborationDepth === "number" && Number.isFinite(newCorroborationDepth)
+      ? Math.max(0, newCorroborationDepth)
+      : Math.max(0, decayed.corroborationDepth - d);
   return withReadout(
     {
       sourceId: decayed.sourceId,
@@ -742,19 +775,28 @@ export interface ReputationLedger {
 
   /**
    * PRECISE per-event credit reversal: decay, then subtract EXACTLY `w` from `α`
-   * (`α ← max(1, α − w)`), AND unwind the same `w`-mass worth of the NON-DECAYING M2
-   * depth-floor (`corroborationDepth ← max(0, corroborationDepth − w)`) so the floor
-   * this reversal's earned depth pinned actually releases the readout — see
-   * {@link applyCreditReversal}'s doc comment for why the `α`-only subtract alone is
-   * a no-op on the LCB readout for a well-corroborated source. This is the
-   * exact-disown unwind the corroboration-event ledger drives — NOT the asymmetric
-   * {@link contradict}. Materializes a fresh prior-state source if unknown (a no-op
-   * from the prior). Does NOT bump `contradictedCount`.
+   * (`α ← max(1, α − w)`), AND unwind the NON-DECAYING M2 depth-floor this
+   * reversal's event funded — see {@link applyCreditReversal}'s doc comment for the
+   * full derivation of why a naive `w`-mass subtraction on `corroborationDepth` is
+   * NOT exact (α and depth are not commensurable) and why the caller must instead
+   * supply the beneficiary's true recomputed floor. This is the exact-disown unwind
+   * the corroboration-event ledger drives — NOT the asymmetric {@link contradict}.
+   * Materializes a fresh prior-state source if unknown (a no-op from the prior).
+   * Does NOT bump `contradictedCount`.
    *
    * @param delta the exact `α`-mass (the recorded `w`) to subtract.
+   * @param newCorroborationDepth OPTIONAL exact recomputed `corroborationDepth` (the
+   *   max recorded depth over every OTHER, still-unreversed corroboration event for
+   *   this beneficiary — see `disown.ts`'s corroboration-reversal step). Omitted ⇒
+   *   the legacy proportional-subtraction fallback (see {@link applyCreditReversal}).
    * @returns the source's resulting {@link ReputationState} after the reversal.
    */
-  reverseCredit(sourceId: SourceId, delta: number, now: EpochMs): ReputationState;
+  reverseCredit(
+    sourceId: SourceId,
+    delta: number,
+    now: EpochMs,
+    newCorroborationDepth?: number,
+  ): ReputationState;
 
   /**
    * Audit read: the raw {@link ReputationState} (α/β + audit counts) for a source, or
@@ -828,9 +870,21 @@ class InMemoryReputationLedger implements ReputationLedger {
     return next;
   }
 
-  reverseCredit(sourceId: SourceId, delta: number, now: EpochMs): ReputationState {
+  reverseCredit(
+    sourceId: SourceId,
+    delta: number,
+    now: EpochMs,
+    newCorroborationDepth?: number,
+  ): ReputationState {
     const cap = this.repCapOf(sourceId);
-    const next = applyCreditReversal(this.ensure(sourceId, now), delta, cap, now, this.params);
+    const next = applyCreditReversal(
+      this.ensure(sourceId, now),
+      delta,
+      cap,
+      now,
+      this.params,
+      newCorroborationDepth,
+    );
     this.book.set(sourceId, next);
     return next;
   }
@@ -1128,9 +1182,21 @@ class SqliteReputationLedgerImpl implements SqliteReputationLedger {
     return next;
   }
 
-  reverseCredit(sourceId: SourceId, delta: number, now: EpochMs): ReputationState {
+  reverseCredit(
+    sourceId: SourceId,
+    delta: number,
+    now: EpochMs,
+    newCorroborationDepth?: number,
+  ): ReputationState {
     const cap = this.repCapOf(sourceId);
-    const next = applyCreditReversal(this.#ensure(sourceId, now), delta, cap, now, this.params);
+    const next = applyCreditReversal(
+      this.#ensure(sourceId, now),
+      delta,
+      cap,
+      now,
+      this.params,
+      newCorroborationDepth,
+    );
     this.#write(next);
     return next;
   }

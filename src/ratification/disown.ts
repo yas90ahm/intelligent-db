@@ -279,16 +279,25 @@ function disownSentinelFor(sourceId: SourceId): StrandId {
  * THE MECHANISM (live): the credit's link to A's strand is RECORDED AT EARNING TIME.
  * A corroboration-driven reputation gain is recorded as an append-only event
  * `{ eventId, ratifiedStrandId, corroboratingStrandIds[], beneficiarySourceId,
- * reputationDelta, at }` carrying the EXACT applied delta (see
+ * reputationDelta, corroborationDepthAtEvent, at }` carrying the EXACT applied delta
+ * AND the raw MIS depth (`#R`) snapshot this event recorded (see
  * `reputation.ratifyWithCorroboration` / the `api.ratify` earning path). On disown,
  * {@link downstreamDisownSweep} looks up corroboration events whose
  * `corroboratingStrandIds` intersect the TAINTED CLOSURE (seed ∪ demoted-downstream,
  * `taintedStrandIds`) and, for each, calls `ledger.reverseCredit(beneficiarySourceId,
- * reputationDelta)` EXACTLY ONCE — bounded (a beneficiary with no matching event is
- * untouched), precise (exactly the recorded delta, clamped at floor 0), and idempotent
- * (each event reversed at most once across any number of sweeps, via the ledger's
- * `markReversed` guard). The intersection IS the F3 guard: coincidental independent
- * agreement (no recorded funding link into the closure) is never punished.
+ * reputationDelta, now, survivingDepth)` EXACTLY ONCE — bounded (a beneficiary with no
+ * matching event is untouched), precise (exactly the recorded delta on `α`, clamped at
+ * floor 0), and idempotent (each event reversed at most once across any number of
+ * sweeps, via the ledger's `markReversed` guard). `survivingDepth` is the max
+ * `corroborationDepthAtEvent` over every OTHER, still-unreversed event for the SAME
+ * beneficiary (`corrob.eventsByBeneficiary`) — the RE-AUDIT FIX (2026-07-07) that
+ * makes the non-decaying `corroborationDepth` floor unwind EXACTLY at every depth,
+ * not just the narrow depth=2 boundary a naive `w`-mass subtraction happened to move,
+ * and that leaves an untouched sibling corroboration's own depth-floor fully intact
+ * (no collateral erosion) — see `identity/reputation.ts`'s `applyCreditReversal` doc
+ * comment for the full numeric derivation. The intersection IS the F3 guard:
+ * coincidental independent agreement (no recorded funding link into the closure) is
+ * never punished.
  *
  * THE BOUNDARY (OD-7, the documented residual): this reverses laundering routed
  * through the DEMOTED DERIVATION closure ONLY. Re-observation laundering (which emits
@@ -756,7 +765,28 @@ export function downstreamDisownSweep(
     for (const ev of corrob.eventsIntersecting(taintedStrandIds)) {
       if (!corrob.markReversed(ev.eventId)) continue; // already reversed: skip
       const before = ledger.stateOf(ev.beneficiarySourceId);
-      const post = ledger.reverseCredit(ev.beneficiarySourceId, ev.reputationDelta, now);
+      // THE DEPTH-FLOOR FIX (re-audit HIGH finding): recompute the beneficiary's
+      // TRUE surviving `corroborationDepth` as the max recorded depth over every
+      // OTHER, still-unreversed event for the SAME beneficiary — never a naive `w`
+      // subtraction (see `applyCreditReversal`'s doc comment for the full
+      // derivation). `ev` is already marked reversed above, so `isReversed` already
+      // excludes it; this can only ever be <= the currently-stored depth (a max
+      // over a subset), so it never raises the floor, and an untouched sibling
+      // event's own recorded depth survives fully intact (no collateral erosion of
+      // an unrelated corroboration).
+      let survivingDepth = 0;
+      for (const other of corrob.eventsByBeneficiary(ev.beneficiarySourceId)) {
+        if (corrob.isReversed(other.eventId)) continue;
+        if (other.corroborationDepthAtEvent > survivingDepth) {
+          survivingDepth = other.corroborationDepthAtEvent;
+        }
+      }
+      const post = ledger.reverseCredit(
+        ev.beneficiarySourceId,
+        ev.reputationDelta,
+        now,
+        survivingDepth,
+      );
       reversedCorroborationEventIds.push(ev.eventId);
       // A1 — journal the exact credit reversal (refEventId = the corroboration eventId).
       emitMut(

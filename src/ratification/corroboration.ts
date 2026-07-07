@@ -68,6 +68,33 @@ export interface CorroborationEvent {
    * fidelity: the value written IS the α-mass that was added, no more, no less.)
    */
   readonly reputationDelta: number;
+  /**
+   * The MIS corroboration DEPTH (`#R` — the engine's independent-root count over the
+   * agreement set) recorded AT THIS EVENT, i.e. the `depth` argument this event's
+   * `reputation.ratify` call passed. NOT an increment/delta — the RAW snapshot value
+   * `#R` computed at earning time (`ReputationState.corroborationDepth` is stored
+   * MONOTONE-MAX over every such snapshot for the beneficiary, per
+   * `applyRatification`).
+   *
+   * WHY this must be recorded (closes the depth-floor-under-reversal defect): `α`
+   * (an additive evidence mass, `w` per event, typically <= 1) and
+   * `corroborationDepth` (a `Math.max` over independent-root-count SNAPSHOTS, up to
+   * `MAX_EXACT_ROOTS`) are NOT commensurable — one ratify call can snapshot a large
+   * depth (e.g. 10, because many OTHER independent agreeing strands already existed)
+   * while contributing only `w = 1` of fresh α. Subtracting the SAME `w` from both on
+   * reversal (the pre-fix behavior) barely moves a well-corroborated source's floor
+   * and, in the other direction, can erode an UNRELATED, still-valid event's depth
+   * contribution (both re-audit-caught defects). Recording the raw per-event depth
+   * lets a disown recompute the beneficiary's TRUE surviving floor as the max over
+   * every OTHER, still-unreversed event's recorded depth — see
+   * `disown.ts`'s corroboration-reversal step and
+   * {@link CorroborationLedger.eventsByBeneficiary}.
+   *
+   * Defaults to `0` for a legacy/hand-rolled event that never named a depth (a safe
+   * default: it never raises the recomputed floor, so an old event is inert for this
+   * purpose exactly as it was before this field existed).
+   */
+  readonly corroborationDepthAtEvent: number;
   /** Witness time the credit was earned. */
   readonly at: EpochMs;
 }
@@ -76,9 +103,16 @@ export interface CorroborationEvent {
  * The input to {@link CorroborationLedger.record}: a {@link CorroborationEvent}
  * whose `eventId` is OPTIONAL. When omitted, the ledger mints a deterministic
  * `corrob:<seq>` id from the append position; when supplied, it is taken verbatim.
+ * `corroborationDepthAtEvent` is also OPTIONAL on input (defaults to `0`, see the
+ * field doc) so every pre-existing caller that never named a depth keeps compiling
+ * and behaving byte-identically.
  */
-export type CorroborationEventInput = Omit<CorroborationEvent, "eventId"> & {
+export type CorroborationEventInput = Omit<
+  CorroborationEvent,
+  "eventId" | "corroborationDepthAtEvent"
+> & {
   readonly eventId?: string;
+  readonly corroborationDepthAtEvent?: number;
 };
 
 // ---------------------------------------------------------------------------
@@ -134,6 +168,16 @@ export interface CorroborationLedger {
   eventsInvolving(strandId: StrandId): readonly CorroborationEvent[];
 
   /**
+   * Every event whose `beneficiarySourceId` equals `sourceId`, in stable append
+   * order — the query a disown's precise credit reversal uses to recompute a
+   * beneficiary's TRUE surviving `corroborationDepth` floor (the max
+   * `corroborationDepthAtEvent` over every OTHER, still-unreversed event for the
+   * SAME beneficiary) once one of its events is reversed. O(matches) via a
+   * maintained beneficiary index, never a full `all()` scan.
+   */
+  eventsByBeneficiary(sourceId: SourceId): readonly CorroborationEvent[];
+
+  /**
    * Mark an event as REVERSED (its credit clawed back). Returns `true` the FIRST
    * time an event is marked, `false` on every subsequent call for the same id —
    * the idempotency guard the disown sweep uses so each event is reversed at most
@@ -162,6 +206,9 @@ class InMemoryCorroborationLedger implements CorroborationLedger {
   private readonly byCorroborator = new Map<StrandId, CorroborationEvent[]>();
   /** ratified StrandId -> the events it was ratified in (append order). */
   private readonly byRatified = new Map<StrandId, CorroborationEvent[]>();
+  /** beneficiarySourceId -> the events it earned (append order) — the index the
+   *  disown sweep's surviving-depth recompute reads (see `eventsByBeneficiary`). */
+  private readonly byBeneficiary = new Map<SourceId, CorroborationEvent[]>();
   /** eventId -> its append (chain) position, so a multi-bucket merge can restore
    *  the SAME stable append order the old full-chain scan produced. */
   private readonly posOf = new Map<string, number>();
@@ -178,6 +225,7 @@ class InMemoryCorroborationLedger implements CorroborationLedger {
       corroboratingStrandIds: [...event.corroboratingStrandIds],
       beneficiarySourceId: event.beneficiarySourceId,
       reputationDelta: event.reputationDelta,
+      corroborationDepthAtEvent: event.corroborationDepthAtEvent ?? 0,
       at: event.at,
     };
     this.posOf.set(eventId, this.chain.length);
@@ -205,6 +253,14 @@ class InMemoryCorroborationLedger implements CorroborationLedger {
       this.byRatified.set(finalEvent.ratifiedStrandId, [finalEvent]);
     } else {
       ratifiedBucket.push(finalEvent);
+    }
+
+    // The beneficiary index (the depth-floor-reversal recompute's lookup).
+    const beneficiaryBucket = this.byBeneficiary.get(finalEvent.beneficiarySourceId);
+    if (beneficiaryBucket === undefined) {
+      this.byBeneficiary.set(finalEvent.beneficiarySourceId, [finalEvent]);
+    } else {
+      beneficiaryBucket.push(finalEvent);
     }
 
     return finalEvent;
@@ -257,6 +313,10 @@ class InMemoryCorroborationLedger implements CorroborationLedger {
     }
     out.sort((a, b) => this.posOf.get(a.eventId)! - this.posOf.get(b.eventId)!);
     return out;
+  }
+
+  eventsByBeneficiary(sourceId: SourceId): readonly CorroborationEvent[] {
+    return this.byBeneficiary.get(sourceId) ?? [];
   }
 
   markReversed(eventId: string): boolean {
@@ -329,6 +389,7 @@ class SqliteCorroborationLedgerImpl implements SqliteCorroborationLedger {
   readonly #insert;
   readonly #insertStrand;
   readonly #insertRatified;
+  readonly #insertBeneficiary;
   readonly #count;
   readonly #all;
   readonly #isReversed;
@@ -388,6 +449,20 @@ class SqliteCorroborationLedgerImpl implements SqliteCorroborationLedger {
       `CREATE INDEX IF NOT EXISTS idx_corroboration_events_ratified_strand
          ON corroboration_events_ratified (ratified_strand_id)`,
     );
+    // The depth-floor-reversal recompute's index: one row per (beneficiary, event),
+    // so `eventsByBeneficiary` is an indexed JOIN, never a full scan.
+    this.#db.exec(
+      `CREATE TABLE IF NOT EXISTS corroboration_events_beneficiary (
+         beneficiary_source_id TEXT NOT NULL,
+         event_id               TEXT NOT NULL,
+         seq                    INTEGER NOT NULL,
+         PRIMARY KEY (beneficiary_source_id, event_id)
+       )`,
+    );
+    this.#db.exec(
+      `CREATE INDEX IF NOT EXISTS idx_corroboration_events_beneficiary_source
+         ON corroboration_events_beneficiary (beneficiary_source_id)`,
+    );
 
     this.#insert = this.#db.prepare(
       "INSERT INTO corroboration_events (event_id, json) VALUES (?, ?)",
@@ -398,6 +473,10 @@ class SqliteCorroborationLedgerImpl implements SqliteCorroborationLedger {
     );
     this.#insertRatified = this.#db.prepare(
       `INSERT OR IGNORE INTO corroboration_events_ratified (ratified_strand_id, event_id, seq)
+       VALUES (?, ?, ?)`,
+    );
+    this.#insertBeneficiary = this.#db.prepare(
+      `INSERT OR IGNORE INTO corroboration_events_beneficiary (beneficiary_source_id, event_id, seq)
        VALUES (?, ?, ?)`,
     );
     this.#count = this.#db.prepare(
@@ -429,7 +508,10 @@ class SqliteCorroborationLedgerImpl implements SqliteCorroborationLedger {
     const ratifiedChildCount = Number(
       (this.#db.prepare("SELECT COUNT(*) AS n FROM corroboration_events_ratified").get() as { n: number }).n,
     );
-    if (strandChildCount === 0 || ratifiedChildCount === 0) {
+    const beneficiaryChildCount = Number(
+      (this.#db.prepare("SELECT COUNT(*) AS n FROM corroboration_events_beneficiary").get() as { n: number }).n,
+    );
+    if (strandChildCount === 0 || ratifiedChildCount === 0 || beneficiaryChildCount === 0) {
       const existing = this.#db
         .prepare("SELECT seq, event_id, json FROM corroboration_events")
         .all() as Array<{ seq: unknown; event_id: unknown; json: unknown }>;
@@ -451,12 +533,25 @@ class SqliteCorroborationLedgerImpl implements SqliteCorroborationLedger {
             Number(row.seq),
           );
         }
+        if (beneficiaryChildCount === 0) {
+          this.#insertBeneficiary.run(
+            String(parsed.beneficiarySourceId),
+            String(row.event_id),
+            Number(row.seq),
+          );
+        }
       }
     }
   }
 
+  /** Parses a persisted row, normalizing a pre-`corroborationDepthAtEvent` legacy
+   *  row (written before this field existed) to the safe default `0` — inert for
+   *  the depth-floor recompute exactly as it was before the field existed. */
   #parse(json: string): CorroborationEvent {
-    return JSON.parse(json) as CorroborationEvent;
+    const parsed = JSON.parse(json) as CorroborationEvent;
+    return typeof parsed.corroborationDepthAtEvent === "number"
+      ? parsed
+      : { ...parsed, corroborationDepthAtEvent: 0 };
   }
 
   #chain(): CorroborationEvent[] {
@@ -474,6 +569,7 @@ class SqliteCorroborationLedgerImpl implements SqliteCorroborationLedger {
       corroboratingStrandIds: [...event.corroboratingStrandIds],
       beneficiarySourceId: event.beneficiarySourceId,
       reputationDelta: event.reputationDelta,
+      corroborationDepthAtEvent: event.corroborationDepthAtEvent ?? 0,
       at: event.at,
     };
     this.#insert.run(eventId, JSON.stringify(finalEvent));
@@ -485,6 +581,8 @@ class SqliteCorroborationLedgerImpl implements SqliteCorroborationLedger {
       seen.add(sid);
       this.#insertStrand.run(String(sid), eventId, n);
     }
+    // The beneficiary index (the depth-floor-reversal recompute's lookup).
+    this.#insertBeneficiary.run(String(finalEvent.beneficiarySourceId), eventId, n);
     // Wave-2 [explain-full-ledger-scans]: maintain the separate ratified-strand
     // index too.
     this.#insertRatified.run(String(finalEvent.ratifiedStrandId), eventId, n);
@@ -547,6 +645,20 @@ class SqliteCorroborationLedgerImpl implements SqliteCorroborationLedger {
     );
     const sid = String(strandId);
     const rows = stmt.all(sid, sid) as Array<{ json: unknown; seq: unknown }>;
+    return rows.map((r) => this.#parse(corrobAsString(r.json)));
+  }
+
+  eventsByBeneficiary(sourceId: SourceId): readonly CorroborationEvent[] {
+    // POINT LOOKUP via the indexed `corroboration_events_beneficiary` child table —
+    // never a full scan of `corroboration_events`.
+    const stmt = this.#db.prepare(
+      `SELECT json, seq FROM corroboration_events
+        WHERE event_id IN (
+          SELECT event_id FROM corroboration_events_beneficiary WHERE beneficiary_source_id = ?
+        )
+       ORDER BY seq`,
+    );
+    const rows = stmt.all(String(sourceId)) as Array<{ json: unknown; seq: unknown }>;
     return rows.map((r) => this.#parse(corrobAsString(r.json)));
   }
 
