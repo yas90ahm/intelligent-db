@@ -101,6 +101,34 @@ function freezeEdge(e: InternalEdge): Edge {
 }
 
 /**
+ * Build a private, shallow clone of a {@link Strand} so it can cross the store's read
+ * or write boundary WITHOUT aliasing the copy this store keeps in `strandMap`.
+ *
+ * WHY (mirrors the edge-freezing discipline above, `freezeEdge`/`toInternalEdge`):
+ * unlike {@link Edge}, `Strand` has several MUTABLE top-level fields by contract
+ * (`fact_state`, `tier`, `outranked_by`, `description_value`,
+ * `external_reobservation_count`, `contradiction_set`, `co_equal_claim_cardinality`,
+ * `last_tier_reason`, `register`) because the documented idiom elsewhere in the
+ * engine (e.g. `forgetting/consolidation.ts`'s `demote()`) is "mutate the fields of a
+ * `Strand` object directly, then explicitly `putStrand()` it to persist the change."
+ * That idiom is only safe if the object being mutated is NEVER the exact same object
+ * reference this store already holds in `strandMap` — otherwise the mutation is
+ * visible to every future `getStrand()`/`strandsByEntity()`/`strandsByAttribute()`
+ * caller THE INSTANT it happens, with no `putStrand()` required and no way to
+ * "not persist it" if the surrounding operation later throws before ever calling
+ * `putStrand()` (this store has no real `beginTxn`, so a throw there cannot roll
+ * anything back either). A clone at both the read boundary (`getStrand`,
+ * `collectStrands`, `allStrands`) and the write boundary (`putStrand`) closes that:
+ * the caller's object and the store's object are never aliases of one another, so
+ * only an explicit `putStrand()` call can ever change what this store serves next.
+ * Deliberately NOT frozen (contrast `freezeEdge`) — the mutate-then-`putStrand`
+ * idiom must keep working; only the ALIASING is removed, not the mutability.
+ */
+function cloneStrand(s: Strand): Strand {
+  return { ...s };
+}
+
+/**
  * In-memory adjacency-map {@link StrandStore}. Single-process, no persistence;
  * the canonical reference backend the rest of the system is written against. All
  * methods are synchronous (the contract is sync), total, and side-effect-free
@@ -127,7 +155,9 @@ export class MemoryStrandStore implements StrandStore {
   // -------------------------------------------------------------------------
 
   getStrand(id: StrandId): Strand | null {
-    return this.strandMap.get(id) ?? null;
+    const s = this.strandMap.get(id);
+    // Clone-on-read (see cloneStrand's doc): never hand out the live map reference.
+    return s === undefined ? null : cloneStrand(s);
   }
 
   putStrand(s: Strand): void {
@@ -157,7 +187,10 @@ export class MemoryStrandStore implements StrandStore {
     if (!this.outAdj.has(id)) this.outAdj.set(id, new Set<EdgeId>());
     if (!this.inAdj.has(id)) this.inAdj.set(id, new Set<EdgeId>());
 
-    this.strandMap.set(id, s);
+    // Clone-before-store (see cloneStrand's doc): keep our own private copy so a
+    // caller that keeps `s` around and mutates it later (a common mutate-then-
+    // putStrand idiom) can never reach back into what this store serves afterward.
+    this.strandMap.set(id, cloneStrand(s));
   }
 
   putStrandsBatch(strands: Iterable<Strand>): void {
@@ -211,7 +244,9 @@ export class MemoryStrandStore implements StrandStore {
       // Skip dangling edges (destination not yet stored); they remain visible via
       // outEdges() but cannot form a NeighborView without a resolved strand.
       if (dest === undefined) continue;
-      views.push({ edge: freezeEdge(e), strand: dest });
+      // Clone-on-read (see cloneStrand's doc): the walk must never receive a
+      // reference into strandMap itself.
+      views.push({ edge: freezeEdge(e), strand: cloneStrand(dest) });
     }
     return views;
   }
@@ -232,8 +267,10 @@ export class MemoryStrandStore implements StrandStore {
   // Full scans (offline maintenance only)
   // -------------------------------------------------------------------------
 
-  allStrands(): Iterable<Strand> {
-    return this.strandMap.values();
+  *allStrands(): Iterable<Strand> {
+    // Clone-on-read (see cloneStrand's doc): an offline maintenance scan must not
+    // be able to mutate strand state in place without an explicit putStrand().
+    for (const s of this.strandMap.values()) yield cloneStrand(s);
   }
 
   *allEdges(): Iterable<Edge> {
@@ -346,7 +383,10 @@ export class MemoryStrandStore implements StrandStore {
     const out: Strand[] = [];
     for (const strandId of ids) {
       const s = this.strandMap.get(strandId);
-      if (s !== undefined) out.push(s);
+      // Clone-on-read (see cloneStrand's doc): strandsByEntity/strandsByAttribute
+      // callers (e.g. adjudicate's dispute-member resolution) must never receive a
+      // reference into strandMap itself.
+      if (s !== undefined) out.push(cloneStrand(s));
     }
     return out;
   }

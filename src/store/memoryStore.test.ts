@@ -23,6 +23,7 @@ import {
   type Strand,
   type StrandId,
 } from "../core/types.js";
+import { demote } from "../forgetting/consolidation.js";
 import { createMemoryStore, MemoryStrandStore } from "./memoryStore.js";
 
 // --- minimal fixtures -------------------------------------------------------
@@ -151,5 +152,72 @@ describe("MemoryStrandStore", () => {
     store.clear();
     expect(store.strandCount()).toBe(0);
     expect(store.edgeCount()).toBe(0);
+  });
+
+  // ---------------------------------------------------------------------------
+  // Regression: inmemory-demote-escapes-txn
+  // ---------------------------------------------------------------------------
+  //
+  // BUG (pre-fix): getStrand()/strandsByAttribute() handed back the LIVE strandMap
+  // reference. The engine's real demote() flow (forgetting/consolidation.ts) reads a
+  // strand via one of those, then MUTATES its fact_state/outranked_by fields in
+  // place, and only afterward (inside a withTxn block) calls putStrand() to persist
+  // it. Because the returned object WAS the store's own map entry, the demotion was
+  // visible to the store the INSTANT demote() ran -- before putStrand(), before
+  // withTxn even opens -- with no way to "not persist it" if the surrounding
+  // compound op later throws (MemoryStrandStore has no real beginTxn, so a throw
+  // there cannot roll anything back either; see api.ts's adjudicate RESOLVED path).
+  //
+  // FIX: getStrand()/strandsByAttribute()/allStrands() now return a private clone,
+  // and putStrand() stores its own private clone too -- so a caller can mutate the
+  // object it holds all it wants; only an explicit putStrand() call can ever change
+  // what the store serves next.
+  it("a demote() mutation on a strand read via getStrand does NOT leak into the store until putStrand is called (rollback-safe)", () => {
+    const store = createMemoryStore();
+    const loserId = "strand:loser" as StrandId;
+    const winnerId = "strand:winner" as StrandId;
+    store.putStrand(makeStrand(loserId, "E1", "E1.color"));
+
+    const winnerEdge: Edge = {
+      id: "edge:outranks-1" as EdgeId,
+      from: winnerId,
+      to: loserId,
+      edgeType: EdgeType.OUTRANKS,
+      link_confidence: 1,
+      provenance_independence: 1,
+      recency: 1,
+      w: 1,
+      out_weight_sum: 1,
+    };
+
+    // Mirrors the real compound-op shape (api.ts's adjudicate RESOLVED path): open a
+    // (no-op, for this in-memory backend) unit of work, read the disputed strand,
+    // run the REAL production demote() against it, then "roll back" by simulating a
+    // throw BEFORE the putStrand() call that would otherwise persist it.
+    const txn = store.beginTxn?.(); // undefined here -- MemoryStrandStore has no real txn
+    const loser = store.getStrand(loserId)!;
+    const result = demote(loser, winnerEdge);
+    txn?.rollback(); // no-op for this backend; documents the intended rollback point
+    // (the putStrand() call that a real op would make next is deliberately skipped,
+    // simulating a mid-op throw before persistence)
+
+    // demote() really did mutate the OBJECT it was handed (the bug is aliasing, not
+    // that demote() silently no-ops) -- and the receipt is correct.
+    expect(loser.fact_state).toBe(FactState.DEMOTED);
+    expect(loser.outranked_by).toBe(winnerEdge.id);
+    expect(result.demoted).toBe(loserId);
+
+    // THE REGRESSION CHECK: the store's OWN copy must be untouched, because
+    // putStrand() was never called.
+    const stillInStore = store.getStrand(loserId)!;
+    expect(stillInStore.fact_state).toBe(FactState.LIVE);
+    expect(stillInStore.outranked_by).toBeNull();
+
+    // Same guarantee via the attribute-index read path (adjudicate's actual entry
+    // point, api.ts: `store.strandsByAttribute(attribute)`).
+    const viaAttribute = store
+      .strandsByAttribute("E1.color" as AttributeKey)
+      .find((s) => s.id === loserId)!;
+    expect(viaAttribute.fact_state).toBe(FactState.LIVE);
   });
 });
