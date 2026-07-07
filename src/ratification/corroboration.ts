@@ -147,6 +147,9 @@ class InMemoryCorroborationLedger implements CorroborationLedger {
   private readonly chain: CorroborationEvent[] = [];
   /** corroborating StrandId -> the events it appears in (append order). */
   private readonly byCorroborator = new Map<StrandId, CorroborationEvent[]>();
+  /** eventId -> its append (chain) position, so a multi-bucket merge can restore
+   *  the SAME stable append order the old full-chain scan produced. */
+  private readonly posOf = new Map<string, number>();
   /** Event ids already reversed by a disown sweep (idempotency guard). */
   private readonly reversed = new Set<string>();
 
@@ -162,6 +165,7 @@ class InMemoryCorroborationLedger implements CorroborationLedger {
       reputationDelta: event.reputationDelta,
       at: event.at,
     };
+    this.posOf.set(eventId, this.chain.length);
     this.chain.push(finalEvent);
 
     // Maintain the corroborator index. A strand listed twice in one event indexes
@@ -190,21 +194,24 @@ class InMemoryCorroborationLedger implements CorroborationLedger {
   }
 
   eventsIntersecting(strandIds: Iterable<StrandId>): readonly CorroborationEvent[] {
-    const targets = new Set<StrandId>(strandIds);
-    const out: CorroborationEvent[] = [];
+    // POINT LOOKUPS via the maintained `byCorroborator` index — O(distinct target ids
+    // + matches), never a full walk of `this.chain`. Each per-strand bucket is
+    // already in append order (entries are pushed in `record()` order), but merging
+    // several buckets (one per requested strand id) can interleave, so the merged
+    // candidates are re-sorted by their recorded append position to reproduce the
+    // EXACT "first-match, stable append order" the old full-scan produced.
     const seenEvents = new Set<string>();
-    // Walk the chain in append order so the result is deterministic; include an
-    // event the first time ANY of its corroborating strands is a target.
-    for (const ev of this.chain) {
-      if (seenEvents.has(ev.eventId)) continue;
-      for (const sid of ev.corroboratingStrandIds) {
-        if (targets.has(sid)) {
-          seenEvents.add(ev.eventId);
-          out.push(ev);
-          break;
-        }
+    const out: CorroborationEvent[] = [];
+    for (const sid of new Set(strandIds)) {
+      const bucket = this.byCorroborator.get(sid);
+      if (bucket === undefined) continue;
+      for (const ev of bucket) {
+        if (seenEvents.has(ev.eventId)) continue;
+        seenEvents.add(ev.eventId);
+        out.push(ev);
       }
     }
+    out.sort((a, b) => this.posOf.get(a.eventId)! - this.posOf.get(b.eventId)!);
     return out;
   }
 
@@ -276,6 +283,7 @@ class SqliteCorroborationLedgerImpl implements SqliteCorroborationLedger {
   readonly #ownsDb: boolean;
 
   readonly #insert;
+  readonly #insertStrand;
   readonly #count;
   readonly #all;
   readonly #isReversed;
@@ -301,9 +309,30 @@ class SqliteCorroborationLedgerImpl implements SqliteCorroborationLedger {
          event_id TEXT PRIMARY KEY
        )`,
     );
+    // INDEXED CHILD TABLE (the perf fix): one row per (corroborating strand, event),
+    // so `eventsIntersecting`/`eventsByCorroboratingStrand` become an indexed JOIN
+    // instead of a full-table scan + JS-side filter over every event ever recorded.
+    // `seq` mirrors the parent event's append position so a multi-strand query can
+    // restore the SAME stable append order the old full-scan produced.
+    this.#db.exec(
+      `CREATE TABLE IF NOT EXISTS corroboration_event_strands (
+         strand_id TEXT NOT NULL,
+         event_id  TEXT NOT NULL,
+         seq       INTEGER NOT NULL,
+         PRIMARY KEY (strand_id, event_id)
+       )`,
+    );
+    this.#db.exec(
+      `CREATE INDEX IF NOT EXISTS idx_corroboration_event_strands_strand
+         ON corroboration_event_strands (strand_id)`,
+    );
 
     this.#insert = this.#db.prepare(
       "INSERT INTO corroboration_events (event_id, json) VALUES (?, ?)",
+    );
+    this.#insertStrand = this.#db.prepare(
+      `INSERT OR IGNORE INTO corroboration_event_strands (strand_id, event_id, seq)
+       VALUES (?, ?, ?)`,
     );
     this.#count = this.#db.prepare(
       "SELECT COUNT(*) AS n FROM corroboration_events",
@@ -317,6 +346,31 @@ class SqliteCorroborationLedgerImpl implements SqliteCorroborationLedger {
     this.#markReversed = this.#db.prepare(
       "INSERT OR IGNORE INTO reversed_events (event_id) VALUES (?)",
     );
+
+    // BACKFILL for a database written by a pre-index version of this ledger: if the
+    // child index table is empty but events already exist, populate it once from the
+    // existing rows so a reopened, already-populated ledger is indexed too (never
+    // silently missing pre-upgrade events from `eventsIntersecting`). A ledger that
+    // already has ANY child rows was opened at least once under this code path
+    // already, so `record()` has kept it in sync — skip re-deriving it every open.
+    const childCount = Number(
+      (this.#db.prepare("SELECT COUNT(*) AS n FROM corroboration_event_strands").get() as { n: number }).n,
+    );
+    if (childCount === 0) {
+      const existing = this.#db
+        .prepare("SELECT seq, event_id, json FROM corroboration_events")
+        .all() as Array<{ seq: unknown; event_id: unknown; json: unknown }>;
+      for (const row of existing) {
+        const parsed = this.#parse(corrobAsString(row.json));
+        const seen = new Set<string>();
+        for (const sid of parsed.corroboratingStrandIds) {
+          const key = String(sid);
+          if (seen.has(key)) continue;
+          seen.add(key);
+          this.#insertStrand.run(key, String(row.event_id), Number(row.seq));
+        }
+      }
+    }
   }
 
   #parse(json: string): CorroborationEvent {
@@ -341,6 +395,14 @@ class SqliteCorroborationLedgerImpl implements SqliteCorroborationLedger {
       at: event.at,
     };
     this.#insert.run(eventId, JSON.stringify(finalEvent));
+    // Maintain the indexed child table: a strand listed twice in one event indexes
+    // that event once (dedupe within the event, mirroring the in-memory impl).
+    const seen = new Set<StrandId>();
+    for (const sid of finalEvent.corroboratingStrandIds) {
+      if (seen.has(sid)) continue;
+      seen.add(sid);
+      this.#insertStrand.run(String(sid), eventId, n);
+    }
     return finalEvent;
   }
 
@@ -349,28 +411,35 @@ class SqliteCorroborationLedgerImpl implements SqliteCorroborationLedger {
   }
 
   eventsByCorroboratingStrand(strandId: StrandId): readonly CorroborationEvent[] {
-    const out: CorroborationEvent[] = [];
-    for (const ev of this.#chain()) {
-      if (ev.corroboratingStrandIds.includes(strandId)) out.push(ev);
-    }
-    return out;
+    return this.#eventsForStrands([strandId]);
   }
 
   eventsIntersecting(strandIds: Iterable<StrandId>): readonly CorroborationEvent[] {
-    const targets = new Set<StrandId>(strandIds);
-    const out: CorroborationEvent[] = [];
-    const seenEvents = new Set<string>();
-    for (const ev of this.#chain()) {
-      if (seenEvents.has(ev.eventId)) continue;
-      for (const sid of ev.corroboratingStrandIds) {
-        if (targets.has(sid)) {
-          seenEvents.add(ev.eventId);
-          out.push(ev);
-          break;
-        }
-      }
-    }
-    return out;
+    return this.#eventsForStrands([...new Set(strandIds)]);
+  }
+
+  /**
+   * POINT LOOKUP via the indexed `corroboration_event_strands` child table (the perf
+   * fix) — an indexed JOIN keyed by `strand_id IN (...)`, never a full scan of
+   * `corroboration_events`. Results are deduped by `event_id` and ordered by the
+   * recorded append `seq`, reproducing the exact "first-match, stable append order"
+   * the old full-chain scan produced.
+   */
+  #eventsForStrands(ids: readonly StrandId[]): CorroborationEvent[] {
+    if (ids.length === 0) return [];
+    const placeholders = ids.map(() => "?").join(", ");
+    const stmt = this.#db.prepare(
+      `SELECT DISTINCT e.json AS json, e.seq AS seq
+         FROM corroboration_events e
+         JOIN corroboration_event_strands s ON s.event_id = e.event_id
+        WHERE s.strand_id IN (${placeholders})
+        ORDER BY e.seq`,
+    );
+    const rows = stmt.all(...ids.map((id) => String(id))) as Array<{
+      json: unknown;
+      seq: unknown;
+    }>;
+    return rows.map((r) => this.#parse(corrobAsString(r.json)));
   }
 
   markReversed(eventId: string): boolean {

@@ -93,6 +93,10 @@ class InMemoryAdjudicationProvenanceLedger
 {
   private readonly chain: AdjudicationProvenance[] = [];
   private readonly byContributor = new Map<StrandId, AdjudicationProvenance[]>();
+  /** record identity -> its append (chain) position, so `recordsContributedBy`'s
+   *  index-driven merge can reconstruct "most recent per csid, first-hit order"
+   *  without re-walking the full chain. */
+  private readonly posOf = new Map<AdjudicationProvenance, number>();
   private readonly reopened = new Set<ContradictionSetId>();
 
   record(record: AdjudicationProvenanceInput): AdjudicationProvenance {
@@ -104,6 +108,7 @@ class InMemoryAdjudicationProvenanceLedger
       contributingStrandIds: [...record.contributingStrandIds],
       at: record.at,
     };
+    this.posOf.set(finalRecord, this.chain.length);
     this.chain.push(finalRecord);
     const seen = new Set<StrandId>();
     for (const sid of finalRecord.contributingStrandIds) {
@@ -126,22 +131,29 @@ class InMemoryAdjudicationProvenanceLedger
   recordsContributedBy(
     strandIds: Iterable<StrandId>,
   ): readonly AdjudicationProvenance[] {
-    const targets = new Set<StrandId>(strandIds);
-    // contradictionSetId -> the LAST (most recent) intersecting record.
+    // POINT LOOKUPS via the maintained `byContributor` index — O(distinct target ids
+    // + matches), never a full walk of `this.chain`. Each per-strand bucket is
+    // already in append order; merging several buckets (one per requested strand
+    // id) is resolved against the recorded append position so the result reproduces
+    // the SAME "most recent record per contradictionSetId, ordered by first hit"
+    // semantics the old full-scan produced.
     const latest = new Map<ContradictionSetId, AdjudicationProvenance>();
-    const order: ContradictionSetId[] = [];
-    for (const rec of this.chain) {
-      let hit = false;
-      for (const sid of rec.contributingStrandIds) {
-        if (targets.has(sid)) {
-          hit = true;
-          break;
+    const firstPos = new Map<ContradictionSetId, number>();
+    for (const sid of new Set(strandIds)) {
+      const bucket = this.byContributor.get(sid);
+      if (bucket === undefined) continue;
+      for (const rec of bucket) {
+        const pos = this.posOf.get(rec)!;
+        const csid = rec.contradictionSetId;
+        const curFirst = firstPos.get(csid);
+        if (curFirst === undefined || pos < curFirst) firstPos.set(csid, pos);
+        const curLatest = latest.get(csid);
+        if (curLatest === undefined || this.posOf.get(curLatest)! < pos) {
+          latest.set(csid, rec);
         }
       }
-      if (!hit) continue;
-      if (!latest.has(rec.contradictionSetId)) order.push(rec.contradictionSetId);
-      latest.set(rec.contradictionSetId, rec);
     }
+    const order = [...firstPos.entries()].sort((a, b) => a[1] - b[1]).map(([csid]) => csid);
     return order.map((csid) => latest.get(csid)!);
   }
 
@@ -207,6 +219,7 @@ class SqliteAdjudicationProvenanceLedgerImpl
   readonly #ownsDb: boolean;
 
   readonly #insert;
+  readonly #insertStrand;
   readonly #all;
   readonly #isReopened;
   readonly #markReopened;
@@ -230,9 +243,28 @@ class SqliteAdjudicationProvenanceLedgerImpl
          contradiction_set_id TEXT PRIMARY KEY
        )`,
     );
+    // INDEXED CHILD TABLE (the perf fix): one row per (contributing strand, record
+    // seq), so `recordsContributedBy` becomes an indexed JOIN over the requested
+    // strand ids instead of a full-table scan + JS-side filter over every
+    // adjudication ever recorded.
+    this.#db.exec(
+      `CREATE TABLE IF NOT EXISTS adjudication_provenance_strands (
+         strand_id TEXT NOT NULL,
+         seq       INTEGER NOT NULL,
+         PRIMARY KEY (strand_id, seq)
+       )`,
+    );
+    this.#db.exec(
+      `CREATE INDEX IF NOT EXISTS idx_adjudication_provenance_strands_strand
+         ON adjudication_provenance_strands (strand_id)`,
+    );
 
     this.#insert = this.#db.prepare(
       "INSERT INTO adjudication_provenance (json) VALUES (?)",
+    );
+    this.#insertStrand = this.#db.prepare(
+      `INSERT OR IGNORE INTO adjudication_provenance_strands (strand_id, seq)
+       VALUES (?, ?)`,
     );
     this.#all = this.#db.prepare(
       "SELECT json FROM adjudication_provenance ORDER BY seq",
@@ -243,6 +275,32 @@ class SqliteAdjudicationProvenanceLedgerImpl
     this.#markReopened = this.#db.prepare(
       "INSERT OR IGNORE INTO adjudication_reopened (contradiction_set_id) VALUES (?)",
     );
+
+    // BACKFILL for a database written by a pre-index version of this ledger: if the
+    // child index table is empty but records already exist, populate it once from
+    // the existing rows so a reopened, already-populated ledger is indexed too
+    // (never silently missing pre-upgrade records from `recordsContributedBy`). A
+    // ledger that already has ANY child rows was opened at least once under this
+    // code path already, so `record()` has kept it in sync — skip re-deriving it
+    // every open.
+    const childCount = Number(
+      (this.#db.prepare("SELECT COUNT(*) AS n FROM adjudication_provenance_strands").get() as { n: number }).n,
+    );
+    if (childCount === 0) {
+      const existing = this.#db
+        .prepare("SELECT seq, json FROM adjudication_provenance")
+        .all() as Array<{ seq: unknown; json: unknown }>;
+      for (const row of existing) {
+        const parsed = this.#parse(adjAsString(row.json));
+        const seen = new Set<string>();
+        for (const sid of parsed.contributingStrandIds) {
+          const key = String(sid);
+          if (seen.has(key)) continue;
+          seen.add(key);
+          this.#insertStrand.run(key, Number(row.seq));
+        }
+      }
+    }
   }
 
   #parse(json: string): AdjudicationProvenance {
@@ -262,7 +320,14 @@ class SqliteAdjudicationProvenanceLedgerImpl
       contributingStrandIds: [...record.contributingStrandIds],
       at: record.at,
     };
-    this.#insert.run(JSON.stringify(finalRecord));
+    const info = this.#insert.run(JSON.stringify(finalRecord));
+    const seq = Number(info.lastInsertRowid);
+    const seen = new Set<StrandId>();
+    for (const sid of finalRecord.contributingStrandIds) {
+      if (seen.has(sid)) continue;
+      seen.add(sid);
+      this.#insertStrand.run(String(sid), seq);
+    }
     return finalRecord;
   }
 
@@ -273,18 +338,29 @@ class SqliteAdjudicationProvenanceLedgerImpl
   recordsContributedBy(
     strandIds: Iterable<StrandId>,
   ): readonly AdjudicationProvenance[] {
-    const targets = new Set<StrandId>(strandIds);
+    // POINT LOOKUP via the indexed `adjudication_provenance_strands` child table —
+    // an indexed JOIN keyed by `strand_id IN (...)`, never a full scan of
+    // `adjudication_provenance`. Rows come back ordered by `seq` (append order), so
+    // reducing to "most recent record per contradictionSetId, first-hit order" over
+    // this bounded candidate set reproduces the old full-scan semantics exactly.
+    const ids = [...new Set(strandIds)];
+    if (ids.length === 0) return [];
+    const placeholders = ids.map(() => "?").join(", ");
+    const stmt = this.#db.prepare(
+      `SELECT DISTINCT e.json AS json, e.seq AS seq
+         FROM adjudication_provenance e
+         JOIN adjudication_provenance_strands s ON s.seq = e.seq
+        WHERE s.strand_id IN (${placeholders})
+        ORDER BY e.seq`,
+    );
+    const rows = stmt.all(...ids.map((id) => String(id))) as Array<{
+      json: unknown;
+      seq: unknown;
+    }>;
+    const candidates = rows.map((r) => this.#parse(adjAsString(r.json)));
     const latest = new Map<ContradictionSetId, AdjudicationProvenance>();
     const order: ContradictionSetId[] = [];
-    for (const rec of this.#chain()) {
-      let hit = false;
-      for (const sid of rec.contributingStrandIds) {
-        if (targets.has(sid)) {
-          hit = true;
-          break;
-        }
-      }
-      if (!hit) continue;
+    for (const rec of candidates) {
       if (!latest.has(rec.contradictionSetId)) order.push(rec.contradictionSetId);
       latest.set(rec.contradictionSetId, rec);
     }
