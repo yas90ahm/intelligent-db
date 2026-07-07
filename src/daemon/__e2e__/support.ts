@@ -19,8 +19,8 @@
 
 import { execFileSync, spawn } from "node:child_process";
 import type { ChildProcessByStdio } from "node:child_process";
-import type { Readable } from "node:stream";
-import { existsSync, mkdtempSync, rmSync } from "node:fs";
+import type { Readable, Writable } from "node:stream";
+import { existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import * as net from "node:net";
@@ -29,10 +29,13 @@ import { readOwnerTokenFile } from "../tokens.js";
 import type { OwnerTokenFile } from "../tokens.js";
 
 export const DIST_CLI_PATH = join(process.cwd(), "dist", "daemon", "cli.js");
+/** PHASE3B_MCP_ASYNC_SPEC.md Tests #2: the compiled MCP stdio server bin, the
+ * SAME shipped artifact `package.json`'s `intelligent-db-mcp` bin points at. */
+export const DIST_MCP_SERVER_PATH = join(process.cwd(), "dist", "mcp", "server.js");
 
 /** Build `dist/` (via `npm run build`) unless the compiled CLI already exists. */
 export function ensureDaemonBuilt(): void {
-  if (existsSync(DIST_CLI_PATH)) return;
+  if (existsSync(DIST_CLI_PATH) && existsSync(DIST_MCP_SERVER_PATH)) return;
   execFileSync("npm", ["run", "build"], {
     cwd: process.cwd(),
     stdio: "inherit",
@@ -40,6 +43,9 @@ export function ensureDaemonBuilt(): void {
   });
   if (!existsSync(DIST_CLI_PATH)) {
     throw new Error(`ensureDaemonBuilt: ${DIST_CLI_PATH} still missing after build.`);
+  }
+  if (!existsSync(DIST_MCP_SERVER_PATH)) {
+    throw new Error(`ensureDaemonBuilt: ${DIST_MCP_SERVER_PATH} still missing after build.`);
   }
 }
 
@@ -187,12 +193,19 @@ export function rawConnect(endpoint: string): net.Socket {
   return net.createConnection(endpoint);
 }
 
+/** Anything a line-delimited reader can subscribe to for raw byte chunks — a
+ * real `net.Socket` (the raw daemon-wire tests) or a child process's `stdout`
+ * (the MCP-server-over-daemon E2E test): both are plain Node Readables. */
+export interface ChunkSource {
+  on(event: "data", listener: (chunk: Buffer) => void): unknown;
+}
+
 export class LineReader {
   #buf = "";
   #queue: string[] = [];
   #waiters: Array<(line: string) => void> = [];
 
-  constructor(socket: net.Socket) {
+  constructor(socket: ChunkSource) {
     socket.on("data", (chunk: Buffer) => {
       this.#buf += chunk.toString("utf8");
       let idx: number;
@@ -248,4 +261,117 @@ export async function rawHandshake(
 
 export function req(id: number, method: string, params?: unknown): string {
   return JSON.stringify({ id, method, params: params ?? {} }) + "\n";
+}
+
+/**
+ * Mint a fresh per-agent token via the OWNER-gated `issueToken` admin verb over
+ * a throwaway raw connection (that verb is deliberately NOT part of
+ * `RemoteAgentMemory`'s data-verb surface — see `client.ts`'s module doc), then
+ * close the probing connection. Mirrors the inline pattern
+ * `daemon/__e2e__/serialization.e2e.test.ts` uses, factored out for reuse.
+ */
+export async function mintTokenViaAdmin(
+  endpoint: string,
+  ownerToken: string,
+  grade: string,
+  label?: string,
+): Promise<string> {
+  const { socket, reader } = await rawHandshake(endpoint, ownerToken);
+  socket.write(req(1, "issueToken", { grade, ...(label !== undefined ? { label } : {}) }));
+  const resp = (await reader.nextJson()) as { ok: boolean; result?: { token: string } };
+  socket.destroy();
+  if (!resp.ok || resp.result === undefined) {
+    throw new Error(`mintTokenViaAdmin: issueToken failed: ${JSON.stringify(resp)}`);
+  }
+  return resp.result.token;
+}
+
+// ---------------------------------------------------------------------------
+// MCP-server-over-daemon process helpers (PHASE3B_MCP_ASYNC_SPEC.md Tests #2:
+// spawn the ACTUAL `intelligent-db-mcp` bin, real stdio, pointed at a real
+// daemon over MEMORY_DAEMON_SOCKET/MEMORY_DAEMON_TOKEN_FILE).
+// ---------------------------------------------------------------------------
+
+export interface McpProcessHandle {
+  readonly child: ChildProcessByStdio<Writable, Readable, Readable>;
+  readonly reader: LineReader;
+  readonly stderrLines: string[];
+  /** Send one raw JSON-RPC request line and await its response line, parsed. */
+  request(jsonrpcReq: { id: number; method: string; params?: unknown }, timeoutMs?: number): Promise<any>;
+  /** Write a raw, already-serialized line (for malformed/edge-case probes). */
+  writeRawLine(line: string): void;
+  /** Await the next raw response line (paired with {@link writeRawLine}). */
+  nextRawLine(timeoutMs?: number): Promise<string>;
+  /** Close stdin (EOF) and wait for the process to exit on its own. */
+  stop(timeoutMs?: number): Promise<{ exitCode: number | null }>;
+}
+
+/**
+ * Spawn a REAL `node dist/mcp/server.js` child process. When `daemon` is
+ * given, writes `daemon.token` to a fresh token file and sets
+ * `MEMORY_DAEMON_SOCKET`/`MEMORY_DAEMON_TOKEN_FILE` so the server opts into
+ * daemon-backed memory (PHASE3B_MCP_ASYNC_SPEC.md); omit it to exercise the
+ * in-process default instead. `dataDir`, when given, also names where the
+ * token file is written (a fresh temp dir otherwise).
+ */
+export function spawnMcpServer(opts: {
+  readonly daemon?: { readonly socketPath: string; readonly token: string };
+  readonly dataDir?: string;
+  readonly env?: NodeJS.ProcessEnv;
+}): McpProcessHandle {
+  const env: NodeJS.ProcessEnv = { ...process.env, ...opts.env };
+  if (opts.daemon !== undefined) {
+    const dir = opts.dataDir ?? mkdtempSync(join(tmpdir(), nextTag() + "-mcp-"));
+    const tokenFile = join(dir, "mcp-daemon-token");
+    writeFileSync(tokenFile, opts.daemon.token, "utf8");
+    env["MEMORY_DAEMON_SOCKET"] = opts.daemon.socketPath;
+    env["MEMORY_DAEMON_TOKEN_FILE"] = tokenFile;
+  }
+
+  const child = spawn(process.execPath, [DIST_MCP_SERVER_PATH], {
+    stdio: ["pipe", "pipe", "pipe"],
+    env,
+  }) as ChildProcessByStdio<Writable, Readable, Readable>;
+
+  const reader = new LineReader(child.stdout);
+  const stderrLines: string[] = [];
+  let stderrBuf = "";
+  child.stderr.on("data", (chunk: Buffer) => {
+    stderrBuf += chunk.toString("utf8");
+    let idx: number;
+    while ((idx = stderrBuf.indexOf("\n")) !== -1) {
+      stderrLines.push(stderrBuf.slice(0, idx));
+      stderrBuf = stderrBuf.slice(idx + 1);
+    }
+  });
+
+  return {
+    child,
+    reader,
+    stderrLines,
+    request: async (jsonrpcReq, timeoutMs = 10_000) => {
+      child.stdin.write(JSON.stringify({ jsonrpc: "2.0", ...jsonrpcReq }) + "\n");
+      return JSON.parse(await reader.next(timeoutMs));
+    },
+    writeRawLine: (line) => {
+      child.stdin.write(line.endsWith("\n") ? line : line + "\n");
+    },
+    nextRawLine: (timeoutMs = 10_000) => reader.next(timeoutMs),
+    stop: (timeoutMs = 8_000) =>
+      new Promise((resolve) => {
+        if (child.exitCode !== null || child.signalCode !== null) {
+          resolve({ exitCode: child.exitCode });
+          return;
+        }
+        const killer = setTimeout(() => {
+          if (child.exitCode === null && child.signalCode === null) child.kill("SIGKILL");
+        }, timeoutMs);
+        killer.unref();
+        child.once("exit", (code) => {
+          clearTimeout(killer);
+          resolve({ exitCode: code });
+        });
+        child.stdin.end(); // EOF on stdin -> main()'s "end" resolves -> process exits
+      }),
+  };
 }
