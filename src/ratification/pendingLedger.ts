@@ -67,6 +67,7 @@ import type { DatabaseSync as DatabaseSyncType } from "node:sqlite";
 
 import {
   EdgeType,
+  FactState,
 } from "../core/types.js";
 
 import type {
@@ -81,10 +82,11 @@ import type {
   Unit,
 } from "../core/types.js";
 
-import { demote } from "../forgetting/consolidation.js";
+import { demote, promote } from "../forgetting/consolidation.js";
 import type {
   DemotionResult,
   PendingRatification,
+  PromotionResult,
 } from "../forgetting/consolidation.js";
 
 import type { ReputationLedger } from "../identity/reputation.js";
@@ -107,6 +109,7 @@ export type LedgerRecordKind = "PENDING" | "APPROVAL" | "MUTATION";
 export type MutationOp =
   | "DISOWN_CRATER" // the disowned source's direct-seed reputation crater
   | "DEMOTE" // a strand demoted (covers its OUTRANKS edge by after-state)
+  | "PROMOTE" // an approve() winner promoted DEMOTED->LIVE (REOPENED_BY_DISOWN pick)
   | "REPUTATION_CONTRADICT" // a contradict β-bump (adjudicate loser / disown downstream)
   | "REPUTATION_RATIFY" // an approve winner's α-bump
   | "REPUTATION_REVERSE_CREDIT"; // an exact corroboration-credit reversal
@@ -385,12 +388,21 @@ export type AppendSink = (record: LedgerRecord) => void;
  */
 export interface ResolvedDispute {
   readonly contradictionSetId: ContradictionSetId;
-  /** The winning strand designated by the external approver; stays LIVE. */
+  /** The winning strand designated by the external approver; ENDS UP LIVE. */
   readonly winner: StrandId;
   /** One OUTRANKS edge winner -> loser per demoted member (to be persisted). */
   readonly outranksEdges: readonly Edge[];
   /** One demotion receipt per loser (the loser strand was mutated in place). */
   readonly demotions: readonly DemotionResult[];
+  /**
+   * Non-null iff the designated winner was NOT already LIVE and had to be promoted
+   * (mutated in place — see {@link promote}). This only ever fires for a
+   * `REOPENED_BY_DISOWN` dispute whose threaded-back winner is a strand the
+   * ORIGINAL resolution demoted; every pre-existing caller disputes only among
+   * already-LIVE members, so this is `null` for them. The engine (api.ts) must
+   * persist this strand too when non-null.
+   */
+  readonly winnerPromotion: PromotionResult | null;
   /** The APPROVAL record appended to the immortal ledger for this decision. */
   readonly record: LedgerRecord;
 }
@@ -932,6 +944,20 @@ class InMemoryPendingLedger implements PendingLedger {
     // 6) RESOLVE: mint OUTRANKS winner -> each OTHER member and demote the loser.
     //    Demotion DEMOTES, never deletes (sets DEMOTED + outranked_by). Reputation
     //    is driven against the shared ledger: winner ratified, losers contradicted.
+    //
+    // PROMOTE THE WINNER IF NEEDED (the disown-reopen-cannot-change-winner fix): a
+    // `REOPENED_BY_DISOWN` dispute's `members` can include a strand the ORIGINAL
+    // resolution already DEMOTED (see disown.ts's threaded-back `losingMemberIds`).
+    // If that strand is picked as winner here, it must actually END UP LIVE for the
+    // re-decision to mean anything — every pre-existing caller's members are already
+    // LIVE (a fresh DEFERRED dispute only ever forms among LIVE strands), so this is
+    // a no-op for them.
+    const winnerStrand = ctx.memberStrand(winnerStrandId);
+    const winnerPromotion: PromotionResult | null =
+      winnerStrand !== null && winnerStrand.fact_state !== FactState.LIVE
+        ? promote(winnerStrand)
+        : null;
+
     const outranksEdges: Edge[] = [];
     const demotions: DemotionResult[] = [];
     for (const memberId of members) {
@@ -975,6 +1001,7 @@ class InMemoryPendingLedger implements PendingLedger {
       winner: winnerStrandId,
       outranksEdges,
       demotions,
+      winnerPromotion,
       record,
     };
   }
@@ -1346,6 +1373,15 @@ class SqlitePendingLedgerImpl implements SqlitePendingLedger {
     };
     const record = this.#append("APPROVAL", approvalPayload, approver);
 
+    // PROMOTE THE WINNER IF NEEDED — see the in-memory impl's identical comment
+    // (the disown-reopen-cannot-change-winner fix): a `REOPENED_BY_DISOWN`
+    // dispute's winner may be a strand the ORIGINAL resolution already DEMOTED.
+    const winnerStrand = ctx.memberStrand(winnerStrandId);
+    const winnerPromotion: PromotionResult | null =
+      winnerStrand !== null && winnerStrand.fact_state !== FactState.LIVE
+        ? promote(winnerStrand)
+        : null;
+
     const outranksEdges: Edge[] = [];
     const demotions: DemotionResult[] = [];
     for (const memberId of members) {
@@ -1381,7 +1417,14 @@ class SqlitePendingLedgerImpl implements SqlitePendingLedger {
       }
     }
 
-    return { contradictionSetId, winner: winnerStrandId, outranksEdges, demotions, record };
+    return {
+      contradictionSetId,
+      winner: winnerStrandId,
+      outranksEdges,
+      demotions,
+      winnerPromotion,
+      record,
+    };
   }
 
   verifyChain(): ChainVerification {

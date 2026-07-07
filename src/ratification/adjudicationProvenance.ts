@@ -106,6 +106,9 @@ class InMemoryAdjudicationProvenanceLedger
       winner: record.winner,
       margin: record.margin,
       contributingStrandIds: [...record.contributingStrandIds],
+      ...(record.losingMemberIds !== undefined
+        ? { losingMemberIds: [...record.losingMemberIds] }
+        : {}),
       at: record.at,
     };
     this.posOf.set(finalRecord, this.chain.length);
@@ -318,6 +321,9 @@ class SqliteAdjudicationProvenanceLedgerImpl
       winner: record.winner,
       margin: record.margin,
       contributingStrandIds: [...record.contributingStrandIds],
+      ...(record.losingMemberIds !== undefined
+        ? { losingMemberIds: [...record.losingMemberIds] }
+        : {}),
       at: record.at,
     };
     const info = this.#insert.run(JSON.stringify(finalRecord));

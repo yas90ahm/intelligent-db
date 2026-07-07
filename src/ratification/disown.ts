@@ -793,6 +793,18 @@ export function downstreamDisownSweep(
   // contributors removed. If it drops BELOW the decisive threshold, the dispute was
   // merely TIPPED by tainted input: RE-OPEN it as a PENDING ratification (reason
   // `REOPENED_BY_DISOWN`) so a human re-decides. Idempotent via `markReopened`.
+  //
+  // MEMBERSHIP (the disown-reopen-cannot-change-winner fix): the reopened dispute's
+  // `members` MUST include the ORIGINAL losing member ids (`rec.losingMemberIds`),
+  // not just the (now-tainted) winner. `approve()` enforces "the winner must be a
+  // MEMBER of the dispute" — with `members: [rec.winner]` alone, a re-opened dispute
+  // could STRUCTURALLY only ever reconfirm the exact winner whose margin just
+  // collapsed, making the "re-decide" a dead end. Threading the losers back in lets
+  // a human genuinely pick a surviving, non-tainted claim instead (the engine's
+  // `approve()` promotes that pick back to LIVE — see pendingLedger.ts's `promote`).
+  // Deduped (winner first, then losers in recorded order); back-compatible when a
+  // caller-supplied record predates `losingMemberIds` (re-opens with just the winner,
+  // the prior narrower behavior).
   const reopenedDisputes: ContradictionSetId[] = [];
   if (adjProvenance !== undefined) {
     for (const rec of adjProvenance.recordsContributedBy(taintedStrandIds)) {
@@ -801,11 +813,12 @@ export function downstreamDisownSweep(
       if (!adjProvenance.markReopened(rec.contradictionSetId)) continue; // already re-opened
       // Transition the dispute back to PENDING for a human (losers NOT auto-promoted).
       if (pending !== undefined && systemSource !== undefined) {
+        const members = [...new Set([rec.winner, ...(rec.losingMemberIds ?? [])])];
         pending.appendPending(
           {
             contradictionSetId: rec.contradictionSetId,
             attribute: rec.attribute,
-            members: [rec.winner],
+            members,
             reason: "REOPENED_BY_DISOWN",
             createdAt: now,
           },

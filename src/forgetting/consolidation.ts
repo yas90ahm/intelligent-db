@@ -352,6 +352,46 @@ export function demote(loser: Strand, winnerEdge: Edge): DemotionResult {
   };
 }
 
+/**
+ * The outcome of promoting a strand back to LIVE because an `approve()` resolution
+ * designated it the winner despite it NOT already being LIVE.
+ */
+export interface PromotionResult {
+  /** The strand that was promoted back to LIVE. */
+  readonly promoted: StrandId;
+  /** The strand's new fact state — always {@link FactState.LIVE}. */
+  readonly newState: FactState;
+}
+
+/**
+ * Promote `winner` to LIVE, clearing any stale `outranked_by` pointer — the mirror
+ * image of {@link demote}.
+ *
+ * Every PRE-EXISTING `approve()` caller disputes only among strands that are
+ * ALREADY LIVE (a fresh DEFERRED multi-class dispute's members are always LIVE —
+ * `adjudicate()` only admits LIVE members), so historically the designated winner
+ * never needed promoting. That stops being true for a `REOPENED_BY_DISOWN` dispute
+ * (`ratification/disown.ts`): it threads the ORIGINAL losing member ids back into
+ * the reopened dispute's `members` so a genuinely surviving, non-tainted claim can
+ * be picked over the now-tainted original winner — but that pick is currently
+ * DEMOTED (from the FIRST resolution). Without this promotion, `approve()` would
+ * "succeed" while leaving BOTH the old and the newly-picked winner DEMOTED — the
+ * re-decision would be structurally meaningless (nothing ends up LIVE). This
+ * transition makes the pick real.
+ *
+ * Mechanical only, mirroring {@link demote}: it does NOT decide *whether* the
+ * promotion is authorized — `approve()`'s distinct-approver + RC-5
+ * anchor-independence gates already ran before this is ever called.
+ *
+ * @param winner the strand being promoted (mutated: fact_state + outranked_by).
+ * @returns a {@link PromotionResult} receipt of the transition.
+ */
+export function promote(winner: Strand): PromotionResult {
+  winner.fact_state = FactState.LIVE;
+  winner.outranked_by = null;
+  return { promoted: winner.id, newState: FactState.LIVE };
+}
+
 // ---------------------------------------------------------------------------
 // 4. CONSOLIDATION ADJUDICATION  (HARD CORE — theorem-honest implementation)
 // ---------------------------------------------------------------------------

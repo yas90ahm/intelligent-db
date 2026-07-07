@@ -545,7 +545,11 @@ describe("1. FULL-LOAD dossier + timeline over one shared SQLite handle", () => 
     expect(openDisputes).toHaveLength(1);
     if (openDisputes[0]!.status === "OPEN") {
       expect(openDisputes[0]!.reason).toBe("REOPENED_BY_DISOWN");
-      expect(openDisputes[0]!.members).toEqual([winStrand.id]);
+      // disown-reopen-cannot-change-winner fix: the reopened dispute's members now
+      // include the ORIGINAL loser (chalStrand) alongside the tainted winner, so a
+      // human can genuinely pick the surviving claim instead of structurally
+      // reconfirming the exact winner whose margin just collapsed.
+      expect(openDisputes[0]!.members).toEqual([winStrand.id, chalStrand.id]);
     }
     const winResolved = winAfter.disputes.find((d) => d.status === "RESOLVED_BY_ADJUDICATION")!;
     if (winResolved.status === "RESOLVED_BY_ADJUDICATION") {
@@ -556,9 +560,11 @@ describe("1. FULL-LOAD dossier + timeline over one shared SQLite handle", () => 
         (m) => m.op === "DISOWN_CRATER" && m.subjectId === String(winnerSrc),
       ),
     ).toBe(true);
-    // The re-open re-contests the recorded WINNER only — the adjudicate-demoted
-    // challenger and the disown-demoted relay are NOT contested (spec 24).
-    expect(engine.explain(chalStrand.id)!.contested).toBe(false);
+    // The re-open now genuinely re-contests BOTH the tainted winner and the
+    // ORIGINAL loser it can be replaced by (disown-reopen-cannot-change-winner
+    // fix) — the disown-demoted relay is a SEPARATE strand, never a member of
+    // this dispute, and stays NOT contested (spec 24).
+    expect(engine.explain(chalStrand.id)!.contested).toBe(true);
     expect(engine.explain(fRelay)!.contested).toBe(false);
 
     // Corroboration events name the strand in the right ROLE, reversal visible.

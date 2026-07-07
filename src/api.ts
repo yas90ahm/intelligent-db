@@ -2382,12 +2382,20 @@ class IntelligentDbImpl implements IntelligentDb {
       if (shares) contributingStrandIds.push(m.id);
     }
 
+    // The ORIGINAL losing member ids (this resolution's demotions) — threaded
+    // through so a later disown's RE-OPEN can offer them as members of the
+    // reopened dispute (disown.ts), letting a genuinely surviving claim be picked
+    // instead of structurally reconfirming this exact winner.
+    const losingMemberIds: StrandId[] =
+      outcome.kind === "RESOLVED" ? outcome.demotions.map((d) => d.demoted) : [];
+
     ledger.record({
       contradictionSetId,
       attribute,
       winner: winnerId,
       margin,
       contributingStrandIds,
+      losingMemberIds,
       at,
     });
   }
@@ -2528,6 +2536,31 @@ class IntelligentDbImpl implements IntelligentDb {
               hashStrandState(loser),
               when,
               refEdge === undefined ? undefined : String(refEdge),
+            ),
+          );
+        }
+      }
+
+      // PERSIST THE PROMOTED WINNER (the disown-reopen-cannot-change-winner fix): a
+      // `REOPENED_BY_DISOWN` dispute's winner can be a strand the ORIGINAL
+      // resolution had already demoted; `plan.winnerPromotion` is non-null exactly
+      // when the ledger flipped it back to LIVE, mirroring the demotion persistence
+      // above (persist the EXACT object the ledger mutated in place — `handed` — so
+      // the promotion survives on a clone-on-read backend too).
+      if (plan.winnerPromotion !== null) {
+        const fromStore = this.#store.getStrand(winnerStrandId);
+        const beforeHash = fromStore !== null ? hashStrandState(fromStore) : EMPTY_STATE_HASH;
+        const winnerObj = handed.get(winnerStrandId) ?? fromStore;
+        if (winnerObj !== null) {
+          this.#store.putStrand(winnerObj);
+          this.#emitMutation(
+            mutationReceipt(
+              "PROMOTE",
+              String(winnerStrandId),
+              String(winnerObj.content_hash),
+              beforeHash,
+              hashStrandState(winnerObj),
+              when,
             ),
           );
         }

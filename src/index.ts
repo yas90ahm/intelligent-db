@@ -219,6 +219,7 @@ export {
   collapseSameRootEchoes,
   buildContradictionSet,
   demote,
+  promote,
   tryConsolidate,
   DEFAULT_ADJUDICATION_POLICY,
 } from "./forgetting/consolidation.js";
@@ -226,6 +227,7 @@ export {
 export type {
   ContradictionSet,
   DemotionResult,
+  PromotionResult,
   ConsolidationOutcome,
   PendingRatification,
   PendingRatificationReason,

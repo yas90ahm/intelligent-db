@@ -552,6 +552,17 @@ export interface AdjudicationProvenance {
    * with a disown's tainted set is how the sweep knows to recompute and maybe re-open.
    */
   readonly contributingStrandIds: readonly StrandId[];
+  /**
+   * The ORIGINAL disputed members this resolution DEMOTED (the losers), carried so
+   * a later disown's RE-OPEN (`ratification/disown.ts`) can thread them back into
+   * the reopened dispute's `PendingPayload.members` alongside the (now-tainted)
+   * winner. Without this, `approve()`'s membership guard means a re-opened dispute
+   * can structurally only reconfirm the original winner — a genuinely surviving,
+   * non-tainted loser could never be selected instead. OPTIONAL/back-compatible: a
+   * hand-built record omitting it re-opens with just the winner (the prior,
+   * narrower behavior).
+   */
+  readonly losingMemberIds?: readonly StrandId[];
   /** Witness time the adjudication was recorded. */
   readonly at: EpochMs;
 }
