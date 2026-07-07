@@ -18,6 +18,7 @@
  */
 
 import { dirname, join } from "node:path";
+import { mkdirSync, statSync } from "node:fs";
 
 import { createAgentMemory } from "../agent/agentMemory.js";
 import { createSqlitePendingLedger } from "../ratification/pendingLedger.js";
@@ -88,6 +89,86 @@ export function parseArgs(argv: readonly string[]): CliConfig {
     socketArg ?? (process.platform === "win32" ? "intelligent-db-daemon" : join(dataDir, "daemon.sock"));
   const auditDbPath = join(dataDir, "daemon-audit.db");
   return { dbPath, dataDir, endpointBase, auditDbPath };
+}
+
+// ---------------------------------------------------------------------------
+// cli-no-path-preflight fix: the CLI used to hand `--db`/`--socket` straight to
+// `createAgentMemory`/`DaemonServer` with zero filesystem preflight. A `--db`
+// path whose parent directory doesn't exist yet reached `node:sqlite`'s
+// `DatabaseSync` constructor bare and surfaced as an opaque native error
+// (reproduced: "unable to open database file" / `ERR_SQLITE_ERROR`, naming
+// neither the missing directory nor what to do about it) — and the identical
+// shape of problem existed for a POSIX `--socket` path whose parent directory
+// is missing (an opaque `ENOENT` from the listener's `bind()`, deep inside
+// `server.ts`, only reachable by network I/O, not before it).
+// ---------------------------------------------------------------------------
+
+/**
+ * Thrown by {@link preflightCliPaths} when a CLI-supplied path's parent
+ * directory could not be created or turned out not to be a directory at all
+ * (e.g. a plain file already occupies that path). Always names the OFFENDING
+ * path plus which CLI flag it came from, and wraps the underlying `node:fs`
+ * error rather than letting a bare, unlabeled native error reach the operator.
+ */
+export class InvalidCliPathError extends Error {
+  constructor(
+    public readonly kind: "db" | "data-dir" | "socket",
+    public readonly path: string,
+    cause: unknown,
+  ) {
+    super(
+      `intelligent-db-daemon: invalid --${kind === "data-dir" ? "data-dir" : kind} path ` +
+        `${JSON.stringify(path)}: ${cause instanceof Error ? cause.message : String(cause)}. ` +
+        `The parent directory could not be created or is not a directory — check the path and ` +
+        `permissions.`,
+    );
+    this.name = "InvalidCliPathError";
+  }
+}
+
+/**
+ * Ensure `dir` (the directory a CLI-supplied path needs to live under) exists,
+ * creating it (and any missing ancestors) if not — mirroring `TokenStore`'s own
+ * `mkdirSync(dataDir, { recursive: true })` discipline (`tokens.ts`), just run
+ * BEFORE construction instead of inside it, and for every path this CLI takes,
+ * not only `dataDir`. Throws {@link InvalidCliPathError} (never a bare native
+ * error) if the directory cannot be created, or if something already exists at
+ * that path that is not a directory (e.g. a plain file blocking it).
+ */
+function ensureDirFor(kind: "db" | "data-dir" | "socket", suppliedPath: string, dir: string): void {
+  try {
+    mkdirSync(dir, { recursive: true });
+  } catch (err) {
+    throw new InvalidCliPathError(kind, suppliedPath, err);
+  }
+  let stat;
+  try {
+    stat = statSync(dir);
+  } catch (err) {
+    throw new InvalidCliPathError(kind, suppliedPath, err);
+  }
+  if (!stat.isDirectory()) {
+    throw new InvalidCliPathError(kind, suppliedPath, new Error(`${dir} exists and is not a directory`));
+  }
+}
+
+/**
+ * Validate + prepare every filesystem path {@link parseArgs} resolved, BEFORE
+ * `main()` constructs anything against them: creates each missing parent
+ * directory (`--db`'s, `--data-dir`'s, and — POSIX only — `--socket`'s, since a
+ * Windows named-pipe endpoint is a kernel-namespace name, not a filesystem
+ * path, and has nothing to preflight) and fails with a clear, typed
+ * {@link InvalidCliPathError} naming the exact offending path when a directory
+ * cannot be created or turns out to be a file. `parseArgs` itself stays pure
+ * (argv → config, no I/O) — this is the deliberate, separate I/O step run right
+ * after it in `main()`.
+ */
+export function preflightCliPaths(config: CliConfig): void {
+  ensureDirFor("db", config.dbPath, dirname(config.dbPath));
+  ensureDirFor("data-dir", config.dataDir, config.dataDir);
+  if (process.platform !== "win32") {
+    ensureDirFor("socket", config.endpointBase, dirname(config.endpointBase));
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -171,6 +252,9 @@ export function verifyChainsAtStartup(opts: { auditChain: DaemonAuditChain; dbPa
 
 export async function main(argv: readonly string[] = process.argv.slice(2)): Promise<void> {
   const config = parseArgs(argv);
+  // cli-no-path-preflight fix: create/validate every filesystem path BEFORE
+  // anything is constructed against it — see preflightCliPaths's doc.
+  preflightCliPaths(config);
 
   const memory = createAgentMemory({ dbPath: config.dbPath });
   const tokens = createTokenStore(config.dataDir);

@@ -18,10 +18,18 @@ import { join } from "node:path";
 import { createRequire } from "node:module";
 import type { DatabaseSync as DatabaseSyncType } from "node:sqlite";
 
+import { existsSync, statSync, writeFileSync } from "node:fs";
+
 import { createAgentMemory } from "../agent/agentMemory.js";
 import type { AttributeKey } from "../core/types.js";
 import { createSqliteDaemonAuditChain } from "./auditChainSqlite.js";
-import { parseArgs, verifyChainsAtStartup, ChainVerificationFailedError } from "./cli.js";
+import {
+  parseArgs,
+  preflightCliPaths,
+  verifyChainsAtStartup,
+  ChainVerificationFailedError,
+  InvalidCliPathError,
+} from "./cli.js";
 
 const require = createRequire(import.meta.url);
 const { DatabaseSync } = require("node:sqlite") as {
@@ -66,6 +74,71 @@ describe("cli: parseArgs", () => {
     const cfg = parseArgs(["--db", "mem.db", "--data-dir", "custom-dir", "--socket", "custom-sock"]);
     expect(cfg.dataDir).toBe("custom-dir");
     expect(cfg.endpointBase).toBe("custom-sock");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// preflightCliPaths — cli-no-path-preflight
+// ---------------------------------------------------------------------------
+
+describe("cli: preflightCliPaths (cli-no-path-preflight)", () => {
+  it("creates a --db path's missing, nested parent directory rather than leaving it to a bare node:sqlite error", () => {
+    const root = freshDir();
+    const dbPath = join(root, "deeply", "nested", "not-yet-created", "mem.db");
+    const cfg = parseArgs(["--db", dbPath]);
+    expect(existsSync(cfg.dataDir)).toBe(false);
+
+    expect(() => preflightCliPaths(cfg)).not.toThrow();
+
+    expect(existsSync(cfg.dataDir)).toBe(true);
+    expect(statSync(cfg.dataDir).isDirectory()).toBe(true);
+    // The db file itself is NOT created (that's node:sqlite's job at construction
+    // time) — only the directory it will live in.
+    expect(existsSync(dbPath)).toBe(false);
+
+    // And construction against the now-existing directory succeeds.
+    const mem = createAgentMemory({ dbPath });
+    mem.close();
+  });
+
+  it("throws a typed InvalidCliPathError (never a bare native error) when a plain file blocks the --db directory", () => {
+    const root = freshDir();
+    const blocker = join(root, "blocker");
+    writeFileSync(blocker, "not a directory");
+    const dbPath = join(blocker, "nested", "mem.db");
+    const cfg = parseArgs(["--db", dbPath]);
+
+    let caught: unknown;
+    try {
+      preflightCliPaths(cfg);
+    } catch (err) {
+      caught = err;
+    }
+    expect(caught).toBeInstanceOf(InvalidCliPathError);
+    expect((caught as InvalidCliPathError).kind).toBe("db");
+    expect((caught as InvalidCliPathError).path).toBe(dbPath);
+    expect((caught as InvalidCliPathError).message).toContain(JSON.stringify(dbPath));
+  });
+
+  it("also creates a missing --data-dir when it differs from dirname(--db)", () => {
+    const root = freshDir();
+    const dbPath = join(root, "db-lives-here", "mem.db");
+    const dataDir = join(root, "a-totally-different-data-dir");
+    const cfg = parseArgs(["--db", dbPath, "--data-dir", dataDir]);
+    expect(existsSync(dataDir)).toBe(false);
+
+    preflightCliPaths(cfg);
+
+    expect(existsSync(dataDir)).toBe(true);
+    expect(existsSync(join(root, "db-lives-here"))).toBe(true);
+  });
+
+  it("is idempotent: calling it twice on an already-valid config does not throw", () => {
+    const root = freshDir();
+    const dbPath = join(root, "again", "mem.db");
+    const cfg = parseArgs(["--db", dbPath]);
+    preflightCliPaths(cfg);
+    expect(() => preflightCliPaths(cfg)).not.toThrow();
   });
 });
 
