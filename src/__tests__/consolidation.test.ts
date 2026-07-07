@@ -699,6 +699,48 @@ describe("tryConsolidate — NOOP (nothing to adjudicate)", () => {
   });
 });
 
+describe("tryConsolidate — DEFENSE-IN-DEPTH: zero-provenance dispute (Wave-3 consolidation-zero-provenance-fallback)", () => {
+  it("a synthetic dispute whose members carry NO provenance roots at all DEFERS — it never falls through the single-class safe path and resolves on an empty basis", () => {
+    // A hand-built, malformed dispute: two DISTINCT claims (so it is a genuine
+    // dispute, not the NOOP case above), but neither member carries so much as
+    // ONE provenance root. `independenceClassesOf` therefore returns a set of
+    // size 0 — NOT > 1 (so it would previously fall through to the "SAFE CASE",
+    // which ranks by `stampsByRoot`-derived strength off of a nonexistent root
+    // and would resolve/demote on zero external signal). This shape is
+    // UNREACHABLE via the live write path (every real strand mints at least one
+    // provenance root at write time) — this is a defense-in-depth floor against
+    // a malformed/synthetic caller, not a live-path regression.
+    const a = claimStrand({
+      idRaw: "strand:a",
+      rootIdRaw: "root:a",
+      cls: "class:X",
+      payload: { v: "A" },
+    });
+    const b = claimStrand({
+      idRaw: "strand:b",
+      rootIdRaw: "root:b",
+      cls: "class:Y",
+      payload: { v: "B" },
+    });
+    // Strip provenance AFTER construction — claimStrand always mints a root, so
+    // this is the only way to reach the zero-provenance shape at all.
+    const zeroProvA: Strand = { ...a, provenance: [] };
+    const zeroProvB: Strand = { ...b, provenance: [] };
+
+    const set = buildContradictionSet([zeroProvA, zeroProvB]);
+    const out = tryConsolidate(set, [zeroProvA, zeroProvB], new Map(), NOW);
+
+    expect(out.kind).toBe("DEFERRED");
+    if (out.kind === "DEFERRED") {
+      expect(out.pending.reason).toBe("INDEPENDENT_DISPUTE");
+    }
+    // Never resolved, never demoted — the human horn decides, exactly like a
+    // genuine multi-class dispute.
+    expect(zeroProvA.fact_state).toBe(FactState.LIVE);
+    expect(zeroProvB.fact_state).toBe(FactState.LIVE);
+  });
+});
+
 describe("tryConsolidate — wiring guards", () => {
   it("throws if a set member was not provided in 'members'", () => {
     const a = claimStrand({

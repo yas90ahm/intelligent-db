@@ -948,6 +948,20 @@ export function tryConsolidate(
   });
 
   const classes = independenceClassesOf(memberStrands);
+
+  // DEFENSE-IN-DEPTH (Wave-3 `consolidation-zero-provenance-fallback`): a dispute
+  // whose members carry ZERO provenance roots between them has no external signal
+  // to resolve by at all — the SAFE CASE below assumes at least one root to rank
+  // `ranked[0]` on. Currently UNREACHABLE via the live write path (every real
+  // strand mints at least one provenance root at write time), but a synthetic or
+  // malformed dispute must never silently fall through the single-class "safe"
+  // branch (`classes.size > 1` is false for `classes.size === 0` too) and resolve
+  // on an empty basis. Treat it as its OWN deferring case — same DEFERRED shape
+  // the genuinely multi-class path uses, deciding nothing, demoting nothing.
+  if (classes.size === 0) {
+    return deferPending();
+  }
+
   if (classes.size > 1) {
     const top = ranked[0]!;
 
