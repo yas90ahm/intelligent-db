@@ -402,6 +402,44 @@ function removeDbFiles(path: string): void {
 }
 
 /**
+ * REFUSE-TO-COMPLETE error (the spec's refusal rule, {@link RestoreOptions.chainVerifier}'s
+ * doc): thrown by {@link restoreToTimestamp} when the reconstructed database carries a
+ * `ratification_records` table with one or more rows (an audit-chain-backed deployment)
+ * but either no {@link ChainVerifier} was supplied to prove that chain, or one was
+ * supplied and it reported the chain broken. A restore that cannot prove the audit
+ * chain it is handing back is a FAILURE, not a warning: `PRAGMA integrity_check` only
+ * proves the file is not structurally torn — it says nothing about whether the
+ * checksum-chained ledger inside it is genuine. Silently returning success here would
+ * hand the caller an UNVERIFIED restore with no visible symptom until the next tamper
+ * investigation finds nothing to check against.
+ */
+export class UnverifiedLedgerRestoreError extends Error {
+  constructor(reason: string) {
+    super(`restoreToTimestamp: refusing to complete — ${reason}`);
+    this.name = "UnverifiedLedgerRestoreError";
+  }
+}
+
+/**
+ * Row count of `ratification_records` in `db`, or `0` if the table does not exist at
+ * all (a database that never wired a ratification ledger has no such table — the
+ * refusal gate below is correctly inert for it, since there is no chain to omit
+ * verifying).
+ */
+function ratificationRecordsRowCount(db: DatabaseSyncType): number {
+  const tableRow = db
+    .prepare(
+      "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'ratification_records'",
+    )
+    .get();
+  if (tableRow === undefined) return 0;
+  const row = db.prepare("SELECT COUNT(*) AS n FROM ratification_records").get() as
+    | { n: number }
+    | undefined;
+  return row === undefined ? 0 : Number(row.n);
+}
+
+/**
  * Reconstruct the database as of timestamp `t` from a WAL archive directory
  * (see the module doc's disclosed design decision for WHY the reconstruction
  * base is the archive dir's own `base.db`, not a byte-splice onto
@@ -497,15 +535,33 @@ export function restoreToTimestamp(
     );
   }
 
+  // THE REFUSAL RULE (RestoreOptions.chainVerifier's doc): a restored db that carries
+  // ANY ratification_records rows has an audit chain whose SEMANTIC integrity has not
+  // yet been checked by anything above (integrity_check is structural only). Omitting
+  // chainVerifier on such a db must throw here — never silently return success — and
+  // the caller supplying one whose verification reports broken must throw too.
+  const ledgerRowCount = ratificationRecordsRowCount(restored);
+  if (opts?.chainVerifier === undefined) {
+    if (ledgerRowCount > 0) {
+      restored.close();
+      removeDbFiles(destPath);
+      throw new UnverifiedLedgerRestoreError(
+        `the reconstructed database carries ${ledgerRowCount} ratification_records ` +
+          `row(s) but no chainVerifier was supplied to verify its audit chain. Pass a ` +
+          `RestoreOptions.chainVerifier (wrapping the ledger's own verifyChain()) so ` +
+          `this restore can prove the chain it hands back.`,
+      );
+    }
+  }
+
   let chainHead: ChainHeadLike | null = null;
   if (opts?.chainVerifier !== undefined) {
     const verification = opts.chainVerifier(restored);
     if (!verification.ok) {
       restored.close();
       removeDbFiles(destPath);
-      throw new Error(
-        `restoreToTimestamp: audit chain verification failed at seq ` +
-          `${String(verification.firstBrokenSeq)} — refusing to complete the restore.`,
+      throw new UnverifiedLedgerRestoreError(
+        `audit chain verification failed at seq ${String(verification.firstBrokenSeq)}.`,
       );
     }
     chainHead = verification.chainHead;
