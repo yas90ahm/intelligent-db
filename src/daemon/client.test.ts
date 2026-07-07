@@ -388,3 +388,132 @@ describe("reconnect-with-backoff", () => {
     core.close();
   });
 });
+
+// ---------------------------------------------------------------------------
+// 5. Structured logging (zero-structured-logging fix, mcp/daemon-client
+// layer): a re-audit found this layer was a total logging blind spot —
+// `daemon/client.ts`, `mcp/server.ts`, and `mcp/handler.ts` had zero
+// `daemonLog`/`console.*` call sites, unlike the daemon SERVER side (which the
+// original `zero-structured-logging` fix instrumented thoroughly). These
+// tests capture real `process.stderr` writes (mirroring
+// `trustMutationGate.test.ts`'s `captureDaemonLogs` helper) around the SAME
+// fake-transport harness the rest of this file uses — no new I/O, no mocks of
+// this module itself, just observing its real side effect.
+// ---------------------------------------------------------------------------
+
+async function captureStderrLogs<T>(fn: () => T | Promise<T>): Promise<{ result: T; lines: unknown[] }> {
+  const spy = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+  try {
+    const result = await fn();
+    const lines = spy.mock.calls
+      .map((c) => String(c[0]))
+      .filter((s) => s.trim().length > 0)
+      .map((s) => {
+        try {
+          return JSON.parse(s) as unknown;
+        } catch {
+          return null;
+        }
+      })
+      .filter((v): v is unknown => v !== null);
+    return { result, lines };
+  } finally {
+    spy.mockRestore();
+  }
+}
+
+describe("structured logging (zero-structured-logging fix, mcp/daemon-client layer)", () => {
+  it("a successful connect/handshake logs daemon_client_connected with the resolved sourceId", async () => {
+    const { lines } = await captureStderrLogs(async () => {
+      const { connect, conns } = fakeConnectFactory();
+      const remote = createRemoteAgentMemory({ socketPath: "unused", token: "sekret", connect });
+      await Promise.resolve();
+      conns[0]!.emitLine(okAuth("src:connected-probe"));
+      await remote.getDefaultSourceId();
+      await remote.close();
+    });
+    const connected = lines.find((l) => (l as { event?: string }).event === "daemon_client_connected") as
+      | { resolvedSourceId?: string }
+      | undefined;
+    expect(connected).toBeDefined();
+    expect(connected!.resolvedSourceId).toBe("src:connected-probe");
+  });
+
+  it("a rejected auth logs daemon_client_auth_rejected with the daemon's reason, and NEVER the raw token", async () => {
+    const { lines } = await captureStderrLogs(async () => {
+      const { connect, conns } = fakeConnectFactory();
+      const remote = createRemoteAgentMemory({
+        socketPath: "unused",
+        token: "hunter2-super-secret-token",
+        connect,
+        reconnect: { initialDelayMs: 100_000 },
+      });
+      const pending = remote.getDefaultSourceId();
+      conns[0]!.emitLine({ ok: false, error: "bad token" } satisfies DaemonAuthResponse);
+      await pending.catch(() => undefined);
+      await remote.close();
+    });
+    const rejected = lines.find((l) => (l as { event?: string }).event === "daemon_client_auth_rejected") as
+      | { reason?: string }
+      | undefined;
+    expect(rejected).toBeDefined();
+    expect(rejected!.reason).toBe("bad token");
+    // The raw bearer token must never appear in ANY logged line (R3 discipline,
+    // mirrored from the daemon server's own logging).
+    for (const line of lines) {
+      expect(JSON.stringify(line)).not.toContain("hunter2-super-secret-token");
+    }
+  });
+
+  it("a write failure during dispatch logs daemon_client_dispatch_error with the failing method", async () => {
+    const { connect, conns } = fakeConnectFactory();
+    const remote = createRemoteAgentMemory({ socketPath: "unused", token: "t", connect });
+    await Promise.resolve();
+    conns[0]!.emitLine(okAuth());
+
+    // Make the NEXT write on this connection throw synchronously — reproduces
+    // a real transport-level dispatch failure without needing a real socket.
+    const originalWrite = conns[0]!.write.bind(conns[0]!);
+    let calls = 0;
+    conns[0]!.write = (data: string): boolean => {
+      calls++;
+      if (calls === 1) throw new Error("simulated write failure");
+      return originalWrite(data);
+    };
+
+    const { result, lines } = await captureStderrLogs(async () => {
+      return remote.recall("what is the capital?").catch((e: unknown) => e);
+    });
+    expect(result).toBeInstanceOf(DaemonUnknownOutcomeError);
+
+    const dispatchError = lines.find((l) => (l as { event?: string }).event === "daemon_client_dispatch_error") as
+      | { method?: string; message?: string }
+      | undefined;
+    expect(dispatchError).toBeDefined();
+    expect(dispatchError!.method).toBe("recall");
+    expect(dispatchError!.message).toMatch(/simulated write failure/);
+
+    await remote.close();
+  });
+
+  it("a disconnect of a previously-ready connection logs daemon_client_disconnected", async () => {
+    const { connect, conns } = fakeConnectFactory();
+    const remote = createRemoteAgentMemory({
+      socketPath: "unused",
+      token: "t",
+      connect,
+      reconnect: { initialDelayMs: 100_000 },
+    });
+    await Promise.resolve();
+    conns[0]!.emitLine(okAuth());
+    await remote.getDefaultSourceId();
+
+    const { lines } = await captureStderrLogs(() => {
+      conns[0]!.emitClose();
+    });
+    const disconnected = lines.find((l) => (l as { event?: string }).event === "daemon_client_disconnected");
+    expect(disconnected).toBeDefined();
+
+    await remote.close();
+  });
+});

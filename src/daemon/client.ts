@@ -48,11 +48,21 @@
  * STRUCTURALLY for the five MCP-surface verbs (`remember`/`recall`/
  * `pendingQuestions`/`resolvePending`/`explain`) plus `close` — every extra
  * parameter (`requestId`, H5) is optional, so `mcp/server.ts` hands this
- * object straight to `handleMcpRequestAsync` with zero glue (see
- * `__AssertRemoteAgentMemorySatisfiesAsyncAgentMemory` below — a compile-time
- * proof, no runtime effect). The in-process path needs one trivial adapter
- * (`syncToAsyncMemory`, in `mcp/asyncMemory.ts`) since `AgentMemory` itself
- * stays synchronous; this module needs none.
+ * object straight to `handleMcpRequestAsync` with zero glue. That structural
+ * fit is verified where it actually matters: `mcp/server.ts`'s `main()`
+ * assigns `createRemoteAgentMemory(...)`'s return value into an
+ * explicitly-typed `let memory: AsyncAgentMemory;` binding — a REAL
+ * TypeScript structural check that errors at that exact assignment if the two
+ * interfaces ever diverge. (An earlier revision of this module also exported a
+ * standalone `type __AssertRemoteAgentMemorySatisfiesAsyncAgentMemory = ...`
+ * conditional-type alias here as a second, "belt and suspenders" proof — a
+ * re-audit found it was dead code: nothing ever referenced the alias, so
+ * TypeScript never actually evaluated it, and a genuine interface divergence
+ * would have produced zero diagnostics from it — a fake safety net sitting
+ * beside the real one above. Removed rather than fixed in place: the real
+ * check already exists and needs no help.) The in-process path needs one
+ * trivial adapter (`syncToAsyncMemory`, in `mcp/asyncMemory.ts`) since
+ * `AgentMemory` itself stays synchronous; this module needs none.
  *
  * `trust` / `engine` are NOT proxied remotely: both are rich, multi-method
  * "advanced caller" escape hatches (a whole `TrustRegistry` / `IntelligentDb`
@@ -72,6 +82,7 @@
 import * as net from "node:net";
 
 import { BoundedLineSplitter } from "./protocol.js";
+import { daemonLog } from "./log.js";
 import type {
   DaemonAuthRequest,
   DaemonAuthResponse,
@@ -84,7 +95,6 @@ import type { AgentMemory } from "../agent/agentMemory.js";
 import type { IntelligentDb } from "../api.js";
 import type { TrustRegistry } from "../identity/trustRegistry.js";
 import type { SourceId } from "../core/types.js";
-import type { AsyncAgentMemory } from "../mcp/asyncMemory.js";
 
 // ---------------------------------------------------------------------------
 // Typed errors (never fabricated success/failure — R6/H4)
@@ -360,6 +370,17 @@ export class DaemonClientCore {
     try {
       conn.write(JSON.stringify(envelope) + "\n");
     } catch (err) {
+      // zero-structured-logging fix (mcp/daemon-client layer): mirror the
+      // daemon server's own `daemonLog` for a genuine dispatch failure (never
+      // for the routine, expected UNKNOWN-outcome paths elsewhere in this
+      // class — those aren't failures of THIS client, they're an honestly
+      // reported unknown remote outcome).
+      daemonLog({
+        event: "daemon_client_dispatch_error",
+        level: "error",
+        method,
+        message: err instanceof Error ? err.message : String(err),
+      });
       this.#pending.delete(id);
       reject(
         new DaemonUnknownOutcomeError(
@@ -384,7 +405,13 @@ export class DaemonClientCore {
     let conn: ConnectionLike;
     try {
       conn = this.#opts.connect();
-    } catch {
+    } catch (err) {
+      daemonLog({
+        event: "daemon_client_connect_failed",
+        level: "warn",
+        attempt: this.#attempt,
+        message: err instanceof Error ? err.message : String(err),
+      });
       this.#scheduleConnect(backoffDelayMs(this.#attempt, this.#opts.reconnect));
       this.#attempt += 1;
       return;
@@ -424,7 +451,12 @@ export class DaemonClientCore {
     let parsed: DaemonAuthResponse;
     try {
       parsed = JSON.parse(line) as DaemonAuthResponse;
-    } catch {
+    } catch (err) {
+      daemonLog({
+        event: "daemon_client_handshake_parse_error",
+        level: "error",
+        message: err instanceof Error ? err.message : String(err),
+      });
       this.#conn?.destroy();
       this.#conn = null;
       this.#scheduleConnect(backoffDelayMs(this.#attempt, this.#opts.reconnect));
@@ -433,6 +465,14 @@ export class DaemonClientCore {
     }
     if (!parsed.ok) {
       const err = new DaemonAuthError(parsed.error ?? "rejected");
+      // zero-structured-logging fix (mcp/daemon-client layer): the raw token
+      // is NEVER logged here (mirrors the daemon server's own R3 discipline) —
+      // only the daemon's own rejection reason string.
+      daemonLog({
+        event: "daemon_client_auth_rejected",
+        level: "warn",
+        reason: parsed.error ?? "rejected",
+      });
       // Surface the auth failure to anyone currently blocked on readiness, but
       // keep retrying in the background (a rotated token file can become
       // valid later) — mirrors R6's "reconnect-with-backoff" as a standing
@@ -448,6 +488,11 @@ export class DaemonClientCore {
     this.#ready = true;
     this.#attempt = 0;
     this.#defaultSourceId = parsed.defaultSourceId ?? null;
+    daemonLog({
+      event: "daemon_client_connected",
+      level: "info",
+      resolvedSourceId: this.#defaultSourceId ?? undefined,
+    });
 
     const waiters = this.#readyWaiters.splice(0);
     for (const w of waiters) w.resolve(this.#defaultSourceId ?? "");
@@ -485,8 +530,16 @@ export class DaemonClientCore {
   }
 
   #handleDisconnect(): void {
+    const wasReady = this.#ready;
     this.#ready = false;
     this.#conn = null;
+    if (wasReady) {
+      // Only log a genuine disconnect of a PREVIOUSLY-ready connection — a
+      // failed initial connect/handshake already logs its own event above,
+      // and would otherwise double-log here too (`conn.on("close", ...)`
+      // fires for that case as well).
+      daemonLog({ event: "daemon_client_disconnected", level: "warn" });
+    }
     // Every IN-FLIGHT request (already sent, no response yet) is UNKNOWN —
     // never fabricated success/failure (R6/H4).
     for (const [, entry] of this.#pending) {
@@ -589,21 +642,6 @@ export interface RemoteAgentMemory {
   /** Close the connection; stop reconnecting; fail everything outstanding UNKNOWN. */
   close(): Promise<void>;
 }
-
-/**
- * COMPILE-TIME PROOF, no runtime effect (PHASE3B_MCP_ASYNC_SPEC.md #2):
- * {@link RemoteAgentMemory} satisfies `mcp/asyncMemory.ts`'s narrow
- * {@link AsyncAgentMemory} contract for the five MCP-surface verbs plus
- * `close` — the SAME object `mcp/server.ts` hands `handleMcpRequestAsync`
- * directly, with no adapter (unlike the in-process path, which needs
- * `syncToAsyncMemory`). If a future edit to either interface ever breaks this,
- * `never` here turns into a type error at this exact line instead of a
- * silent runtime mismatch discovered only when the daemon-backed MCP path is
- * exercised.
- */
-export type __AssertRemoteAgentMemorySatisfiesAsyncAgentMemory = RemoteAgentMemory extends AsyncAgentMemory
-  ? true
-  : never;
 
 export interface RemoteAgentMemoryOptions {
   /** The daemon's Unix socket path / Windows named pipe path. */
