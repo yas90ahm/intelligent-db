@@ -201,6 +201,20 @@ function toolText(res: McpResponse): string {
   return content[0]!.text;
 }
 
+/**
+ * resolve-pending-no-consent-binding fix: `resolve_pending` now REQUIRES the
+ * confirmationToken a real `list_pending_questions` call just minted for this
+ * exact contradictionSetId — pull it out of the rendered listing exactly as a
+ * relaying agent would (never re-derived from engine internals).
+ */
+function extractConfirmationToken(listText: string, csid: string): string {
+  const idx = listText.indexOf(`contradictionSetId: ${csid}`);
+  expect(idx).toBeGreaterThanOrEqual(0);
+  const match = listText.slice(idx).match(/confirmationToken:\s*(\S+)/);
+  expect(match).not.toBeNull();
+  return match![1]!;
+}
+
 // --- routing plumbing (pure data — no store, no ledger) --------------------------
 
 /** Hand-build a PendingPayload exactly as the ledger's doorbell would emit it. */
@@ -396,11 +410,14 @@ describe("4. MCP ROUND-TRIP — list_pending_questions → resolve_pending → r
     expect(listText).toContain(String(rivalFactId));
     expect(listText).toContain("state: LIVE");
 
-    // resolve_pending with the user's choice (the owner's own side).
+    // resolve_pending with the user's choice (the owner's own side) — echoing
+    // back the confirmationToken the listing above just minted.
+    const confirmationToken = extractConfirmationToken(listText, String(csid));
     const resolveText = toolText(
       toolCall(mem, 21, "resolve_pending", {
         contradictionSetId: String(csid),
         chosenStrandId: String(ownerFactId),
+        confirmationToken,
       }),
     );
     expect(resolveText).toContain(`Resolved dispute ${String(csid)}`);
@@ -436,10 +453,13 @@ describe("4. MCP ROUND-TRIP — list_pending_questions → resolve_pending → r
     // carry the label, or a DEMOTED memory reads identically to a believed one.
     const { mem, ownerFactId } = makeDisputedMemory();
     const csid = mem.pendingQuestions()[0]!.contradictionSetId;
+    const listText = toolText(toolCall(mem, 29, "list_pending_questions"));
+    const confirmationToken = extractConfirmationToken(listText, String(csid));
     toolText(
       toolCall(mem, 30, "resolve_pending", {
         contradictionSetId: String(csid),
         chosenStrandId: String(ownerFactId),
+        confirmationToken,
       }),
     );
 
