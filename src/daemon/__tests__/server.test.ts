@@ -48,7 +48,12 @@ async function setupServer(
   overrides: Partial<
     Pick<
       DaemonServerOptions,
-      "maxConnections" | "maxQueueDepth" | "maxPendingHandshakes" | "factChainHead" | "verifyFactChain"
+      | "maxConnections"
+      | "maxQueueDepth"
+      | "maxPendingHandshakes"
+      | "factChainHead"
+      | "verifyFactChain"
+      | "factChainHeadRefreshMs"
     >
   > = {},
 ): Promise<Harness> {
@@ -606,6 +611,130 @@ describe("DaemonServer: status/ping verb (no-health-status-surface)", () => {
     expect([first.id, second.id].sort()).toEqual([1, 2]);
     expect(first.ok).toBe(true);
     expect(second.ok).toBe(true);
+
+    socket.destroy();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// status-ping-blocks-event-loop fix: `factChainHead` is CACHED, refreshed on
+// the daemon's own bounded cadence — never invoked inline per `status`/`ping`
+// request (see server.ts's `DEFAULT_FACT_CHAIN_HEAD_REFRESH_MS` doc comment).
+// ---------------------------------------------------------------------------
+
+describe("DaemonServer: factChainHead caching (status-ping-blocks-event-loop fix)", () => {
+  it("a realistic burst of status polls reuses the cached factChainHead instead of re-invoking a slow lookup on every call", async () => {
+    let calls = 0;
+    // Simulates the REAL cost this fix addresses: `createSqlitePendingLedger`'s
+    // constructor opens a fresh connection and rebuilds its whole open-dispute
+    // index — real, synchronous, event-loop-blocking work. A busy-wait here
+    // reproduces "blocks the thread" precisely instead of merely "is slow on
+    // paper" (a `setTimeout`-based fake would NOT block the event loop and so
+    // would not actually exercise the regression this fix closes).
+    const slowFactChainHead = (): { seq: number; headHash: string } => {
+      calls++;
+      const until = Date.now() + 15;
+      while (Date.now() < until) {
+        /* busy-wait: occupies the event loop exactly like a real sync SQLite read */
+      }
+      return { seq: calls, headHash: `head-${calls}` };
+    };
+    harness = await setupServer({ factChainHead: slowFactChainHead });
+    // Paid exactly once, synchronously, during start() — before any client
+    // could possibly connect.
+    expect(calls).toBe(1);
+
+    const owner = readOwnerTokenFile(harness.dataDir)!;
+    const { socket, reader } = await authenticate(harness.endpoint, owner.token);
+
+    // A REALISTIC monitoring-poll burst (not a single sample — the re-audit's
+    // own complaint was about polling FREQUENCY, so the test must exercise a
+    // range of repeated polls, not one call).
+    const POLL_COUNT = 25;
+    const startMs = Date.now();
+    for (let i = 0; i < POLL_COUNT; i++) {
+      socket.write(JSON.stringify({ id: i, method: "status" }) + "\n");
+      const resp = await reader.nextJson();
+      expect(resp.ok).toBe(true);
+    }
+    const elapsedMs = Date.now() - startMs;
+
+    // The hard, non-timing-dependent proof: the slow lookup was NEVER
+    // re-invoked by any of the 25 polls (still exactly the one startup call).
+    // Pre-fix, `calls` would be 26 here (one at startup, one per poll).
+    expect(calls).toBe(1);
+    // Behavioral corroboration: 25 polls at 15ms/poll would cost >= 375ms if
+    // still inline; the cached path comfortably clears a generous margin
+    // under that.
+    expect(elapsedMs).toBeLessThan(200);
+
+    socket.destroy();
+  });
+
+  it("a burst of status polls never stalls a concurrent connection's in-flight request", async () => {
+    const slowFactChainHead = (): { seq: number; headHash: string } => {
+      const until = Date.now() + 40;
+      while (Date.now() < until) {
+        /* busy-wait, same rationale as the test above */
+      }
+      return { seq: 1, headHash: "h" };
+    };
+    // A long refresh interval: only the one startup call should ever fire
+    // during this test, so ANY stall observed below would have to come from
+    // the (fixed-away) inline per-poll invocation, not the background timer.
+    harness = await setupServer({ factChainHead: slowFactChainHead, factChainHeadRefreshMs: 60_000 });
+
+    const owner = readOwnerTokenFile(harness.dataDir)!;
+    const poller = await authenticate(harness.endpoint, owner.token);
+    const worker = await authenticate(harness.endpoint, owner.token);
+
+    const POLL_COUNT = 20;
+    for (let i = 0; i < POLL_COUNT; i++) {
+      poller.socket.write(JSON.stringify({ id: 100 + i, method: "status" }) + "\n");
+    }
+    // Interleaved with the burst above: a genuine memory call on a SEPARATE
+    // connection. Pre-fix, 20 polls at 40ms/poll inline would serialize ~800ms
+    // of event-loop-blocking work around this response.
+    const remStart = Date.now();
+    worker.socket.write(
+      JSON.stringify({ id: 1, method: "remember", params: { text: "concurrent-status-probe fact." } }) + "\n",
+    );
+    const remResp = await worker.reader.nextJson();
+    const remElapsed = Date.now() - remStart;
+
+    expect(remResp.ok).toBe(true);
+    expect(remElapsed).toBeLessThan(300);
+
+    // Drain the poll responses so both connections close cleanly.
+    for (let i = 0; i < POLL_COUNT; i++) {
+      const r = await poller.reader.nextJson();
+      expect(r.ok).toBe(true);
+    }
+
+    poller.socket.destroy();
+    worker.socket.destroy();
+  });
+
+  it("factChainHeadRefreshMs bounds staleness: a shorter interval eventually re-invokes the lookup in the background", async () => {
+    let calls = 0;
+    const fastFactChainHead = (): { seq: number; headHash: string } => {
+      calls++;
+      return { seq: calls, headHash: `head-${calls}` };
+    };
+    harness = await setupServer({ factChainHead: fastFactChainHead, factChainHeadRefreshMs: 20 });
+    expect(calls).toBe(1);
+
+    // Wait comfortably past a few refresh intervals — the background timer
+    // (never a request) should have advanced the cache on its own.
+    await new Promise((resolve) => setTimeout(resolve, 150));
+    expect(calls).toBeGreaterThan(1);
+
+    const owner = readOwnerTokenFile(harness.dataDir)!;
+    const { socket, reader } = await authenticate(harness.endpoint, owner.token);
+    socket.write(JSON.stringify({ id: 1, method: "status" }) + "\n");
+    const resp = await reader.nextJson();
+    expect(resp.ok).toBe(true);
+    expect(resp.result.factChainHead.seq).toBe(calls);
 
     socket.destroy();
   });

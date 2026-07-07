@@ -17,6 +17,24 @@
  *   (3) `registerSource`'s caller-supplied anchor bindings are validated
  *       against `ANCHOR_TABLE`'s ceilings — a forged high-weight anchor riding
  *       a cheap class name is rejected (`INVALID_ANCHOR`), even from OWNER.
+ *
+ * ALSO covers the `resolvePending-trust-bypass` follow-up fix (a hostile
+ * re-audit finding, 2026-07-07): the FIRST pass above gated exactly five verbs
+ * and missed the sixth, `resolvePending` — dispatched through the identical
+ * `#dispatchMemoryCall` path but carrying PERSONAL-tier owner-OVERRIDE
+ * semantics (`agent/agentMemory.ts`'s facade calls `engine.approve(...,
+ * { allowAuthorApprover: true })` unconditionally), so ANY authenticated
+ * connection at ANY grade could force-resolve any open dispute with
+ * owner-override power, and the resulting ledger record always misattributed
+ * the decision to the facade's singleton OWNER identity regardless of who
+ * actually called. See the "resolvePending" describe block below: (1) a
+ * non-OWNER-grade connection is rejected with `INSUFFICIENT_GRADE` and the
+ * dispute is left OPEN and untouched; (2) an OWNER-grade connection still
+ * succeeds and the resulting APPROVAL record is attributed to the real
+ * `memory.defaultSourceId` — not a forged, caller-controlled, or otherwise
+ * hardcoded id (there is no `approver` field on `resolvePending`'s wire
+ * params at all, so gating the verb to OWNER-grade is what makes this
+ * attribution trustworthy).
  */
 
 import { describe, it, expect, afterEach, vi } from "vitest";
@@ -422,6 +440,151 @@ describe("DaemonServer: registerSource anchor-ceiling validation", () => {
     const resp = await ownerReader.nextJson();
     expect(resp.ok).toBe(true);
     expect(resp.result.anchor_set).toEqual([{ anchorClass: "EMAIL_OAUTH", independenceWeight: 0.1, realizedCost: 0.1 }]);
+
+    ownerSock.destroy();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// resolvePending-trust-bypass fix — the sixth trust-mutating verb the first
+// pass of this gate missed (see the module doc above).
+// ---------------------------------------------------------------------------
+
+describe("DaemonServer: resolvePending authorization (resolvePending-trust-bypass fix)", () => {
+  /**
+   * Forms a REAL, genuine multi-class dispute exactly the way
+   * `daemon/__e2e__/mcpDaemonBacked.e2e.test.ts` does: an OWNER-grade
+   * connection and an independent EMAIL_OAUTH-grade connection each `remember`
+   * a conflicting fact about the SAME (entity, attribute); an OWNER-grade
+   * `adjudicate` call then defers it (both anchors clear the default
+   * quarantine threshold — 0.10 — so both land LIVE, and distinct daemon-token
+   * sourceIds are independent by default, H2/R1). Returns everything a test
+   * needs to drive `resolvePending` against the real open dispute.
+   */
+  async function formGenuineDispute(h: Harness): Promise<{
+    csid: string;
+    ownerStrandId: string;
+    rivalStrandId: string;
+    ownerSock: net.Socket;
+    ownerReader: LineReader;
+  }> {
+    const owner = readOwnerTokenFile(h.dataDir)!;
+    const ownerSock = connect(h.endpoint);
+    const ownerReader = new LineReader(ownerSock);
+    ownerSock.write(JSON.stringify({ method: "auth", token: owner.token }) + "\n");
+    await ownerReader.nextJson();
+
+    const ATTR = "resolve-pending-gate#wifi_password";
+    ownerSock.write(
+      JSON.stringify({
+        id: 1,
+        method: "remember",
+        params: { text: "the wifi password is hunter2", entity: "entity:resolve-pending-gate", attribute: ATTR },
+      }) + "\n",
+    );
+    const ownerRemembered = await ownerReader.nextJson();
+    expect(ownerRemembered.ok).toBe(true);
+    const ownerStrandId = ownerRemembered.result.id as string;
+
+    const rivalGrade = h.tokens.mint(AnchorClass.EMAIL_OAUTH, "agent-resolve-pending-rival");
+    const rivalSock = connect(h.endpoint);
+    const rivalReader = new LineReader(rivalSock);
+    rivalSock.write(JSON.stringify({ method: "auth", token: rivalGrade.raw }) + "\n");
+    await rivalReader.nextJson();
+
+    rivalSock.write(
+      JSON.stringify({
+        id: 1,
+        method: "remember",
+        params: { text: "the wifi password is pwned123", entity: "entity:resolve-pending-gate", attribute: ATTR },
+      }) + "\n",
+    );
+    const rivalRemembered = await rivalReader.nextJson();
+    expect(rivalRemembered.ok).toBe(true);
+    const rivalStrandId = rivalRemembered.result.id as string;
+    rivalSock.destroy();
+
+    ownerSock.write(JSON.stringify({ id: 2, method: "adjudicate", params: { attribute: ATTR } }) + "\n");
+    const adjudicated = await ownerReader.nextJson();
+    expect(adjudicated.ok).toBe(true);
+    expect(adjudicated.result.kind).toBe("DEFERRED");
+
+    ownerSock.write(JSON.stringify({ id: 3, method: "pendingQuestions", params: {} }) + "\n");
+    const questions = await ownerReader.nextJson();
+    expect(questions.ok).toBe(true);
+    expect(questions.result.length).toBeGreaterThanOrEqual(1);
+    const csid = questions.result[0].contradictionSetId as string;
+
+    return { csid, ownerStrandId, rivalStrandId, ownerSock, ownerReader };
+  }
+
+  it("a non-OWNER-grade connection calling resolvePending is REJECTED with INSUFFICIENT_GRADE, and the dispute is left OPEN", async () => {
+    harness = await setupServer();
+    const { csid, ownerStrandId, ownerSock, ownerReader } = await formGenuineDispute(harness);
+
+    const lowGrade = harness.tokens.mint(AnchorClass.EMAIL_OAUTH, "agent-resolve-pending-attacker");
+    const lowSock = connect(harness.endpoint);
+    const lowReader = new LineReader(lowSock);
+    lowSock.write(JSON.stringify({ method: "auth", token: lowGrade.raw }) + "\n");
+    await lowReader.nextJson();
+
+    lowSock.write(
+      JSON.stringify({
+        id: 10,
+        method: "resolvePending",
+        params: { contradictionSetId: csid, chosenStrandId: ownerStrandId },
+      }) + "\n",
+    );
+    const resp = await lowReader.nextJson();
+    expect(resp.ok).toBe(false);
+    expect(resp.error.code).toBe(DAEMON_ERR_INSUFFICIENT_GRADE);
+
+    // The dispute is UNCHANGED by the rejected attempt — still open, still
+    // answerable, never force-resolved by the low-grade caller.
+    ownerSock.write(JSON.stringify({ id: 11, method: "pendingQuestions", params: {} }) + "\n");
+    const stillOpen = await ownerReader.nextJson();
+    expect(stillOpen.ok).toBe(true);
+    expect(stillOpen.result.some((q: { contradictionSetId: string }) => q.contradictionSetId === csid)).toBe(true);
+
+    ownerSock.destroy();
+    lowSock.destroy();
+  });
+
+  it("an OWNER-grade connection calling resolvePending SUCCEEDS, and the resulting APPROVAL record is attributed to the real memory.defaultSourceId — not a forged/hardcoded one", async () => {
+    harness = await setupServer();
+    const { csid, ownerStrandId, rivalStrandId, ownerSock, ownerReader } = await formGenuineDispute(harness);
+
+    ownerSock.write(
+      JSON.stringify({
+        id: 20,
+        method: "resolvePending",
+        params: { contradictionSetId: csid, chosenStrandId: ownerStrandId },
+      }) + "\n",
+    );
+    const resolved = await ownerReader.nextJson();
+    expect(resolved.ok).toBe(true);
+    expect(resolved.result.winner).toBe(ownerStrandId);
+
+    // The horn is quiet again over the same connection.
+    ownerSock.write(JSON.stringify({ id: 21, method: "pendingQuestions", params: {} }) + "\n");
+    const afterward = await ownerReader.nextJson();
+    expect(afterward.ok).toBe(true);
+    expect(afterward.result.some((q: { contradictionSetId: string }) => q.contradictionSetId === csid)).toBe(false);
+
+    // Real attribution proof: read the loser's dossier (explain is read-only,
+    // never gated) and confirm the RESOLVED_BY_APPROVAL entry names the
+    // engine's own `defaultSourceId` as approver — the real identity the
+    // OWNER-grade gate now guarantees, never a value the wire request could
+    // have forged (resolvePending's params carry no approver field at all).
+    ownerSock.write(JSON.stringify({ id: 22, method: "explain", params: { target: rivalStrandId } }) + "\n");
+    const dossier = await ownerReader.nextJson();
+    expect(dossier.ok).toBe(true);
+    const approval = dossier.result.disputes.find(
+      (d: { status: string }) => d.status === "RESOLVED_BY_APPROVAL",
+    );
+    expect(approval).toBeDefined();
+    expect(approval.approverSourceId).toBe(String(harness.memory.defaultSourceId));
+    expect(approval.ownerOverride).toBe(true);
 
     ownerSock.destroy();
   });

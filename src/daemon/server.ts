@@ -134,6 +134,35 @@ export const DEFAULT_MAX_QUEUE_DEPTH = 1024;
 export const DEFAULT_HANDSHAKE_TIMEOUT_MS = 3000;
 /** H1: "fixed 1s delay before the failure response". */
 export const DEFAULT_AUTH_FAILURE_DELAY_MS = 1000;
+/**
+ * status-ping-blocks-event-loop fix (a re-audit finding, 2026-07-07):
+ * `status`/`ping` is DELIBERATELY dispatched OUTSIDE the FIFO queue, directly
+ * on the socket's `data` handler (see {@link STATUS_VERBS}'s doc comment),
+ * precisely so a slow/backed-up write path can never stall a health check.
+ * But the OPTIONAL `factChainHead` callback (wired by `daemon/cli.ts` — see
+ * `DaemonServerOptions.factChainHead`'s doc) opens a FRESH SQLite connection
+ * and rebuilds the WHOLE ratification-ledger open-dispute index from scratch
+ * on every invocation (`createSqlitePendingLedger`'s constructor — O(n) over
+ * the ledger's full history), paid SYNCHRONOUSLY on the single Node.js
+ * event-loop thread (`node:sqlite`'s `DatabaseSync` has no async variant).
+ * Before this fix, `#dispatchStatusVerb` called it INLINE on every `status`
+ * request — so a caller polling `status` frequently (exactly what
+ * OPERATIONS.md tells an operator to do) repeatedly re-triggered that O(n)
+ * cost directly on the hot request-serving thread, stalling every OTHER
+ * connected client's I/O for its duration on every single poll: the more
+ * aggressively a caller (or an attacker) polled, the more often the whole
+ * daemon stalled — the exact opposite of "never blocks a health check."
+ * Fixed: `#dispatchStatusVerb` now reads a CACHED value, refreshed on the
+ * daemon's OWN bounded cadence (this constant) via a background timer
+ * started in `start()` and cleared in `stop()` — never inline on a request.
+ * The cache is warmed SYNCHRONOUSLY once during `start()` (so the very first
+ * `status` call already has a value) and refreshed no more often than this
+ * interval regardless of how aggressively a client polls `status`/`ping` —
+ * decoupling caller poll frequency from the daemon's actual I/O cadence
+ * entirely. See `daemon/__tests__/server.test.ts`'s
+ * "factChainHead caching" cases for the regression coverage.
+ */
+export const DEFAULT_FACT_CHAIN_HEAD_REFRESH_MS = 5_000;
 
 // ---------------------------------------------------------------------------
 // The FIFO queue (H3) — exported standalone so its invariant is unit-testable
@@ -348,11 +377,39 @@ function parseGrade(v: unknown): AnchorClass | null {
 // connection regardless of `state.grade` — defeating the entire trust model
 // from outside the engine (any minted, even EMAIL_OAUTH-grade, token could
 // mint itself an OWNER anchor via registerSource, or disown/approve/adjudicate/
-// ratify arbitrary sources/strands). All five mutate durable trust/belief
+// ratify arbitrary sources/strands). All six mutate durable trust/belief
 // state and are gated OWNER-only, mirroring `#dispatchAdminVerb`'s check.
+//
+// resolvePending-trust-bypass fix (a re-audit finding, 2026-07-07): the first
+// pass of this fix (above) gated exactly five verbs and MISSED `resolvePending`
+// — which is dispatched through the identical `#dispatchMemoryCall` path (see
+// `MEMORY_METHODS.resolvePending` below) and carries PERSONAL-tier
+// owner-OVERRIDE semantics: `agent/agentMemory.ts`'s facade implementation
+// calls `engine.approve(..., defaultSource.sourceId, undefined,
+// { allowAuthorApprover: true })` UNCONDITIONALLY, bypassing the
+// distinct-approver (self-approval) and RC-5 anchor-independence gates a
+// normal `approve()` enforces. Because `resolvePending` was absent from this
+// Set, ANY authenticated connection at ANY grade could force-resolve any open
+// dispute with owner-override power — the exact vulnerability class the rest
+// of this fix closed, reopened one verb over — AND every resulting ledger
+// APPROVAL record was committed with `approverSourceId: defaultSource.sourceId`
+// regardless of who actually called, misattributing the decision to OWNER and
+// defeating the non-repudiation guarantee CLAUDE.md claims for override
+// auditability. Gating `resolvePending` here closes BOTH: only an OWNER-grade
+// connection (i.e. an actual holder of the owner token) can reach it at all,
+// so the resulting attribution to the facade's singleton OWNER identity is now
+// true, not forged. See `daemon/__tests__/trustMutationGate.test.ts`'s
+// `resolvePending` cases for the regression coverage this fix closes.
 // ---------------------------------------------------------------------------
 
-const TRUST_MUTATING_VERBS = new Set(["registerSource", "disown", "approve", "adjudicate", "ratify"]);
+const TRUST_MUTATING_VERBS = new Set([
+  "registerSource",
+  "disown",
+  "approve",
+  "adjudicate",
+  "ratify",
+  "resolvePending",
+]);
 
 function isTrustMutatingVerb(method: string): boolean {
   return TRUST_MUTATING_VERBS.has(method);
@@ -601,6 +658,14 @@ export interface DaemonServerOptions {
    */
   readonly factChainHead?: () => FactChainHead;
   readonly verifyFactChain?: () => FactChainVerification;
+  /**
+   * status-ping-blocks-event-loop fix: how often (ms) the {@link factChainHead}
+   * callback above is actually re-invoked in the background, decoupled from
+   * how often a caller polls `status`/`ping`. Default
+   * {@link DEFAULT_FACT_CHAIN_HEAD_REFRESH_MS}. Irrelevant when `factChainHead`
+   * is omitted (nothing to cache).
+   */
+  readonly factChainHeadRefreshMs?: number;
 }
 
 export interface DaemonStartResult {
@@ -621,12 +686,22 @@ export class DaemonServer {
   readonly #queue: FifoQueue;
   readonly #factChainHead: (() => FactChainHead) | null;
   readonly #verifyFactChain: (() => FactChainVerification) | null;
+  readonly #factChainHeadRefreshMs: number;
 
   #server: net.Server | null = null;
   #endpoint: string | null = null;
   #nextConnId = 1;
   #startedAtMs: number | null = null;
   #socketErrorCount = 0;
+  /**
+   * status-ping-blocks-event-loop fix: the CACHED result of `#factChainHead()`
+   * — `null` when no `factChainHead` was wired, or its most recent invocation
+   * threw. Read (never invoked) by `#dispatchStatusVerb`; written only by
+   * `#refreshFactChainHeadCache` (once synchronously in `start()`, then on
+   * `#factChainHeadTimer`'s own cadence).
+   */
+  #cachedFactChainHead: FactChainHead | null = null;
+  #factChainHeadTimer: ReturnType<typeof setInterval> | null = null;
   readonly #connections = new Map<number, ConnectionState>();
   readonly #fingerprintToConnIds = new Map<string, Set<number>>();
   #shuttingDown = false;
@@ -658,6 +733,7 @@ export class DaemonServer {
     this.#queue = new FifoQueue(opts.maxQueueDepth ?? DEFAULT_MAX_QUEUE_DEPTH);
     this.#factChainHead = opts.factChainHead ?? null;
     this.#verifyFactChain = opts.verifyFactChain ?? null;
+    this.#factChainHeadRefreshMs = opts.factChainHeadRefreshMs ?? DEFAULT_FACT_CHAIN_HEAD_REFRESH_MS;
   }
 
   get connectionCount(): number {
@@ -711,12 +787,51 @@ export class DaemonServer {
     });
     this.#endpoint = endpoint;
     this.#startedAtMs = this.#clock();
+    // status-ping-blocks-event-loop fix: pay the (potentially expensive)
+    // `factChainHead` cost exactly ONCE here, synchronously, BEFORE this
+    // method returns (i.e. before any client can possibly connect and poll
+    // `status`) — so the very first `status`/`ping` response already has a
+    // cached value, then hand refreshing off to a background timer that never
+    // runs on a request's own call stack.
+    if (this.#factChainHead !== null) {
+      this.#refreshFactChainHeadCache();
+      this.#factChainHeadTimer = setInterval(
+        () => this.#refreshFactChainHeadCache(),
+        this.#factChainHeadRefreshMs,
+      );
+      this.#factChainHeadTimer.unref();
+    }
     return { endpoint };
+  }
+
+  /**
+   * status-ping-blocks-event-loop fix: the ONLY call site that ever invokes
+   * the (potentially expensive) `factChainHead` callback — never
+   * `#dispatchStatusVerb`. Best-effort: a throw is logged and degrades the
+   * cache to `null` (matches the previous per-request error handling), never
+   * propagates to whatever background timer or `start()` call triggered it.
+   */
+  #refreshFactChainHeadCache(): void {
+    if (this.#factChainHead === null) return;
+    try {
+      this.#cachedFactChainHead = this.#factChainHead();
+    } catch (err) {
+      daemonLog({
+        event: "status_fact_chain_head_failed",
+        level: "warn",
+        message: err instanceof Error ? err.message : String(err),
+      });
+      this.#cachedFactChainHead = null;
+    }
   }
 
   /** R6: graceful shutdown — stop accepting, drain the queue, close connections, mark the chain. */
   async stop(opts?: { clean?: boolean }): Promise<void> {
     this.#shuttingDown = true;
+    if (this.#factChainHeadTimer !== null) {
+      clearInterval(this.#factChainHeadTimer);
+      this.#factChainHeadTimer = null;
+    }
     // zero-structured-logging fix: an unconditional shutdown event (previously
     // this event category only ever appeared as a side effect of the marker
     // WRITE failing — a clean shutdown left no structured trace at all).
@@ -943,19 +1058,10 @@ export class DaemonServer {
   #dispatchStatusVerb(state: ConnectionState, id: number): void {
     const now = this.#clock();
     const uptimeMs = this.#startedAtMs !== null ? Math.max(0, now - this.#startedAtMs) : 0;
-    let factChainHead: FactChainHead | null = null;
-    if (this.#factChainHead !== null) {
-      try {
-        factChainHead = this.#factChainHead();
-      } catch (err) {
-        daemonLog({
-          event: "status_fact_chain_head_failed",
-          level: "warn",
-          message: err instanceof Error ? err.message : String(err),
-        });
-        factChainHead = null;
-      }
-    }
+    // status-ping-blocks-event-loop fix: NEVER invoke `#factChainHead()` here —
+    // read the cache `#refreshFactChainHeadCache` maintains instead, so this
+    // handler stays genuinely cheap (in-memory reads only) no matter how
+    // often — or how many concurrent connections — call `status`/`ping`.
     this.#writeLine(
       state.socket,
       envOk(id, {
@@ -963,7 +1069,7 @@ export class DaemonServer {
         queueDepth: this.#queue.depth,
         uptimeMs,
         daemonChainHead: this.#auditChain.chainHead(),
-        factChainHead,
+        factChainHead: this.#cachedFactChainHead,
       }),
     );
   }
