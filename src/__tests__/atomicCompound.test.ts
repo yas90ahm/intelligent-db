@@ -540,6 +540,8 @@ describe("atomic compound writes — a forced mid-op error rolls back fully (no 
       verifyChain: realLedger.verifyChain.bind(realLedger),
       chainHead: realLedger.chainHead.bind(realLedger),
       records: realLedger.records.bind(realLedger),
+      mutationsForSubjects: realLedger.mutationsForSubjects.bind(realLedger),
+      disputeRecordsForMember: realLedger.disputeRecordsForMember.bind(realLedger),
       ...(realLedger.resyncIndex !== undefined
         ? { resyncIndex: realLedger.resyncIndex.bind(realLedger) }
         : {}),

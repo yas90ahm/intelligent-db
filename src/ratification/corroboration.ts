@@ -121,6 +121,19 @@ export interface CorroborationLedger {
   eventsIntersecting(strandIds: Iterable<StrandId>): readonly CorroborationEvent[];
 
   /**
+   * Wave-2 [explain-full-ledger-scans]: every event naming `strandId` in EITHER
+   * role — as the `ratifiedStrandId` OR within `corroboratingStrandIds` —
+   * deduped by `eventId`, in stable append order. `ratifiedStrandId` is a
+   * DISTINCT role from `corroboratingStrandIds` (the agreement-set derivation
+   * always EXCLUDES the ratified strand itself), so this is a genuinely
+   * separate lookup from {@link eventsByCorroboratingStrand} /
+   * {@link eventsIntersecting} — not a rename. O(matches) via a maintained
+   * ratified-strand index alongside the existing corroborator index; never a
+   * full `all()` scan. This is the point-lookup `explain()` uses.
+   */
+  eventsInvolving(strandId: StrandId): readonly CorroborationEvent[];
+
+  /**
    * Mark an event as REVERSED (its credit clawed back). Returns `true` the FIRST
    * time an event is marked, `false` on every subsequent call for the same id —
    * the idempotency guard the disown sweep uses so each event is reversed at most
@@ -147,6 +160,8 @@ class InMemoryCorroborationLedger implements CorroborationLedger {
   private readonly chain: CorroborationEvent[] = [];
   /** corroborating StrandId -> the events it appears in (append order). */
   private readonly byCorroborator = new Map<StrandId, CorroborationEvent[]>();
+  /** ratified StrandId -> the events it was ratified in (append order). */
+  private readonly byRatified = new Map<StrandId, CorroborationEvent[]>();
   /** eventId -> its append (chain) position, so a multi-bucket merge can restore
    *  the SAME stable append order the old full-chain scan produced. */
   private readonly posOf = new Map<string, number>();
@@ -182,6 +197,16 @@ class InMemoryCorroborationLedger implements CorroborationLedger {
       }
     }
 
+    // Wave-2 [explain-full-ledger-scans]: maintain the ratified-strand index
+    // too (a genuinely separate role from corroborator — see the interface
+    // doc on `eventsInvolving`).
+    const ratifiedBucket = this.byRatified.get(finalEvent.ratifiedStrandId);
+    if (ratifiedBucket === undefined) {
+      this.byRatified.set(finalEvent.ratifiedStrandId, [finalEvent]);
+    } else {
+      ratifiedBucket.push(finalEvent);
+    }
+
     return finalEvent;
   }
 
@@ -205,6 +230,25 @@ class InMemoryCorroborationLedger implements CorroborationLedger {
     for (const sid of new Set(strandIds)) {
       const bucket = this.byCorroborator.get(sid);
       if (bucket === undefined) continue;
+      for (const ev of bucket) {
+        if (seenEvents.has(ev.eventId)) continue;
+        seenEvents.add(ev.eventId);
+        out.push(ev);
+      }
+    }
+    out.sort((a, b) => this.posOf.get(a.eventId)! - this.posOf.get(b.eventId)!);
+    return out;
+  }
+
+  eventsInvolving(strandId: StrandId): readonly CorroborationEvent[] {
+    // POINT LOOKUPS via the maintained `byRatified` + `byCorroborator` indexes —
+    // O(matches), never a full walk of `this.chain`.
+    const seenEvents = new Set<string>();
+    const out: CorroborationEvent[] = [];
+    for (const bucket of [
+      this.byRatified.get(strandId) ?? [],
+      this.byCorroborator.get(strandId) ?? [],
+    ]) {
       for (const ev of bucket) {
         if (seenEvents.has(ev.eventId)) continue;
         seenEvents.add(ev.eventId);
@@ -284,6 +328,7 @@ class SqliteCorroborationLedgerImpl implements SqliteCorroborationLedger {
 
   readonly #insert;
   readonly #insertStrand;
+  readonly #insertRatified;
   readonly #count;
   readonly #all;
   readonly #isReversed;
@@ -326,12 +371,33 @@ class SqliteCorroborationLedgerImpl implements SqliteCorroborationLedger {
       `CREATE INDEX IF NOT EXISTS idx_corroboration_event_strands_strand
          ON corroboration_event_strands (strand_id)`,
     );
+    // Wave-2 [explain-full-ledger-scans]: a SEPARATE indexed child table for the
+    // `ratifiedStrandId` role — genuinely distinct from `corroboratingStrandIds`
+    // (the agreement-set derivation always EXCLUDES the ratified strand itself,
+    // so one strand id can never appear in both tables for the SAME event). This
+    // is what `eventsInvolving` (the point lookup `explain()` uses) joins against.
+    this.#db.exec(
+      `CREATE TABLE IF NOT EXISTS corroboration_events_ratified (
+         ratified_strand_id TEXT NOT NULL,
+         event_id            TEXT NOT NULL,
+         seq                  INTEGER NOT NULL,
+         PRIMARY KEY (ratified_strand_id, event_id)
+       )`,
+    );
+    this.#db.exec(
+      `CREATE INDEX IF NOT EXISTS idx_corroboration_events_ratified_strand
+         ON corroboration_events_ratified (ratified_strand_id)`,
+    );
 
     this.#insert = this.#db.prepare(
       "INSERT INTO corroboration_events (event_id, json) VALUES (?, ?)",
     );
     this.#insertStrand = this.#db.prepare(
       `INSERT OR IGNORE INTO corroboration_event_strands (strand_id, event_id, seq)
+       VALUES (?, ?, ?)`,
+    );
+    this.#insertRatified = this.#db.prepare(
+      `INSERT OR IGNORE INTO corroboration_events_ratified (ratified_strand_id, event_id, seq)
        VALUES (?, ?, ?)`,
     );
     this.#count = this.#db.prepare(
@@ -347,27 +413,43 @@ class SqliteCorroborationLedgerImpl implements SqliteCorroborationLedger {
       "INSERT OR IGNORE INTO reversed_events (event_id) VALUES (?)",
     );
 
-    // BACKFILL for a database written by a pre-index version of this ledger: if the
-    // child index table is empty but events already exist, populate it once from the
-    // existing rows so a reopened, already-populated ledger is indexed too (never
-    // silently missing pre-upgrade events from `eventsIntersecting`). A ledger that
-    // already has ANY child rows was opened at least once under this code path
-    // already, so `record()` has kept it in sync — skip re-deriving it every open.
-    const childCount = Number(
+    // BACKFILL for a database written by a pre-index version of this ledger: if a
+    // child index table is empty but events already exist, populate it once from
+    // the existing rows so a reopened, already-populated ledger is indexed too
+    // (never silently missing pre-upgrade events). A ledger that already has ANY
+    // rows in a given child table was opened at least once under the code path
+    // that maintains it, so `record()` has kept it in sync — skip re-deriving it
+    // every open. The two child tables are backfilled INDEPENDENTLY (each gated
+    // on its OWN count, not a shared flag): a database that already had
+    // `corroboration_event_strands` populated by a pre-Wave-2 build would
+    // otherwise never get `corroboration_events_ratified` backfilled at all.
+    const strandChildCount = Number(
       (this.#db.prepare("SELECT COUNT(*) AS n FROM corroboration_event_strands").get() as { n: number }).n,
     );
-    if (childCount === 0) {
+    const ratifiedChildCount = Number(
+      (this.#db.prepare("SELECT COUNT(*) AS n FROM corroboration_events_ratified").get() as { n: number }).n,
+    );
+    if (strandChildCount === 0 || ratifiedChildCount === 0) {
       const existing = this.#db
         .prepare("SELECT seq, event_id, json FROM corroboration_events")
         .all() as Array<{ seq: unknown; event_id: unknown; json: unknown }>;
       for (const row of existing) {
         const parsed = this.#parse(corrobAsString(row.json));
-        const seen = new Set<string>();
-        for (const sid of parsed.corroboratingStrandIds) {
-          const key = String(sid);
-          if (seen.has(key)) continue;
-          seen.add(key);
-          this.#insertStrand.run(key, String(row.event_id), Number(row.seq));
+        if (strandChildCount === 0) {
+          const seen = new Set<string>();
+          for (const sid of parsed.corroboratingStrandIds) {
+            const key = String(sid);
+            if (seen.has(key)) continue;
+            seen.add(key);
+            this.#insertStrand.run(key, String(row.event_id), Number(row.seq));
+          }
+        }
+        if (ratifiedChildCount === 0) {
+          this.#insertRatified.run(
+            String(parsed.ratifiedStrandId),
+            String(row.event_id),
+            Number(row.seq),
+          );
         }
       }
     }
@@ -403,6 +485,9 @@ class SqliteCorroborationLedgerImpl implements SqliteCorroborationLedger {
       seen.add(sid);
       this.#insertStrand.run(String(sid), eventId, n);
     }
+    // Wave-2 [explain-full-ledger-scans]: maintain the separate ratified-strand
+    // index too.
+    this.#insertRatified.run(String(finalEvent.ratifiedStrandId), eventId, n);
     return finalEvent;
   }
 
@@ -439,6 +524,29 @@ class SqliteCorroborationLedgerImpl implements SqliteCorroborationLedger {
       json: unknown;
       seq: unknown;
     }>;
+    return rows.map((r) => this.#parse(corrobAsString(r.json)));
+  }
+
+  eventsInvolving(strandId: StrandId): readonly CorroborationEvent[] {
+    // POINT LOOKUP: a UNION of two indexed subqueries — one against the
+    // ratified-strand child table, one against the corroborator child table —
+    // never a full scan of `corroboration_events`. UNION (not UNION ALL)
+    // dedupes the (json, seq) pair naturally (seq is unique per event, so this
+    // can only collapse the SAME event, never merge two different ones).
+    const stmt = this.#db.prepare(
+      `SELECT json, seq FROM corroboration_events
+        WHERE event_id IN (
+          SELECT event_id FROM corroboration_events_ratified WHERE ratified_strand_id = ?
+        )
+       UNION
+       SELECT json, seq FROM corroboration_events
+        WHERE event_id IN (
+          SELECT event_id FROM corroboration_event_strands WHERE strand_id = ?
+        )
+       ORDER BY seq`,
+    );
+    const sid = String(strandId);
+    const rows = stmt.all(sid, sid) as Array<{ json: unknown; seq: unknown }>;
     return rows.map((r) => this.#parse(corrobAsString(r.json)));
   }
 

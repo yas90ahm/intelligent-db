@@ -580,6 +580,27 @@ export interface PendingLedger {
   records(): readonly LedgerRecord[];
 
   /**
+   * Wave-2 [explain-full-ledger-scans]: every MUTATION record whose
+   * `payload.subjectId` is one of `subjectIds`, in chain (append) order.
+   * O(distinct ids + matches) via a maintained subject index — never a full
+   * scan of `records()`. A subject id is a plain string (a `MutationPayload`'s
+   * `subjectId` may be a StrandId, SourceId, or ContradictionSetId) — the
+   * caller narrows by role (e.g. "this strand" vs "this strand's sources").
+   */
+  mutationsForSubjects(subjectIds: Iterable<string>): readonly LedgerRecord[];
+
+  /**
+   * Wave-2 [explain-full-ledger-scans]: every PENDING/APPROVAL record for any
+   * contradiction set `strandId` was EVER named a member of (via a PENDING's
+   * `members`), in chain (append) order — exactly the candidate set
+   * `explain()`'s dispute-history reconstruction needs (an APPROVAL carries no
+   * member list of its own; it is relevant iff its csid ever had a matching
+   * PENDING). O(relevant csids + their records) via a maintained
+   * member -> csid -> records index, never a full scan of `records()`.
+   */
+  disputeRecordsForMember(strandId: StrandId): readonly LedgerRecord[];
+
+  /**
    * OPTIONAL: re-derive the incrementally-maintained OPEN-PENDING index
    * (`listPending()` / the OD-2 scan / `approve()`'s dispute lookup) from
    * whatever is ACTUALLY durably persisted right now, discarding any in-memory
@@ -869,6 +890,16 @@ class InMemoryPendingLedger implements PendingLedger {
   private readonly openPendingList: LedgerRecord[] = [];
   private readonly latestOpenByCsid = new Map<string, PendingPayload>();
 
+  // -- Wave-2 [explain-full-ledger-scans] indexes (same incremental discipline
+  // as the open-PENDING index above: maintained ONLY inside `append()`, never
+  // re-derived from a scan of `this.chain`) --------------------------------
+  /** MUTATION `subjectId` (string) -> its records, append order. */
+  private readonly mutationsBySubject = new Map<string, LedgerRecord[]>();
+  /** contradictionSetId (string) -> its PENDING+APPROVAL records, append order. */
+  private readonly csidRecords = new Map<string, LedgerRecord[]>();
+  /** member StrandId (string) -> every csid a PENDING EVER named it a member of. */
+  private readonly memberToCsids = new Map<string, Set<string>>();
+
   constructor(opts: {
     contentBlind: boolean;
     reputation: ReputationLedger | null;
@@ -1122,7 +1153,60 @@ class InMemoryPendingLedger implements PendingLedger {
       }
     }
 
+    // Wave-2 [explain-full-ledger-scans]: maintain the point-lookup indexes
+    // `explain()` reads, at the SAME single mutation point as the open-PENDING
+    // index above (never re-derived from a scan of `this.chain`).
+    if (kind === "MUTATION") {
+      const sid = (payload as MutationPayload).subjectId;
+      const bucket = this.mutationsBySubject.get(sid);
+      if (bucket === undefined) this.mutationsBySubject.set(sid, [record]);
+      else bucket.push(record);
+    } else if (kind === "PENDING" || kind === "APPROVAL") {
+      const csid = String(
+        (payload as PendingPayload | ApprovalPayload).contradictionSetId,
+      );
+      const bucket = this.csidRecords.get(csid);
+      if (bucket === undefined) this.csidRecords.set(csid, [record]);
+      else bucket.push(record);
+      if (kind === "PENDING") {
+        for (const m of (payload as PendingPayload).members) {
+          const key = String(m);
+          const csids = this.memberToCsids.get(key);
+          if (csids === undefined) this.memberToCsids.set(key, new Set([csid]));
+          else csids.add(csid);
+        }
+      }
+    }
+
     return record;
+  }
+
+  mutationsForSubjects(subjectIds: Iterable<string>): readonly LedgerRecord[] {
+    const seenSeqs = new Set<number>();
+    const out: LedgerRecord[] = [];
+    for (const sid of new Set(subjectIds)) {
+      const bucket = this.mutationsBySubject.get(sid);
+      if (bucket === undefined) continue;
+      for (const r of bucket) {
+        if (seenSeqs.has(r.seq)) continue;
+        seenSeqs.add(r.seq);
+        out.push(r);
+      }
+    }
+    out.sort((a, b) => a.seq - b.seq);
+    return out;
+  }
+
+  disputeRecordsForMember(strandId: StrandId): readonly LedgerRecord[] {
+    const csids = this.memberToCsids.get(String(strandId));
+    if (csids === undefined) return [];
+    const out: LedgerRecord[] = [];
+    for (const csid of csids) {
+      const bucket = this.csidRecords.get(csid);
+      if (bucket !== undefined) out.push(...bucket);
+    }
+    out.sort((a, b) => a.seq - b.seq);
+    return out;
   }
 }
 
@@ -1227,6 +1311,14 @@ class SqlitePendingLedgerImpl implements SqlitePendingLedger {
   readonly #approvedCsids = new Set<string>();
   readonly #openPendingList: LedgerRecord[] = [];
   readonly #latestOpenByCsid = new Map<string, PendingPayload>();
+
+  // -- Wave-2 [explain-full-ledger-scans] indexes (same discipline as above:
+  // built once at construction from persisted history, then maintained
+  // incrementally inside `#indexAppendedRecord`, and rebuildable via
+  // `resyncIndex()`) ----------------------------------------------------------
+  readonly #mutationsBySubject = new Map<string, LedgerRecord[]>();
+  readonly #csidRecords = new Map<string, LedgerRecord[]>();
+  readonly #memberToCsids = new Map<string, Set<string>>();
 
   constructor(opts: {
     db: DatabaseSyncType;
@@ -1361,6 +1453,60 @@ class SqlitePendingLedgerImpl implements SqlitePendingLedger {
         }
       }
     }
+
+    // Wave-2 [explain-full-ledger-scans]: maintain the point-lookup indexes
+    // `explain()` reads, at the SAME single index-rebuild point as the
+    // open-PENDING index above (construction backfill, `#append()`, AND
+    // `resyncIndex()` all funnel through here).
+    if (kind === "MUTATION") {
+      const sid = (payload as MutationPayload).subjectId;
+      const bucket = this.#mutationsBySubject.get(sid);
+      if (bucket === undefined) this.#mutationsBySubject.set(sid, [record]);
+      else bucket.push(record);
+    } else if (kind === "PENDING" || kind === "APPROVAL") {
+      const csid = String(
+        (payload as PendingPayload | ApprovalPayload).contradictionSetId,
+      );
+      const bucket = this.#csidRecords.get(csid);
+      if (bucket === undefined) this.#csidRecords.set(csid, [record]);
+      else bucket.push(record);
+      if (kind === "PENDING") {
+        for (const m of (payload as PendingPayload).members) {
+          const key = String(m);
+          const csids = this.#memberToCsids.get(key);
+          if (csids === undefined) this.#memberToCsids.set(key, new Set([csid]));
+          else csids.add(csid);
+        }
+      }
+    }
+  }
+
+  mutationsForSubjects(subjectIds: Iterable<string>): readonly LedgerRecord[] {
+    const seenSeqs = new Set<number>();
+    const out: LedgerRecord[] = [];
+    for (const sid of new Set(subjectIds)) {
+      const bucket = this.#mutationsBySubject.get(sid);
+      if (bucket === undefined) continue;
+      for (const r of bucket) {
+        if (seenSeqs.has(r.seq)) continue;
+        seenSeqs.add(r.seq);
+        out.push(r);
+      }
+    }
+    out.sort((a, b) => a.seq - b.seq);
+    return out;
+  }
+
+  disputeRecordsForMember(strandId: StrandId): readonly LedgerRecord[] {
+    const csids = this.#memberToCsids.get(String(strandId));
+    if (csids === undefined) return [];
+    const out: LedgerRecord[] = [];
+    for (const csid of csids) {
+      const bucket = this.#csidRecords.get(csid);
+      if (bucket !== undefined) out.push(...bucket);
+    }
+    out.sort((a, b) => a.seq - b.seq);
+    return out;
   }
 
   listPending(): readonly PendingPayload[] {
@@ -1498,6 +1644,9 @@ class SqlitePendingLedgerImpl implements SqlitePendingLedger {
     this.#approvedCsids.clear();
     this.#openPendingList.length = 0;
     this.#latestOpenByCsid.clear();
+    this.#mutationsBySubject.clear();
+    this.#csidRecords.clear();
+    this.#memberToCsids.clear();
     for (const r of this.#chain()) {
       this.#indexAppendedRecord(r.kind, r.payload, r);
     }

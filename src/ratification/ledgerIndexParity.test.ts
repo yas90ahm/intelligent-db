@@ -36,6 +36,8 @@ import {
   createSqliteAdjudicationProvenanceLedger,
   createWeakInfluenceLedger,
   createSqliteWeakInfluenceLedger,
+  createPendingLedger,
+  createSqlitePendingLedger,
 } from "../index.js";
 
 import type {
@@ -45,6 +47,9 @@ import type {
   AdjudicationProvenance,
   WeakInfluenceEdge,
   EpochMs,
+  LedgerRecord,
+  MutationPayload,
+  PendingRatification,
   SourceId,
   StrandId,
 } from "../index.js";
@@ -348,5 +353,215 @@ describe("WeakInfluenceLedger.edgesConsulting — indexed lookup matches a full 
     );
     expect(details.some((d) => d.includes("weak_influence_consulted"))).toBe(true);
     expect(details.some((d) => /SCAN\s+weak_influence_edges\b/.test(d))).toBe(false);
+  });
+});
+
+// ===========================================================================
+// 4. CorroborationLedger.eventsInvolving — index-driven parity (Wave-2,
+//    `explain-full-ledger-scans`)
+// ===========================================================================
+
+describe("CorroborationLedger.eventsInvolving — indexed lookup matches a full scan", () => {
+  /** Spec-level oracle: EITHER role (ratified or corroborator), deduped, append order. */
+  function referenceInvolving(
+    all: readonly CorroborationEvent[],
+    strandId: StrandId,
+  ): CorroborationEvent[] {
+    const out: CorroborationEvent[] = [];
+    for (const ev of all) {
+      const ratified = ev.ratifiedStrandId === strandId;
+      if (!ratified && !ev.corroboratingStrandIds.some((s) => s === strandId)) continue;
+      out.push(ev);
+    }
+    return out;
+  }
+
+  it("in-memory: a 3000-event ledger's real eventsInvolving() matches the full-scan reference exactly", () => {
+    const ledger = createCorroborationLedger();
+    for (let i = 0; i < N; i++) {
+      ledger.record({
+        // Every 11th event RATIFIES a target (the distinct role from corroborator).
+        ratifiedStrandId: i % 11 === 0 ? TARGETS[0]! : asStrandId(`s:ratified:${i}`),
+        corroboratingStrandIds: [poolId(i % POOL_SIZE)],
+        beneficiarySourceId: `src:ben:${i % 7}` as SourceId,
+        reputationDelta: 0.1,
+        at: NOW,
+      });
+    }
+
+    for (const target of TARGETS) {
+      const reference = referenceInvolving(ledger.all(), target);
+      const real = ledger.eventsInvolving(target);
+      expect(real.map((e) => e.eventId)).toEqual(reference.map((e) => e.eventId));
+      expect(real).toEqual(reference);
+    }
+    // The ratified-role branch actually fired for TARGETS[0] (sanity: the fixture
+    // exercises BOTH roles, not just corroborator).
+    expect(
+      referenceInvolving(ledger.all(), TARGETS[0]!).some((e) => e.ratifiedStrandId === TARGETS[0]),
+    ).toBe(true);
+  });
+
+  it("SQLite: a 3000-event durable ledger's real eventsInvolving() matches the full-scan reference, and the point lookup is index-driven (not a full table scan)", () => {
+    const path = freshPath("corrob-involving");
+    const ledger = track(createSqliteCorroborationLedger({ path }));
+    for (let i = 0; i < N; i++) {
+      ledger.record({
+        ratifiedStrandId: i % 11 === 0 ? TARGETS[0]! : asStrandId(`s:ratified:${i}`),
+        corroboratingStrandIds: [poolId(i % POOL_SIZE)],
+        beneficiarySourceId: `src:ben:${i % 7}` as SourceId,
+        reputationDelta: 0.1,
+        at: NOW,
+      });
+    }
+
+    for (const target of TARGETS) {
+      const reference = referenceInvolving(ledger.all(), target);
+      const real = ledger.eventsInvolving(target);
+      expect(real.map((e) => e.eventId)).toEqual(reference.map((e) => e.eventId));
+      expect(real).toEqual(reference);
+    }
+    expect(
+      referenceInvolving(ledger.all(), TARGETS[0]!).some((e) => e.ratifiedStrandId === TARGETS[0]),
+    ).toBe(true);
+
+    // STRUCTURAL PROOF: the union of two indexed subqueries, never a scan of the
+    // parent `corroboration_events` table.
+    const details = explainQueryPlan(
+      path,
+      `SELECT json, seq FROM corroboration_events
+        WHERE event_id IN (
+          SELECT event_id FROM corroboration_events_ratified WHERE ratified_strand_id = ?
+        )
+       UNION
+       SELECT json, seq FROM corroboration_events
+        WHERE event_id IN (
+          SELECT event_id FROM corroboration_event_strands WHERE strand_id = ?
+        )
+       ORDER BY seq`,
+      String(TARGETS[0]),
+      String(TARGETS[0]),
+    );
+    expect(details.some((d) => d.includes("corroboration_events_ratified"))).toBe(true);
+    expect(details.some((d) => d.includes("corroboration_event_strands"))).toBe(true);
+    expect(details.some((d) => /SCAN\s+corroboration_events\b/.test(d))).toBe(false);
+  });
+});
+
+// ===========================================================================
+// 5. PendingLedger.mutationsForSubjects / disputeRecordsForMember — index-
+//    driven parity (Wave-2, `explain-full-ledger-scans`)
+// ===========================================================================
+
+describe("PendingLedger.mutationsForSubjects — indexed lookup matches a full scan", () => {
+  function referenceMutations(
+    all: readonly LedgerRecord[],
+    subjectIds: ReadonlySet<string>,
+  ): LedgerRecord[] {
+    return all.filter(
+      (r) => r.kind === "MUTATION" && subjectIds.has((r.payload as MutationPayload).subjectId),
+    );
+  }
+
+  function makeMutation(i: number): MutationPayload {
+    return {
+      op: "REPUTATION_CONTRADICT",
+      subjectId: String(poolId(i % POOL_SIZE)),
+      subjectHash: `hash:${i}`,
+      beforeHash: `before:${i}`,
+      afterHash: `after:${i}`,
+      at: NOW,
+    };
+  }
+
+  it("in-memory: a 3000-record ledger's real mutationsForSubjects() matches the full-scan reference exactly", () => {
+    const ledger = createPendingLedger();
+    const signer = "src:system" as SourceId;
+    for (let i = 0; i < N; i++) ledger.appendMutation(makeMutation(i), signer);
+
+    const targetStrings = new Set(TARGETS.map(String));
+    const reference = referenceMutations(ledger.records(), targetStrings);
+    const real = ledger.mutationsForSubjects(targetStrings);
+
+    expect(reference.length).toBeGreaterThan(0);
+    expect(real.map((r) => r.seq)).toEqual(reference.map((r) => r.seq));
+    expect(real).toEqual(reference);
+  });
+
+  it("SQLite: a 3000-record durable ledger's real mutationsForSubjects() matches the full-scan reference, and the point lookup is index-driven", () => {
+    const path = freshPath("pending-mutations");
+    const ledger = track(createSqlitePendingLedger({ path }));
+    const signer = "src:system" as SourceId;
+    for (let i = 0; i < N; i++) ledger.appendMutation(makeMutation(i), signer);
+
+    const targetStrings = new Set(TARGETS.map(String));
+    const reference = referenceMutations(ledger.records(), targetStrings);
+    const real = ledger.mutationsForSubjects(targetStrings);
+
+    expect(reference.length).toBeGreaterThan(0);
+    expect(real.map((r) => r.seq)).toEqual(reference.map((r) => r.seq));
+    expect(real).toEqual(reference);
+  });
+});
+
+describe("PendingLedger.disputeRecordsForMember — indexed lookup matches a full scan", () => {
+  function referenceForMember(
+    all: readonly LedgerRecord[],
+    strandId: StrandId,
+  ): LedgerRecord[] {
+    const relevantCsids = new Set<string>();
+    for (const r of all) {
+      if (r.kind !== "PENDING") continue;
+      const p = r.payload as unknown as PendingRatification;
+      if (p.members.some((m) => m === strandId)) {
+        relevantCsids.add(String(p.contradictionSetId));
+      }
+    }
+    return all.filter((r) => {
+      if (r.kind !== "PENDING" && r.kind !== "APPROVAL") return false;
+      const csid = String(
+        (r.payload as unknown as { contradictionSetId: ContradictionSetId }).contradictionSetId,
+      );
+      return relevantCsids.has(csid);
+    });
+  }
+
+  function makePending(i: number): PendingRatification {
+    return {
+      contradictionSetId: `cset:disp:${i}` as ContradictionSetId,
+      attribute: ATTR,
+      members: [asStrandId(`s:winner:${i}`), poolId(i % POOL_SIZE)],
+      reason: "INDEPENDENT_DISPUTE",
+      createdAt: NOW,
+    };
+  }
+
+  it("in-memory: a 3000-dispute ledger's real disputeRecordsForMember() matches the full-scan reference exactly", () => {
+    const ledger = createPendingLedger();
+    const signer = "src:system" as SourceId;
+    for (let i = 0; i < N; i++) ledger.appendPending(makePending(i), signer);
+
+    for (const target of TARGETS) {
+      const reference = referenceForMember(ledger.records(), target);
+      const real = ledger.disputeRecordsForMember(target);
+      expect(real.map((r) => r.seq)).toEqual(reference.map((r) => r.seq));
+      expect(real).toEqual(reference);
+      expect(reference.length).toBeGreaterThan(0);
+    }
+  });
+
+  it("SQLite: a 3000-dispute durable ledger's real disputeRecordsForMember() matches the full-scan reference exactly", () => {
+    const path = freshPath("pending-members");
+    const ledger = track(createSqlitePendingLedger({ path }));
+    const signer = "src:system" as SourceId;
+    for (let i = 0; i < N; i++) ledger.appendPending(makePending(i), signer);
+
+    for (const target of TARGETS) {
+      const reference = referenceForMember(ledger.records(), target);
+      const real = ledger.disputeRecordsForMember(target);
+      expect(real.map((r) => r.seq)).toEqual(reference.map((r) => r.seq));
+      expect(real).toEqual(reference);
+      expect(reference.length).toBeGreaterThan(0);
+    }
   });
 });

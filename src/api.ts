@@ -3017,23 +3017,30 @@ class IntelligentDbImpl implements IntelligentDb {
       .sort(byEdgeId)
       .map((e) => e.from);
 
-    // --- MUTATION receipts: one chain pass splits strand-subject receipts from
-    // backing-source-subject receipts (disjoint id namespaces), and captures the
-    // FIRST DEMOTE receipt's time for the demotion explanation below.
-    const mutationReceipts: MutationPayload[] = [];
-    const sourceMutationReceipts: MutationPayload[] = [];
+    // --- MUTATION receipts (Wave-2 [explain-full-ledger-scans]): POINT LOOKUPS
+    // against the ledger's subject-indexed `mutationsForSubjects`, never a full
+    // scan of `records()`. Splits strand-subject receipts from backing-source-
+    // subject receipts (disjoint id namespaces in practice, but the strand-
+    // subject query wins any coincidental collision — mirroring the original
+    // if/else-if exclusivity exactly), and captures the FIRST DEMOTE receipt's
+    // time (chain/seq order, same as the old scan) for the demotion explanation
+    // below.
     const sourceIdStrings = new Set<string>([...seenSources].map(String));
+    const strandIdString = String(strandId);
+    const mutationReceipts: MutationPayload[] =
+      this.#ratification?.ledger
+        .mutationsForSubjects([strandIdString])
+        .map((r) => r.payload as MutationPayload) ?? [];
+    const sourceMutationReceipts: MutationPayload[] =
+      this.#ratification?.ledger
+        .mutationsForSubjects(sourceIdStrings)
+        .filter((r) => (r.payload as MutationPayload).subjectId !== strandIdString)
+        .map((r) => r.payload as MutationPayload) ?? [];
     let demoteReceiptAt: EpochMs | null = null;
-    if (this.#ratification !== null) {
-      for (const rec of this.#ratification.ledger.records()) {
-        if (rec.kind !== "MUTATION") continue;
-        const p = rec.payload as MutationPayload;
-        if (p.subjectId === String(strandId)) {
-          mutationReceipts.push(p);
-          if (p.op === "DEMOTE" && demoteReceiptAt === null) demoteReceiptAt = p.at;
-        } else if (sourceIdStrings.has(p.subjectId)) {
-          sourceMutationReceipts.push(p);
-        }
+    for (const p of mutationReceipts) {
+      if (p.op === "DEMOTE") {
+        demoteReceiptAt = p.at;
+        break;
       }
     }
 
@@ -3070,10 +3077,12 @@ class IntelligentDbImpl implements IntelligentDb {
       }
     }
 
-    // --- disputes: OPEN via the ledger's own open semantics; RESOLVED_BY_APPROVAL
-    // by correlating each APPROVAL to its latest earlier PENDING (same csid);
-    // both emitted in CHAIN order. RESOLVED_BY_ADJUDICATION appended after, in
-    // provenance-ledger append order.
+    // --- disputes (Wave-2 [explain-full-ledger-scans]): OPEN via the ledger's
+    // own open semantics; RESOLVED_BY_APPROVAL by correlating each APPROVAL to
+    // its latest earlier PENDING (same csid); both emitted in CHAIN order — now
+    // over `disputeRecordsForMember`'s POINT LOOKUP (every PENDING/APPROVAL for
+    // any csid this strand was EVER a member of), never a full `records()` scan.
+    // RESOLVED_BY_ADJUDICATION appended after, in provenance-ledger append order.
     const contested = this.#openPendingMemberSet().has(String(strandId));
     const disputes: ExplainDispute[] = [];
     if (this.#ratification !== null) {
@@ -3082,7 +3091,7 @@ class IntelligentDbImpl implements IntelligentDb {
       );
       const latestPendingByCsid = new Map<string, PendingPayload>();
       const openEmitted = new Set<string>();
-      for (const rec of this.#ratification.ledger.records()) {
+      for (const rec of this.#ratification.ledger.disputeRecordsForMember(strandId)) {
         if (rec.kind === "PENDING") {
           const p = rec.payload as PendingPayload;
           const csid = String(p.contradictionSetId);
@@ -3121,27 +3130,33 @@ class IntelligentDbImpl implements IntelligentDb {
     }
     const adjProvenance = this.#ratification?.adjudicationProvenance;
     if (adjProvenance !== undefined) {
-      for (const rec of adjProvenance.all()) {
-        if (rec.winner === strandId || rec.contributingStrandIds.some((s) => s === strandId)) {
-          disputes.push({
-            status: "RESOLVED_BY_ADJUDICATION",
-            contradictionSetId: rec.contradictionSetId,
-            winner: rec.winner,
-            margin: rec.margin,
-            at: rec.at,
-            reopened: adjProvenance.isReopened(rec.contradictionSetId),
-          });
-        }
+      // Wave-2 [explain-full-ledger-scans]: POINT LOOKUP via the ledger's own
+      // `contributingStrandIds` index, never a full `all()` scan. Sound because
+      // `#recordAdjudicationProvenance` (the SOLE producer) always seeds
+      // `contributingStrandIds` with `[winnerId, ...]` first (see its doc
+      // comment) — so "winner === strandId" is STRUCTURALLY implied by
+      // "contributingStrandIds includes strandId", never a separate case to
+      // miss.
+      for (const rec of adjProvenance.recordsContributedBy([strandId])) {
+        disputes.push({
+          status: "RESOLVED_BY_ADJUDICATION",
+          contradictionSetId: rec.contradictionSetId,
+          winner: rec.winner,
+          margin: rec.margin,
+          at: rec.at,
+          reopened: adjProvenance.isReopened(rec.contradictionSetId),
+        });
       }
     }
 
     // --- corroboration events naming this strand (either role), append order --
+    // Wave-2 [explain-full-ledger-scans]: POINT LOOKUP via `eventsInvolving`
+    // (the ratified + corroborator indexes), never a full `all()` scan.
     const corroborationEvents: ExplainCorroborationEvent[] = [];
     const corroboration = this.#ratification?.corroboration;
     if (corroboration !== undefined) {
-      for (const ev of corroboration.all()) {
+      for (const ev of corroboration.eventsInvolving(strandId)) {
         const ratified = ev.ratifiedStrandId === strandId;
-        if (!ratified && !ev.corroboratingStrandIds.some((s) => s === strandId)) continue;
         corroborationEvents.push({
           eventId: ev.eventId,
           at: ev.at,
