@@ -36,13 +36,35 @@
  * distinct classes. Arm 3 consults ONLY the class structure (the real MIS recursion);
  * Arms 1/2 cannot see it. Sources are left unresolvable (null) so the layer's
  * documented fallback is class-disjointness — exactly the signal under test.
+ *
+ * SCOPE, STATED HONESTLY (Wave-2 `sybil-capability-test-hardcoded-path`): Arm 3's
+ * `independentRootCount` calls are the REAL production MIS computation
+ * (`identity/index.ts`'s Bron–Kerbosch recursion) — not a re-derivation. What Arm 3
+ * does NOT do is invoke `forgetting/consolidation.ts`'s `tryConsolidate` end-to-end:
+ * that function's actual multi-class decisive-or-defer winner is chosen by an EARNED
+ * REPUTATION margin (`decisiveMargin`/`minWinnerReputation`), with the independent-root
+ * count entering only as the STRUCTURAL FLOOR/depth-margin gates (F4a `multiClassMinRoots`,
+ * M4 `depthMargin`) checked on the reputation-picked winner — not as a direct
+ * "more-independent side wins" comparator. Reproducing that full path here would mean
+ * inventing a reputation story with nothing to do with independence, diluting the very
+ * property this benchmark isolates. Instead, Arm 3's decision THRESHOLD is derived from
+ * the REAL shipped `DEFAULT_ADJUDICATION_POLICY.depthMargin` constant (imported, not
+ * hardcoded), so it tracks `tryConsolidate`'s M4 gate exactly and drifts if that policy
+ * ever changes. The full reputation-margin decisive-or-defer path, end-to-end through
+ * the real engine's `db.adjudicate`, is exercised for real elsewhere:
+ * `batch4M4DepthMargin.test.ts` (the M4 depth-margin gate specifically),
+ * `highImpactGateR.test.ts` / `engineOwnedEvidence.test.ts` (the #R-driven multi-class
+ * resolve/defer split).
  */
 
 import { mkdirSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 
 import { describe, expect, it } from "vitest";
 
 import { makeIdentity } from "../fixtures.js";
+import { DEFAULT_ADJUDICATION_POLICY } from "../../index.js";
 
 import type {
   EpochMs,
@@ -97,13 +119,20 @@ function arm2_passportOnly(trueKeys: number, falseKeys: number): Verdict {
 }
 
 /**
- * Arm 3: decisive-or-defer over EXTERNAL independent counts. Strictly greater
- * independent corroboration wins; an exact tie DEFERS to the human horn (never
- * auto-flips to the challenger).
+ * Arm 3: decisive-or-defer over EXTERNAL independent counts, modeling
+ * `tryConsolidate`'s M4 DEPTH-MARGIN gate (`forgetting/consolidation.ts`): a
+ * side must be independent-root-count DEEPER than its competitor by AT LEAST
+ * the REAL, imported `DEFAULT_ADJUDICATION_POLICY.depthMargin` (currently 1;
+ * this threshold is NOT a hardcoded "1" here — it tracks the shipped policy
+ * constant, so a future change to that constant changes this benchmark's
+ * threshold too, rather than silently drifting out of sync with it). Below
+ * that margin (including an exact tie), the dispute DEFERS to the human horn
+ * rather than auto-flipping.
  */
 function arm3_intelligentDb(trueIndep: number, falseIndep: number): Verdict {
-  if (trueIndep > falseIndep) return "TRUE";
-  if (falseIndep > trueIndep) return "FALSE";
+  const margin = DEFAULT_ADJUDICATION_POLICY.depthMargin;
+  if (trueIndep >= falseIndep + margin) return "TRUE";
+  if (falseIndep >= trueIndep + margin) return "FALSE";
   return "DEFER";
 }
 
@@ -176,7 +205,7 @@ describe("Phase-2 capability: Sybil-corroboration poisoning across three arms", 
     }
   });
 
-  it("emits a results table to the Arbor session dir", () => {
+  it("emits a results table (Wave-2 sybil-capability-test-hardcoded-path: routed through os.tmpdir(), never a machine-specific absolute path)", () => {
     const lines: string[] = [];
     lines.push("# Phase-2 Capability Benchmark — Sybil-corroboration poisoning");
     lines.push("");
@@ -207,7 +236,11 @@ describe("Phase-2 capability: Sybil-corroboration poisoning across three arms", 
     lines.push("paid fleet of distinct anchors DOES overturn the truth (priced, not prevented).");
 
     const md = lines.join("\n");
-    const outDir = "D:/Intelligent DB/.arbor/sessions/prior-art-research";
+    // Wave-2 [sybil-capability-test-hardcoded-path]: was a hardcoded, machine-
+    // specific absolute path ("D:/Intelligent DB/...") that could never run on
+    // any other machine or CI. Routed through os.tmpdir() so this default-suite
+    // test is portable everywhere.
+    const outDir = join(tmpdir(), "idb-sybil-capability-bench");
     mkdirSync(outDir, { recursive: true });
     writeFileSync(`${outDir}/phase2-capability-results.md`, md, "utf8");
     writeFileSync(
