@@ -62,7 +62,7 @@ import type { DatabaseSync as DatabaseSyncType } from "node:sqlite";
 import { asEpochMs } from "../core/types.js";
 import type { SourceId, StrandId, EpochMs, Unit } from "../core/types.js";
 import { runMigrations } from "../store/migrations.js";
-import { assertSharedHandleWal } from "../store/sqliteStore.js";
+import { assertOwnedWal, assertSharedHandleWal } from "../store/sqliteStore.js";
 
 // ---------------------------------------------------------------------------
 // Tunable Beta-model constants (product decision — tune to threat model)
@@ -1097,7 +1097,13 @@ class SqliteReputationLedgerImpl implements SqliteReputationLedger {
     this.#clock = clock;
 
     if (ownsDb) {
-      this.#db.exec("PRAGMA journal_mode=WAL");
+      // OWNED handle: SET WAL and VERIFY it actually took (a network filesystem can
+      // silently downgrade to a rollback journal, defeating crash-safety with no
+      // symptom short of a crash losing committed reputation state). `assertOwnedWal`
+      // is the shared owned-path check `store/sqliteStore.ts` uses; wiring it here
+      // (and in the pending ledger) closes the last owned-path gap the re-audit named
+      // — previously this branch issued the pragma but never read it back.
+      assertOwnedWal(this.#db, "createSqliteReputationLedger");
       this.#db.exec("PRAGMA synchronous=NORMAL");
     } else {
       // BORROWED shared handle: VERIFY (never set) that the owner already put it in

@@ -49,6 +49,7 @@ import {
   type StrandId,
 } from "../core/types.js";
 import {
+  assertOwnedWal,
   createSqliteStore,
   SharedHandleNotWalError,
   type SqliteStrandStore,
@@ -577,5 +578,37 @@ describe("SqliteStrandStore — { db } shared-handle overload verifies WAL mode"
     sharedHandle = new DatabaseSync(":memory:");
     const shared = createSqliteStore({ db: sharedHandle });
     expect(shared.integrityCheck()).toBe(true);
+  });
+});
+
+// `assertOwnedWal` is the shared OWNED-path check used by createSqliteStore, the
+// vector sidecar, and (since the re-audit follow-up) the reputation and pending
+// ledgers. It SETS `journal_mode=WAL` and VERIFIES the request actually took — the
+// real-world failure it guards is a network filesystem (SMB/NFS) silently downgrading
+// to a rollback journal, which would run the durability story over a non-crash-safe
+// journal with no symptom short of a crash. Before this it had zero direct coverage
+// despite four constructors depending on it.
+describe("assertOwnedWal — sets and verifies WAL on an owned handle", () => {
+  // A minimal fake DatabaseSync that reports a fixed journal_mode, so the "network FS
+  // refused WAL" branch is exercisable without an actual network filesystem.
+  const fakeDbReporting = (journalMode: string): DatabaseSyncType =>
+    ({
+      prepare: (_sql: string) => ({
+        get: () => ({ journal_mode: journalMode }),
+      }),
+    }) as unknown as DatabaseSyncType;
+
+  it("THROWS, naming the caller, when the pragma did not take (a rollback journal)", () => {
+    expect(() => assertOwnedWal(fakeDbReporting("delete"), "createSqliteReputationLedger")).toThrow(
+      /createSqliteReputationLedger.*journal_mode=WAL did not take/,
+    );
+  });
+
+  it("does not throw when the handle reports WAL", () => {
+    expect(() => assertOwnedWal(fakeDbReporting("wal"), "createSqlitePendingLedger")).not.toThrow();
+  });
+
+  it("accepts a :memory: handle (legitimately reports 'memory', non-durable by design)", () => {
+    expect(() => assertOwnedWal(fakeDbReporting("memory"), "createSqliteStore")).not.toThrow();
   });
 });

@@ -91,7 +91,7 @@ import type {
 
 import type { ReputationLedger } from "../identity/reputation.js";
 import { runMigrations } from "../store/migrations.js";
-import { assertSharedHandleWal } from "../store/sqliteStore.js";
+import { assertOwnedWal, assertSharedHandleWal } from "../store/sqliteStore.js";
 
 // ---------------------------------------------------------------------------
 // Record shapes (the VAULT's contents)
@@ -1354,7 +1354,14 @@ class SqlitePendingLedgerImpl implements SqlitePendingLedger {
     this.#onAppend = opts.onAppend;
 
     if (opts.ownsDb) {
-      this.#db.exec("PRAGMA journal_mode=WAL");
+      // OWNED handle: SET WAL and VERIFY it took (a network filesystem can silently
+      // downgrade to a rollback journal, and for THIS ledger that would run the audit
+      // chain's "one atomic crash-consistent file" story over a non-durable journal
+      // with no symptom short of a crash losing committed ratification records).
+      // `assertOwnedWal` is the shared owned-path check; wiring it here closes the last
+      // owned-path gap the re-audit named (this branch previously never read the pragma
+      // back).
+      assertOwnedWal(this.#db, "createSqlitePendingLedger");
       this.#db.exec("PRAGMA synchronous=NORMAL");
     } else {
       // BORROWED shared handle: VERIFY (never set) that the owner already put it in
