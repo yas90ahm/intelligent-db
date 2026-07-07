@@ -54,6 +54,7 @@ import {
   ReasonCode,
   asEpochMs,
   type Activation,
+  type Edge,
   type EdgeId,
   type LitStrand,
   type HaltStamp,
@@ -431,8 +432,22 @@ export function activationWalk(
   // thresholds against epsilon (CLAUDE.md "Separate ordering from stopping").
   const seenClasses = new Set<string>();
 
+  // Wave-2 [walk-redundant-outedges-refetch]: per-walk cache of each POPPED
+  // strand's out-edges array. The pop loop below already fetches
+  // `store.outEdges(cand.strandId)` once (to sum materialized weight); this
+  // cache lets (1) the neighbor-spread loop just below reuse that SAME array
+  // instead of a second `store.neighbors(...)` round-trip that would re-fetch
+  // the identical rows, and (2) the bridge sweep's `litBridgesFrom` (called
+  // once per LIT strand at `beginBridgeSweep`, after the local phase) reuse it
+  // again instead of a THIRD fetch — on the SQLite backend each of these was a
+  // real prepared-statement round-trip, not a free in-memory read. A strand is
+  // cached at most once (it fires — and therefore gets its out-edges fetched —
+  // at most once per walk, the same refractory-lock guarantee that bounds
+  // firing itself).
+  const outEdgesCache = new Map<StrandId, readonly Edge[]>();
+
   // Narrow read-only adapter the controller uses for bridge enumeration etc.
-  const view: HaltStoreView = makeHaltStoreView(store);
+  const view: HaltStoreView = makeHaltStoreView(store, outEdgesCache);
 
   // Per-walk cache of each entity's shared-entity sibling set. The web is not
   // mutated during a walk, so `strandsByEntity(E)` is invariant within one
@@ -544,9 +559,17 @@ export function activationWalk(
     const virtualSiblingCount = siblings.length > 0 ? siblings.length - 1 : 0;
 
     // Materialized Σw over the popped strand's out-edges (the store's denominator).
+    // Wave-2 [walk-redundant-outedges-refetch]: fetched EXACTLY ONCE per pop and
+    // cached (below) for reuse by the neighbor-spread loop and later the bridge
+    // sweep — a strand fires at most once (the refractory lock), so this is at
+    // most one `outEdges` round-trip per strand for the WHOLE walk, not up to
+    // three (materializedOutSum + `store.neighbors` + the bridge sweep's
+    // `litBridgesFrom`, each independently re-querying the SAME rows on the
+    // SQLite backend).
     let materializedOutSum = 0;
     const outEdges = store.outEdges(cand.strandId);
     for (const e of outEdges) materializedOutSum += e.w;
+    outEdgesCache.set(cand.strandId, outEdges);
 
     const effectiveOutSum =
       materializedOutSum + virtualSiblingCount * SIBLING_EDGE_WEIGHT;
@@ -555,28 +578,34 @@ export function activationWalk(
     //   child = parent * (edge.w / Σ_eff) * γ
     // Share-normalization (w / Σ_eff) is what starves high-degree hubs; Σ_eff folds
     // in the virtual sibling fan so the denominator is the true total out-strength.
-    for (const nv of store.neighbors(cand.strandId)) {
+    // Built LOCALLY from `outEdges` (already fetched above) instead of a second
+    // `store.neighbors(cand.strandId)` call — resolving each edge's destination
+    // strand here reproduces `neighbors()`'s exact semantics (a dangling edge,
+    // whose destination is not yet stored, forms no candidate) byte-for-byte.
+    for (const e of outEdges) {
       // Bridges are NOT part of normal local activation: each lit, un-crossed
       // CROSS_WEB_BRIDGE is owed EXACTLY ONE crossing by the phase-2 mandatory
       // sweep, funded by the SEPARATE bridge sub-budget. Spreading energy across
       // a bridge here would cross it in the local phase and bypass that budget,
       // so the local expansion SKIPS bridges entirely (CLAUDE.md "Resolved:
       // traversal halting").
-      if (nv.edge.edgeType === EdgeType.CROSS_WEB_BRIDGE) continue;
-      const alreadyFired = fired.has(nv.edge.to);
+      if (e.edgeType === EdgeType.CROSS_WEB_BRIDGE) continue;
+      const dest = store.getStrand(e.to);
+      if (dest === null) continue; // dangling edge: no NeighborView, matches store.neighbors()
+      const alreadyFired = fired.has(e.to);
       // DOMINANCE (default): an already-fired target gets nothing further —
       // byte-for-byte the original fast path. SUMMATION: still compute the
       // delivery and record it (below) so a strand's REPORTED activation
       // reflects every path that reached it, even after it first fired; it is
       // never re-pushed/re-expanded either way (bounds the walk identically).
       if (alreadyFired && reinforcement === "dominance") continue;
-      const share = effectiveOutSum > 0 ? nv.edge.w / effectiveOutSum : 0;
+      const share = effectiveOutSum > 0 ? e.w / effectiveOutSum : 0;
       const childEnergy = cand.energy * share * config.gamma;
       if (childEnergy <= 0) continue; // weightless / hub-starved thread
-      recordDelivery(nv.edge.to, childEnergy);
+      recordDelivery(e.to, childEnergy);
       if (alreadyFired) continue; // summation: tracked, but no re-expansion
       frontier.push({
-        strandId: nv.edge.to,
+        strandId: e.to,
         energy: childEnergy,
       });
     }
@@ -751,8 +780,20 @@ function gradeNovelty(added: number, config: WalkConfig): number {
  * Adapt the full {@link StrandStore} to the narrow read-only {@link HaltStoreView}
  * the halting controller needs (independent-class counts + lit-bridge resolution
  * for the phase-2 sweep). The controller never mutates through this view.
+ *
+ * @param outEdgesCache - Wave-2 [walk-redundant-outedges-refetch]: the pop
+ *   loop's per-strand out-edges cache. `litBridgesFrom` is called once per LIT
+ *   strand at `beginBridgeSweep` — EVERY such strand was already popped (and
+ *   therefore already had its out-edges fetched) during the local phase, so
+ *   this is a cache HIT in the overwhelming common case; a strand this view is
+ *   ever asked about that is somehow not cached (e.g. a future caller reusing
+ *   this adapter outside the walk's own pop loop) still gets a correct answer
+ *   via the store fallback, never a wrong one.
  */
-function makeHaltStoreView(store: StrandStore): HaltStoreView {
+function makeHaltStoreView(
+  store: StrandStore,
+  outEdgesCache: ReadonlyMap<StrandId, readonly Edge[]>,
+): HaltStoreView {
   return {
     independentClassCount(strandId: StrandId): number {
       const s = store.getStrand(strandId);
@@ -763,7 +804,8 @@ function makeHaltStoreView(store: StrandStore): HaltStoreView {
     },
     litBridgesFrom(strandId: StrandId): readonly EdgeId[] {
       const out: EdgeId[] = [];
-      for (const e of store.outEdges(strandId)) {
+      const edges = outEdgesCache.get(strandId) ?? store.outEdges(strandId);
+      for (const e of edges) {
         if (e.edgeType === EdgeType.CROSS_WEB_BRIDGE) out.push(e.id);
       }
       return out;
