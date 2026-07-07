@@ -178,6 +178,50 @@ describe("downstreamDisownSweep — downstream demote", () => {
   });
 });
 
+describe("downstreamDisownSweep — fails closed on a dangling edge", () => {
+  it("a DERIVATION edge whose `from` was never putStrand'd is SKIPPED: no throw, no partial sweep", () => {
+    const store: StrandStore = createMemoryStore();
+    const ledger = ledgerWithCap();
+    const fraud = "src:fraud" as SourceId;
+
+    const seed = makeStrand({ idRaw: "s:seed", roots: [{ classRaw: "class:A", sourceIdRaw: fraud }] });
+    // A SECOND, real downstream derived strand — proves the sweep does not merely
+    // abort early once it meets the dangling edge; the rest of the graph still
+    // processes to completion (no PARTIAL sweep).
+    const realDerived = makeStrand({
+      idRaw: "s:real-derived",
+      origin: FactOrigin.DERIVED,
+      roots: [{ classRaw: "class:A", sourceIdRaw: fraud }],
+    });
+    store.putStrand(seed);
+    store.putStrand(realDerived);
+    store.putEdge(derivationEdge(realDerived.id, seed.id));
+
+    // The DANGLING edge: its `from` (the derived side) was NEVER putStrand'd —
+    // `disown.ts`'s module doc: "FAILS CLOSED: a dangling edge / missing strand
+    // skips that NODE only."
+    const danglingId = asStrandId("s:never-stored");
+    store.putEdge(derivationEdge(danglingId, seed.id));
+
+    let res: ReturnType<typeof downstreamDisownSweep> | undefined;
+    expect(() => {
+      res = downstreamDisownSweep(fraud, [seed.id], store, ledger, NOW);
+    }).not.toThrow();
+
+    // NOT a partial sweep: the real downstream strand is still demoted, and the
+    // seed's direct clawback still happened.
+    expect(res!.demotedDownstream).toContain(realDerived.id);
+    expect(store.getStrand(realDerived.id)!.fact_state).toBe(FactState.DEMOTED);
+    expect(res!.seedClawedBack).toEqual([seed.id]);
+
+    // The dangling id was never resolved to a strand: it cannot appear anywhere
+    // in the receipt, and the store still (correctly) reports it unknown.
+    expect(res!.demotedDownstream).not.toContain(danglingId);
+    expect(res!.survivedDemotion).not.toContain(danglingId);
+    expect(store.getStrand(danglingId)).toBeNull();
+  });
+});
+
 describe("downstreamDisownSweep — bounded: coincidental different-class agreement is NOT touched", () => {
   it("an independent-class strand with NO derivation path stays LIVE and its source keeps reputation", () => {
     const store: StrandStore = createMemoryStore();

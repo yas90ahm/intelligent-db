@@ -1,155 +1,168 @@
 /**
  * noVoice.test.ts — "no provenance → no voice" preserved through the facade.
  *
- * The facade's recall must NEVER return an UNGROUNDED strand (one with no provenance
- * root carrying a real sourceId). We plant an ungrounded strand directly in the store
- * (bypassing the engine's writeFact, which always stamps provenance) alongside a
- * properly-grounded one, then assert recall surfaces ONLY the grounded fact even
- * though BOTH light up in the activation walk.
+ * Wave-2 audit finding `no-voice-test-bypasses-real-filter` (HIGH, test quality):
+ * the prior version of this suite planted an ungrounded strand into a HAND-ROLLED
+ * store, called the raw `engine.recall()`, then re-implemented the grounding
+ * predicate INLINE (`.filter((s) => s.provenance.some((r) => r.sourceId !== null))`)
+ * instead of calling the real filter — which lives in `agent/agentMemory.ts`'s
+ * `recall()` (`if (root.sourceId !== null) ...`). A second test called the real
+ * `createAgentMemory().recall()` but only ever inserted facts via `remember()`,
+ * which always stamps a real source — so no ungrounded strand was ever presented
+ * to the real filter either. A regression that deleted or inverted the real
+ * filter would have passed both tests.
+ *
+ * This version drives the REAL `createAgentMemory({ dbPath })` SQLite-backed
+ * store end-to-end: `remember()` mints a grounded fact through the real engine;
+ * a genuinely ungrounded strand — its only provenance root has `sourceId: null`,
+ * something `writeFact` can never produce (it always stamps `stamp.source_id`,
+ * non-null by type) — is planted directly into the SAME on-disk file via a
+ * second raw `DatabaseSync` connection (WAL mode supports concurrent connections
+ * to one file; `migrations.test.ts` already relies on the identical pattern),
+ * sharing the grounded fact's `entity` so the walk's real SHARED_ENTITY join
+ * (`store.strandsByEntity`) reaches it too — a strand the walk never visits can't
+ * prove the filter works, only that it was never exercised. The engine-level
+ * `mem.engine.recall()` (pre-filter) proves genuine reachability; the facade's
+ * real `mem.recall()` is what the exclusion assertion runs against — no
+ * re-derived predicate, no shortcut.
  */
 
-import { describe, it, expect } from "vitest";
-import { freshSource } from "../testSupport/identityFixtures.js";
+import { createRequire } from "node:module";
+import { rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 
-import {
-  createAgentMemory,
-  createMemoryStore,
-  createSourceIdentityLayer,
-  createIntelligentDb,
-  createLexicalCueResolver,
-  FactState,
-  FactOrigin,
-  Tier,
-  asStrandId,
-  asEpochMs,
-} from "../index.js";
-import type {
-  EntityId,
-  Strand,
-  ProvenanceRoot,
-  SourceId,
-  Unit,
-  AnchorBinding,
-  SourceRef,
-  SourceRegistryPort,
-  AnchorRegistryPort,
-  ReputationLedgerPort,
-  StakeLedgerPort,
-} from "../index.js";
+import type { DatabaseSync as DatabaseSyncType } from "node:sqlite";
+
+import { afterEach, describe, expect, it } from "vitest";
+
+import { createAgentMemory, FactOrigin, FactState, Tier } from "../index.js";
+import type { Activation, EntityId, Strand } from "../index.js";
+
+const require = createRequire(import.meta.url);
+const { DatabaseSync } = require("node:sqlite") as {
+  DatabaseSync: new (path: string) => DatabaseSyncType;
+};
+
+let dbPaths: string[] = [];
+
+afterEach(() => {
+  for (const p of dbPaths.splice(0)) {
+    for (const suffix of ["", "-wal", "-shm", "-journal"]) {
+      rmSync(p + suffix, { force: true });
+    }
+  }
+});
+
+function freshDbPath(tag: string): string {
+  const unique = `${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+  const p = join(tmpdir(), `idb-novoice-${tag}-${unique}.db`);
+  dbPaths.push(p);
+  return p;
+}
 
 describe("no provenance → no voice (facade recall never returns ungrounded)", () => {
-  it("filters out a strand whose provenance has no real source", () => {
-    // Build the SAME store the facade-style wiring uses, but by hand so we can plant
-    // an ungrounded strand the engine could never mint.
-    const store = createMemoryStore();
-
-    const sources: SourceRegistryPort = (() => {
-      const known = new Set<SourceId>();
-      return {
-        register: (p: SourceRef) => void known.add(p.sourceId),
-        sourceIdOf: (s: SourceId) => (known.has(s) ? s : null),
-        has: (s: SourceId) => known.has(s),
-      };
-    })();
-    const anchors: AnchorRegistryPort = (() => {
-      const book = new Map<SourceId, readonly AnchorBinding[]>();
-      return {
-        bind: (s: SourceId, a: readonly AnchorBinding[]) => void book.set(s, a),
-        anchorsOf: (s: SourceId) => book.get(s) ?? [],
-        aggregateCost: () => 0 as Unit,
-        independenceBetween: () => 0 as Unit,
-      };
-    })();
-    const reputation: ReputationLedgerPort = { scoreOf: () => 0 as Unit };
-    const stake: StakeLedgerPort = { postedFor: () => 0 };
-    const identity = createSourceIdentityLayer({ sources, anchors, reputation, stake });
-    const engine = createIntelligentDb(store, identity);
-    const resolver = createLexicalCueResolver(store);
-
-    const passport = freshSource();
-    identity.register(passport, []);
-    const stamp = identity.stampFor(passport.sourceId);
-
+  it("plants a genuinely ungrounded strand into a REAL createAgentMemory() SQLite store; the real recall() excludes it", () => {
+    const path = freshDbPath("real-filter");
     const entity = "entity:berlin" as EntityId;
 
-    // GROUNDED fact via the engine (always stamps provenance).
-    const groundedId = engine.writeFact({
-      entity,
-      payload: { text: "Berlin is grounded and cited" },
-      stamp,
-    });
-    resolver.index(store.getStrand(groundedId)!);
+    const mem = createAgentMemory({ dbPath: path });
+    try {
+      const { id: groundedId } = mem.remember({
+        text: "Berlin is the capital of Germany",
+        entity,
+      });
 
-    // UNGROUNDED strand planted directly: same entity (so the walk reaches it), but
-    // its only provenance root has sourceId: null — no real witness.
-    const at = asEpochMs(Date.now());
-    const ungroundedRoot: ProvenanceRoot = {
-      rootId: "root:ungrounded" as ProvenanceRoot["rootId"],
-      independenceClass: "class:ungrounded" as ProvenanceRoot["independenceClass"],
-      sourceId: null,
-      establishedAt: at,
-    };
-    const ungrounded: Strand = {
-      id: asStrandId("strand:ungrounded"),
-      entity,
-      attribute: null,
-      payload: { text: "Berlin ungrounded rumor with no provenance" },
-      content_hash: "hash:ungrounded" as Strand["content_hash"],
-      origin: FactOrigin.OBSERVED,
-      fact_state: FactState.LIVE,
-      tier: Tier.WARM,
-      provenance: [ungroundedRoot],
-      outEdges: [],
-      inEdges: [],
-      outranked_by: null,
-      bridge: { earned_bridge_value: 0, far_side_potential: 0 },
-      salience: { s: 1, last_fire_time: at, lambda: 0.05, fire_count: 0 },
-      description_value: 0,
-      observedAt: at,
-      external_reobservation_count: 0,
-      contradiction_set: null,
-      co_equal_claim_cardinality: 0,
-      last_tier_reason: null,
-      register: null,
-    };
-    store.putStrand(ungrounded);
-    resolver.index(ungrounded);
+      // Reach into the SAME on-disk store via a SECOND raw connection and INSERT
+      // a strand the real engine could never mint: its only provenance root's
+      // sourceId is null. Same `entity` as the grounded fact so it participates
+      // in the real SHARED_ENTITY join.
+      const raw = new DatabaseSync(path);
+      const at = Date.now();
+      const ungrounded: Strand = {
+        id: "strand:ungrounded-rumor" as Strand["id"],
+        entity,
+        attribute: null,
+        payload: { text: "Berlin ungrounded rumor with no provenance" },
+        content_hash: "hash:ungrounded-rumor" as Strand["content_hash"],
+        origin: FactOrigin.OBSERVED,
+        fact_state: FactState.LIVE,
+        tier: Tier.WARM,
+        provenance: [
+          {
+            rootId: "root:ungrounded" as Strand["provenance"][number]["rootId"],
+            independenceClass:
+              "class:ungrounded" as Strand["provenance"][number]["independenceClass"],
+            sourceId: null,
+            establishedAt: at as Strand["provenance"][number]["establishedAt"],
+          },
+        ],
+        outEdges: [],
+        inEdges: [],
+        outranked_by: null,
+        bridge: { earned_bridge_value: 0, far_side_potential: 0 },
+        salience: {
+          s: 1,
+          last_fire_time: at as Strand["salience"]["last_fire_time"],
+          lambda: 0.05,
+          fire_count: 0,
+        },
+        description_value: 0,
+        observedAt: at as Strand["observedAt"],
+        external_reobservation_count: 0,
+        contradiction_set: null,
+        co_equal_claim_cardinality: 0,
+        last_tier_reason: null,
+        register: null,
+      };
+      raw
+        .prepare("INSERT INTO strands (id, json, entity, attribute) VALUES (?, ?, ?, ?)")
+        .run(String(ungrounded.id), JSON.stringify(ungrounded), String(entity), null);
+      raw.close();
 
-    // Drive recall the way the facade does: resolve a cue mentioning "Berlin", walk,
-    // map lit → cited grounded facts. Both strands light (shared entity), but only
-    // the grounded one may be spoken.
-    const seeds = resolver.resolve({ text: "tell me about Berlin" });
-    const { lit } = engine.recall({ seeds });
-    const litIds = lit.map((l) => l.strandId);
-    // Sanity: the ungrounded strand DID light in the walk (so the filter is real).
-    expect(litIds).toContain(ungrounded.id);
-    expect(litIds).toContain(groundedId);
+      // REACHABILITY SANITY (via the real ENGINE, pre-facade-filter): both
+      // strands must actually light in the walk, or the exclusion below would be
+      // vacuous — proof the filter was exercised, not merely never challenged.
+      const rawResult = mem.engine.recall({
+        seeds: [{ strandId: groundedId, energy: 1 as Activation }],
+      });
+      const litIds = rawResult.lit.map((l) => l.strandId);
+      expect(litIds).toContain(groundedId);
+      expect(litIds).toContain(ungrounded.id);
 
-    // Now apply the facade's grounding filter (the exact rule recall uses).
-    const spoken = lit
-      .map((l) => store.getStrand(l.strandId))
-      .filter((s): s is Strand => s !== null)
-      .filter((s) => s.provenance.some((r) => r.sourceId !== null));
+      // THE REAL ASSERTION: drive the REAL facade recall (agentMemory.ts's own
+      // grounding filter) — no re-derived predicate, no shortcut.
+      const { facts } = mem.recall("capital of Germany");
 
-    const spokenIds = spoken.map((s) => s.id);
-    expect(spokenIds).toContain(groundedId);
-    expect(spokenIds).not.toContain(ungrounded.id);
+      const groundedFact = facts.find((f) => f.strandId === groundedId);
+      expect(groundedFact).toBeDefined();
+      expect(groundedFact!.source).toBe(mem.defaultSourceId);
+
+      expect(facts.some((f) => f.strandId === ungrounded.id)).toBe(false);
+      for (const f of facts) expect(f.source).toBeTruthy();
+    } finally {
+      // Close BEFORE afterEach's rmSync — an open handle blocks file deletion on
+      // Windows even when an assertion above threw.
+      mem.close();
+    }
   });
 
-  it("facade recall never surfaces the ungrounded rumor end-to-end", () => {
-    // End-to-end through the real facade: a grounded fact is recallable; an
-    // ungrounded one planted into the same store is not (the facade owns its store,
-    // so we reach in via the engine to plant — but the public path filters it).
+  it("facade recall never surfaces anything but grounded facts through the ordinary remember/recall path", () => {
+    // Every fact minted through the public remember() path is grounded by
+    // construction (writeFact always stamps a real source) — a lighter
+    // complementary check that the ordinary path stays grounded end-to-end.
     const mem = createAgentMemory();
-    mem.remember({ text: "Berlin is the capital of Germany", entity: "berlin" });
+    try {
+      mem.remember({ text: "Berlin is the capital of Germany", entity: "berlin" });
 
-    const { facts } = mem.recall("capital of Germany");
-    // Every returned fact is grounded in a real source (the default agent source).
-    expect(facts.length).toBeGreaterThan(0);
-    for (const f of facts) {
-      expect(f.source).toBeTruthy();
-      expect(f.source).toBe(mem.defaultSourceId);
+      const { facts } = mem.recall("capital of Germany");
+      expect(facts.length).toBeGreaterThan(0);
+      for (const f of facts) {
+        expect(f.source).toBeTruthy();
+        expect(f.source).toBe(mem.defaultSourceId);
+      }
+    } finally {
+      mem.close();
     }
-    mem.close();
   });
 });
