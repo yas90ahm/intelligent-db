@@ -1,7 +1,10 @@
 /**
- * mcp/daemonSwitch.test.ts — deliverable 2's opt-in daemon-backing switch
- * (mcp/server.ts): env resolution, connectivity validation, and the
- * disclosed `DaemonBackingNotWiredError` fail-fast path. Uses a tiny
+ * mcp/daemonSwitch.test.ts — the opt-in daemon-backing switch (mcp/server.ts):
+ * env resolution and connectivity validation (the fail-fast startup pre-check
+ * PHASE3B_MCP_ASYNC_SPEC.md kept unchanged — see mcp/server.ts's `main()`,
+ * which then constructs a real, long-lived `RemoteAgentMemory` to actually
+ * serve requests; the true end-to-end wiring is proven by
+ * `daemon/__e2e__/mcpDaemonBacked.e2e.test.ts`, not here). Uses a tiny
  * hand-rolled test daemon over a real Windows named pipe (this machine) —
  * genuine `node:net` I/O, no fakes — since these are the actual
  * startup-time checks a real deployment would exercise.
@@ -16,7 +19,6 @@ import { afterEach, describe, expect, it } from "vitest";
 
 import {
   DAEMON_STARTUP_TIMEOUT_MS,
-  DaemonBackingNotWiredError,
   resolveDaemonConfig,
   validateDaemonConnectivity,
 } from "./server.js";
@@ -145,14 +147,5 @@ describe("validateDaemonConnectivity", () => {
 
   it("DAEMON_STARTUP_TIMEOUT_MS is a sane positive bound", () => {
     expect(DAEMON_STARTUP_TIMEOUT_MS).toBeGreaterThan(0);
-  });
-});
-
-describe("DaemonBackingNotWiredError", () => {
-  it("names the socket path and points at the disclosed scope boundary", () => {
-    const err = new DaemonBackingNotWiredError("\\\\.\\pipe\\iddb-x");
-    expect(err.message).toContain("\\\\.\\pipe\\iddb-x");
-    expect(err.message).toMatch(/not wired/);
-    expect(err.name).toBe("DaemonBackingNotWiredError");
   });
 });

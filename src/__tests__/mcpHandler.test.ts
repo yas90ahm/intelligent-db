@@ -1,16 +1,21 @@
 /**
  * mcpHandler.test.ts — the PURE MCP request handler (JSON-RPC 2.0 / MCP).
  *
- * Drives handleMcpRequest with framed initialize / tools/list / tools/call objects
- * and asserts valid MCP responses, plus a tools/call remember-then-recall ROUND-TRIP
- * of a fact. Also exercises the line transport's processLine (parse + dispatch).
+ * Drives handleMcpRequestAsync with framed initialize / tools/list / tools/call
+ * objects and asserts valid MCP responses, plus a tools/call remember-then-recall
+ * ROUND-TRIP of a fact. Also exercises the line transport's processLine (parse +
+ * dispatch). PHASE3B_MCP_ASYNC_SPEC.md: the handler is async everywhere now — this
+ * exercises it over `syncToAsyncMemory(createAgentMemory())`, the in-process
+ * adapter (see the unit parity test in `mcp/asyncHandlerParity.test.ts` for the
+ * explicit "async handler over the adapter == old sync handler responses" proof).
  */
 
 import { describe, it, expect } from "vitest";
 
 import {
   createAgentMemory,
-  handleMcpRequest,
+  handleMcpRequestAsync,
+  syncToAsyncMemory,
   mcpProcessLine,
   MCP_PROTOCOL_VERSION,
   MCP_SERVER_INFO,
@@ -25,16 +30,16 @@ import {
 } from "../index.js";
 import type { McpRequest, McpResponse } from "../index.js";
 
-function call(memory: ReturnType<typeof createAgentMemory>, req: McpRequest): McpResponse {
-  const res = handleMcpRequest(req, memory);
+async function call(memory: ReturnType<typeof createAgentMemory>, req: McpRequest): Promise<McpResponse> {
+  const res = await handleMcpRequestAsync(req, syncToAsyncMemory(memory));
   expect(res).not.toBeNull();
   return res as McpResponse;
 }
 
 describe("MCP handler (pure JSON-RPC 2.0)", () => {
-  it("initialize → protocolVersion + capabilities.tools + serverInfo", () => {
+  it("initialize → protocolVersion + capabilities.tools + serverInfo", async () => {
     const mem = createAgentMemory();
-    const res = call(mem, { jsonrpc: "2.0", id: 1, method: "initialize" });
+    const res = await call(mem, { jsonrpc: "2.0", id: 1, method: "initialize" });
 
     expect(res.jsonrpc).toBe("2.0");
     expect(res.id).toBe(1);
@@ -50,9 +55,9 @@ describe("MCP handler (pure JSON-RPC 2.0)", () => {
     mem.close();
   });
 
-  it("tools/list → the advertised tools with JSON-Schema inputs", () => {
+  it("tools/list → the advertised tools with JSON-Schema inputs", async () => {
     const mem = createAgentMemory();
-    const res = call(mem, { jsonrpc: "2.0", id: 2, method: "tools/list" });
+    const res = await call(mem, { jsonrpc: "2.0", id: 2, method: "tools/list" });
 
     const result = res.result as { tools: Array<{ name: string; inputSchema: unknown }> };
     const names = result.tools.map((t) => t.name).sort();
@@ -70,28 +75,28 @@ describe("MCP handler (pure JSON-RPC 2.0)", () => {
     mem.close();
   });
 
-  it("a notification (no id) yields no response", () => {
+  it("a notification (no id) yields no response", async () => {
     const mem = createAgentMemory();
-    const res = handleMcpRequest(
+    const res = await handleMcpRequestAsync(
       { jsonrpc: "2.0", method: "notifications/initialized" },
-      mem,
+      syncToAsyncMemory(mem),
     );
     expect(res).toBeNull();
     mem.close();
   });
 
-  it("unknown method → JSON-RPC method-not-found error", () => {
+  it("unknown method → JSON-RPC method-not-found error", async () => {
     const mem = createAgentMemory();
-    const res = call(mem, { jsonrpc: "2.0", id: 3, method: "does/not/exist" });
+    const res = await call(mem, { jsonrpc: "2.0", id: 3, method: "does/not/exist" });
     expect(res.result).toBeUndefined();
     expect(res.error?.code).toBe(JSONRPC_METHOD_NOT_FOUND);
     mem.close();
   });
 
-  it("tools/call remember then recall ROUND-TRIPS a fact", () => {
+  it("tools/call remember then recall ROUND-TRIPS a fact", async () => {
     const mem = createAgentMemory();
 
-    const remembered = call(mem, {
+    const remembered = await call(mem, {
       jsonrpc: "2.0",
       id: 10,
       method: "tools/call",
@@ -106,7 +111,7 @@ describe("MCP handler (pure JSON-RPC 2.0)", () => {
     expect(rememberContent[0]!.type).toBe("text");
     expect(rememberContent[0]!.text).toContain("Remembered fact");
 
-    const recalled = call(mem, {
+    const recalled = await call(mem, {
       jsonrpc: "2.0",
       id: 11,
       method: "tools/call",
@@ -121,9 +126,9 @@ describe("MCP handler (pure JSON-RPC 2.0)", () => {
     mem.close();
   });
 
-  it("tools/call with a missing required param → invalid-params error", () => {
+  it("tools/call with a missing required param → invalid-params error", async () => {
     const mem = createAgentMemory();
-    const res = call(mem, {
+    const res = await call(mem, {
       jsonrpc: "2.0",
       id: 12,
       method: "tools/call",
@@ -133,9 +138,9 @@ describe("MCP handler (pure JSON-RPC 2.0)", () => {
     mem.close();
   });
 
-  it("tools/call unknown tool → method-not-found error", () => {
+  it("tools/call unknown tool → method-not-found error", async () => {
     const mem = createAgentMemory();
-    const res = call(mem, {
+    const res = await call(mem, {
       jsonrpc: "2.0",
       id: 13,
       method: "tools/call",
@@ -145,11 +150,11 @@ describe("MCP handler (pure JSON-RPC 2.0)", () => {
     mem.close();
   });
 
-  it("remember with origin 'web' quarantines: recall renders the [PROVISIONAL] label; omitted origin stays LIVE", () => {
+  it("remember with origin 'web' quarantines: recall renders the [PROVISIONAL] label; omitted origin stays LIVE", async () => {
     const mem = createAgentMemory();
 
     // The user's own fact (no origin): owner-stamped, LIVE — the regression pin.
-    call(mem, {
+    await call(mem, {
       jsonrpc: "2.0",
       id: 20,
       method: "tools/call",
@@ -161,7 +166,7 @@ describe("MCP handler (pure JSON-RPC 2.0)", () => {
 
     // A fact scraped off a web page: filed under the page's (unverified)
     // publisher ⇒ quarantined PROVISIONAL by the existing ingest gate.
-    const remembered = call(mem, {
+    const remembered = await call(mem, {
       jsonrpc: "2.0",
       id: 21,
       method: "tools/call",
@@ -176,7 +181,7 @@ describe("MCP handler (pure JSON-RPC 2.0)", () => {
     });
     expect(remembered.error).toBeUndefined();
 
-    const recalled = call(mem, {
+    const recalled = await call(mem, {
       jsonrpc: "2.0",
       id: 22,
       method: "tools/call",
@@ -198,10 +203,10 @@ describe("MCP handler (pure JSON-RPC 2.0)", () => {
     mem.close();
   });
 
-  it("remember origin validation: unknown kind and missing resourceId are invalid params", () => {
+  it("remember origin validation: unknown kind and missing resourceId are invalid params", async () => {
     const mem = createAgentMemory();
 
-    const badKind = call(mem, {
+    const badKind = await call(mem, {
       jsonrpc: "2.0",
       id: 23,
       method: "tools/call",
@@ -213,7 +218,7 @@ describe("MCP handler (pure JSON-RPC 2.0)", () => {
     expect(badKind.error?.code).toBe(JSONRPC_INVALID_PARAMS);
     expect(badKind.error?.message).toContain("origin.kind");
 
-    const noResource = call(mem, {
+    const noResource = await call(mem, {
       jsonrpc: "2.0",
       id: 24,
       method: "tools/call",
@@ -225,11 +230,11 @@ describe("MCP handler (pure JSON-RPC 2.0)", () => {
     mem.close();
   });
 
-  it("over-limit remember text is rejected with the limit NAMED and the store left empty", () => {
+  it("over-limit remember text is rejected with the limit NAMED and the store left empty", async () => {
     const mem = createAgentMemory();
     const oversize = "x".repeat(REMEMBER_TEXT_MAX_CHARS + 1);
 
-    const res = call(mem, {
+    const res = await call(mem, {
       jsonrpc: "2.0",
       id: 30,
       method: "tools/call",
@@ -239,7 +244,7 @@ describe("MCP handler (pure JSON-RPC 2.0)", () => {
     expect(res.error?.message).toContain(String(REMEMBER_TEXT_MAX_CHARS));
 
     // Nothing landed: the rejection happened AT the boundary, before the engine.
-    const recalled = call(mem, {
+    const recalled = await call(mem, {
       jsonrpc: "2.0",
       id: 31,
       method: "tools/call",
@@ -252,10 +257,10 @@ describe("MCP handler (pure JSON-RPC 2.0)", () => {
     mem.close();
   });
 
-  it("over-limit recall query and resolve_pending ids are rejected with named limits", () => {
+  it("over-limit recall query and resolve_pending ids are rejected with named limits", async () => {
     const mem = createAgentMemory();
 
-    const bigQuery = call(mem, {
+    const bigQuery = await call(mem, {
       jsonrpc: "2.0",
       id: 32,
       method: "tools/call",
@@ -267,7 +272,7 @@ describe("MCP handler (pure JSON-RPC 2.0)", () => {
     expect(bigQuery.error?.code).toBe(JSONRPC_INVALID_PARAMS);
     expect(bigQuery.error?.message).toContain(String(RECALL_QUERY_MAX_CHARS));
 
-    const bigId = call(mem, {
+    const bigId = await call(mem, {
       jsonrpc: "2.0",
       id: 33,
       method: "tools/call",
@@ -285,9 +290,9 @@ describe("MCP handler (pure JSON-RPC 2.0)", () => {
     mem.close();
   });
 
-  it("recall accepts 'cue' as an alias for 'query' (query stays canonical)", () => {
+  it("recall accepts 'cue' as an alias for 'query' (query stays canonical)", async () => {
     const mem = createAgentMemory();
-    call(mem, {
+    await call(mem, {
       jsonrpc: "2.0",
       id: 40,
       method: "tools/call",
@@ -297,7 +302,7 @@ describe("MCP handler (pure JSON-RPC 2.0)", () => {
       },
     });
 
-    const viaAlias = call(mem, {
+    const viaAlias = await call(mem, {
       jsonrpc: "2.0",
       id: 41,
       method: "tools/call",
@@ -311,18 +316,19 @@ describe("MCP handler (pure JSON-RPC 2.0)", () => {
     mem.close();
   });
 
-  it("transport processLine: parses a JSON line and dispatches; blank line is ignored", () => {
+  it("transport processLine: parses a JSON line and dispatches; blank line is ignored", async () => {
     const mem = createAgentMemory();
+    const asyncMem = syncToAsyncMemory(mem);
 
-    expect(mcpProcessLine("   ", mem)).toBeNull();
+    expect(await mcpProcessLine("   ", asyncMem)).toBeNull();
 
     const line = JSON.stringify({ jsonrpc: "2.0", id: 99, method: "ping" });
-    const res = mcpProcessLine(line, mem);
+    const res = await mcpProcessLine(line, asyncMem);
     expect(res?.id).toBe(99);
     expect(res?.error).toBeUndefined();
 
     // A malformed line becomes a JSON-RPC error with a null id (id unrecoverable).
-    const bad = mcpProcessLine("{ not json", mem);
+    const bad = await mcpProcessLine("{ not json", asyncMem);
     expect(bad?.id).toBeNull();
     expect(bad?.error).toBeDefined();
 

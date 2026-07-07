@@ -21,7 +21,7 @@
  *      (`adjudicate` admits only LIVE members, the Phase-3 gate), so a
  *      PROVISIONAL flood produces ZERO pending questions for any N.
  *   4. MCP ROUND-TRIP — list_pending_questions renders the question through
- *      handleMcpRequest; resolve_pending applies the owner's choice; the losing
+ *      handleMcpRequestAsync; resolve_pending applies the owner's choice; the losing
  *      fact stays recallable (demote-never-delete) and its persisted state is
  *      DEMOTED. A SEPARATE case pins that the recall TOOL's rendering LABELS
  *      the non-LIVE state at the MCP boundary (the anti-hallucination
@@ -60,7 +60,8 @@ import {
   asEpochMs,
   createAgentMemory,
   createDisputeRouter,
-  handleMcpRequest,
+  handleMcpRequestAsync,
+  syncToAsyncMemory,
 } from "../index.js";
 
 import type {
@@ -174,18 +175,18 @@ function makeDisputedMemory(dbPath?: string) {
 
 // --- MCP plumbing (mirrors mcpHandler.test.ts) ----------------------------------
 
-function call(memory: ReturnType<typeof createAgentMemory>, req: McpRequest): McpResponse {
-  const res = handleMcpRequest(req, memory);
+async function call(memory: ReturnType<typeof createAgentMemory>, req: McpRequest): Promise<McpResponse> {
+  const res = await handleMcpRequestAsync(req, syncToAsyncMemory(memory));
   expect(res).not.toBeNull();
   return res as McpResponse;
 }
 
-function toolCall(
+async function toolCall(
   memory: ReturnType<typeof createAgentMemory>,
   id: number,
   name: string,
   args: Record<string, unknown> = {},
-): McpResponse {
+): Promise<McpResponse> {
   return call(memory, {
     jsonrpc: "2.0",
     id,
@@ -391,17 +392,17 @@ describe("3. QUARANTINE NOISE EXCLUSION — disputes form among LIVE strands onl
 });
 
 // ============================================================================
-// 4. MCP ROUND-TRIP — the horn through handleMcpRequest
+// 4. MCP ROUND-TRIP — the horn through handleMcpRequestAsync
 // ============================================================================
 
 describe("4. MCP ROUND-TRIP — list_pending_questions → resolve_pending → recall", () => {
-  it("lists the rendered question, applies the user's choice, and keeps the demoted loser recallable", () => {
+  it("lists the rendered question, applies the user's choice, and keeps the demoted loser recallable", async () => {
     const { mem, ownerFactId, rivalFactId } = makeDisputedMemory();
     const csid = mem.pendingQuestions()[0]!.contradictionSetId;
 
     // list_pending_questions: the rendered question carries everything the
     // connected agent needs to ASK the user and to echo back the choice.
-    const listText = toolText(toolCall(mem, 20, "list_pending_questions"));
+    const listText = toolText(await toolCall(mem, 20, "list_pending_questions"));
     expect(listText).toContain("disagree about");
     expect(listText).toContain(String(csid));
     expect(listText).toContain("the wifi password is hunter2");
@@ -414,7 +415,7 @@ describe("4. MCP ROUND-TRIP — list_pending_questions → resolve_pending → r
     // back the confirmationToken the listing above just minted.
     const confirmationToken = extractConfirmationToken(listText, String(csid));
     const resolveText = toolText(
-      toolCall(mem, 21, "resolve_pending", {
+      await toolCall(mem, 21, "resolve_pending", {
         contradictionSetId: String(csid),
         chosenStrandId: String(ownerFactId),
         confirmationToken,
@@ -425,7 +426,7 @@ describe("4. MCP ROUND-TRIP — list_pending_questions → resolve_pending → r
     expect(resolveText).toContain("never deleted");
 
     // The horn is quiet through the same tool.
-    expect(toolText(toolCall(mem, 22, "list_pending_questions"))).toContain(
+    expect(toolText(await toolCall(mem, 22, "list_pending_questions"))).toContain(
       "No pending questions",
     );
 
@@ -438,13 +439,13 @@ describe("4. MCP ROUND-TRIP — list_pending_questions → resolve_pending → r
     expect(loser!.fact_state).toBe(FactState.DEMOTED);
 
     const recallText = toolText(
-      toolCall(mem, 23, "recall", { query: "what is the wifi password?" }),
+      await toolCall(mem, 23, "recall", { query: "what is the wifi password?" }),
     );
     expect(recallText).toContain("hunter2");
     expect(recallText).toContain("pwned123");
   });
 
-  it("MCP recall RENDERING labels the losing fact's DEMOTED state (anti-hallucination at the MCP boundary)", () => {
+  it("MCP recall RENDERING labels the losing fact's DEMOTED state (anti-hallucination at the MCP boundary)", async () => {
     // CitedFact.fact_state exists precisely so a non-LIVE claim is
     // DISTINGUISHABLE at the consumption boundary (agentMemory.ts: "the
     // consuming agent MUST see the state or it would drop an unverified claim
@@ -453,10 +454,10 @@ describe("4. MCP ROUND-TRIP — list_pending_questions → resolve_pending → r
     // carry the label, or a DEMOTED memory reads identically to a believed one.
     const { mem, ownerFactId } = makeDisputedMemory();
     const csid = mem.pendingQuestions()[0]!.contradictionSetId;
-    const listText = toolText(toolCall(mem, 29, "list_pending_questions"));
+    const listText = toolText(await toolCall(mem, 29, "list_pending_questions"));
     const confirmationToken = extractConfirmationToken(listText, String(csid));
     toolText(
-      toolCall(mem, 30, "resolve_pending", {
+      await toolCall(mem, 30, "resolve_pending", {
         contradictionSetId: String(csid),
         chosenStrandId: String(ownerFactId),
         confirmationToken,
@@ -464,7 +465,7 @@ describe("4. MCP ROUND-TRIP — list_pending_questions → resolve_pending → r
     );
 
     const recallText = toolText(
-      toolCall(mem, 31, "recall", { query: "what is the wifi password?" }),
+      await toolCall(mem, 31, "recall", { query: "what is the wifi password?" }),
     );
     expect(recallText).toContain("pwned123"); // the demoted loser DOES surface...
     expect(recallText).toContain("DEMOTED"); // ...and must be LABELED as history.
@@ -631,7 +632,7 @@ describe("6. ROUTING PURITY — route() is a pure decision function", () => {
 // ============================================================================
 
 describe("7. RENDERING SAFETY — pendingQuestions renders fail-closed", () => {
-  it("dispute members with number / object payloads render without throwing", () => {
+  it("dispute members with number / object payloads render without throwing", async () => {
     const mem = createAgentMemory();
     cleanups.push(() => mem.close());
 
@@ -673,12 +674,12 @@ describe("7. RENDERING SAFETY — pendingQuestions renders fail-closed", () => {
     expect(texts.some((t) => t.includes("maxLoadKg"))).toBe(true);
 
     // The MCP surface renders the same question end-to-end without throwing.
-    const listText = toolText(toolCall(mem, 40, "list_pending_questions"));
+    const listText = toolText(await toolCall(mem, 40, "list_pending_questions"));
     expect(listText).toContain("42");
     expect(listText).toContain("maxLoadKg");
   });
 
-  it("a dangling member (strand deleted from the store) is skipped, never a crash", () => {
+  it("a dangling member (strand deleted from the store) is skipped, never a crash", async () => {
     // SQLite-backed facade so the persisted row can be removed OUT FROM UNDER
     // the open pending (the in-memory pending ledger keeps the member id; the
     // clone-on-read SQLite store then resolves it to null — the fail-closed
@@ -708,7 +709,7 @@ describe("7. RENDERING SAFETY — pendingQuestions renders fail-closed", () => {
     expect(questions[0]!.question).not.toContain("1 sources");
 
     // The MCP surface stays crash-free over the same degraded state.
-    const listText50 = toolText(toolCall(mem, 50, "list_pending_questions"));
+    const listText50 = toolText(await toolCall(mem, 50, "list_pending_questions"));
     expect(listText50).toContain("hunter2");
     expect(listText50).not.toContain("pwned123");
 
@@ -736,7 +737,7 @@ describe("7. RENDERING SAFETY — pendingQuestions renders fail-closed", () => {
 // ============================================================================
 
 describe("8. INJECTION RESISTANCE — the MCP renderers escape + delimit untrusted payload text", () => {
-  it("newline-bearing hostile option text cannot forge strandId lines in list_pending_questions", () => {
+  it("newline-bearing hostile option text cannot forge strandId lines in list_pending_questions", async () => {
     const mem = createAgentMemory();
     cleanups.push(() => mem.close());
 
@@ -768,7 +769,7 @@ describe("8. INJECTION RESISTANCE — the MCP renderers escape + delimit untrust
 
     expect(mem.adjudicate(KEY_ATTR).kind).toBe("DEFERRED");
 
-    const listText = toolText(toolCall(mem, 60, "list_pending_questions"));
+    const listText = toolText(await toolCall(mem, 60, "list_pending_questions"));
 
     // The rendering's LINE STRUCTURE stays ours: exactly the two GENUINE
     // strandId lines exist — the forged one never starts a line, because every
@@ -790,7 +791,7 @@ describe("8. INJECTION RESISTANCE — the MCP renderers escape + delimit untrust
     expect(listText).toContain("untrusted memory content");
   });
 
-  it("recall rendering keeps one text line per fact under newline-bearing payloads", () => {
+  it("recall rendering keeps one text line per fact under newline-bearing payloads", async () => {
     const mem = createAgentMemory();
     cleanups.push(() => mem.close());
 
@@ -800,7 +801,7 @@ describe("8. INJECTION RESISTANCE — the MCP renderers escape + delimit untrust
       attribute: "notes#daily",
     });
 
-    const recallText = toolText(toolCall(mem, 61, "recall", { query: "note to self" }));
+    const recallText = toolText(await toolCall(mem, 61, "recall", { query: "note to self" }));
 
     // ONE numbered text line + ONE citation line — the payload's embedded fake
     // "fact + citation" pair rides INSIDE the escaped single line, never as

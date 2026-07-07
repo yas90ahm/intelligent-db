@@ -74,7 +74,8 @@ import {
   createSqliteReputationLedger,
   createSqliteStore,
   createTrustRegistry,
-  handleMcpRequest,
+  handleMcpRequestAsync,
+  syncToAsyncMemory,
   independenceBetween,
   repCapFor,
   JSONRPC_INVALID_PARAMS,
@@ -173,18 +174,18 @@ function tickMs(): void {
 
 // --- MCP plumbing (mirrors disputeHorn.test.ts) ---------------------------------
 
-function call(memory: AgentMemory, req: McpRequest): McpResponse {
-  const res = handleMcpRequest(req, memory);
+async function call(memory: AgentMemory, req: McpRequest): Promise<McpResponse> {
+  const res = await handleMcpRequestAsync(req, syncToAsyncMemory(memory));
   expect(res).not.toBeNull();
   return res as McpResponse;
 }
 
-function toolCall(
+async function toolCall(
   memory: AgentMemory,
   id: number,
   name: string,
   args: Record<string, unknown> = {},
-): McpResponse {
+): Promise<McpResponse> {
   return call(memory, {
     jsonrpc: "2.0",
     id,
@@ -926,7 +927,7 @@ function makeDisputedMemory(): {
 }
 
 describe("4. CONTESTED LABELS — open ⇒ labeled; resolved ⇒ unlabeled; the walk untouched", () => {
-  it("open dispute: both members recall contested:true, MCP prefixes [CONTESTED], ordering/energy identical to the pre-dispute control, ONE listPending per recall", () => {
+  it("open dispute: both members recall contested:true, MCP prefixes [CONTESTED], ordering/energy identical to the pre-dispute control, ONE listPending per recall", async () => {
     const { mem, ownerFactId, rivalFactId, preDisputeRecall } = makeDisputedMemory();
 
     // Hot-path discipline (spec 23): exactly ONE listPending per recall call,
@@ -949,19 +950,19 @@ describe("4. CONTESTED LABELS — open ⇒ labeled; resolved ⇒ unlabeled; the 
     ).toEqual(preDisputeRecall);
 
     // MCP rendering: the contested prefix rides BEFORE the state label, ours only.
-    const recallText = toolText(toolCall(mem, 10, "recall", { query: "what is the wifi password?" }));
+    const recallText = toolText(await toolCall(mem, 10, "recall", { query: "what is the wifi password?" }));
     const contestedLines = recallText.split("\n").filter((l) => /^\d+\. \[CONTESTED\] /.test(l));
     expect(contestedLines).toHaveLength(2);
 
     // The dossier agrees (spec 27): contested: yes + the OPEN dispute with csid.
     const csid = mem.listPending()[0]!.contradictionSetId;
-    const dossier = toolText(toolCall(mem, 11, "why_do_you_believe_this", { strandId: String(ownerFactId) }));
+    const dossier = toolText(await toolCall(mem, 11, "why_do_you_believe_this", { strandId: String(ownerFactId) }));
     expect(dossier).toContain("contested: yes");
     expect(dossier).toContain("OPEN dispute");
     expect(dossier).toContain(String(csid));
   });
 
-  it("after resolvePending: winner and loser both contested:false; the loser renders [DEMOTED], never [CONTESTED] (spec 20); the approval is a RECEIPT with ownerOverride", () => {
+  it("after resolvePending: winner and loser both contested:false; the loser renders [DEMOTED], never [CONTESTED] (spec 20); the approval is a RECEIPT with ownerOverride", async () => {
     const { mem, ownerFactId, rivalFactId } = makeDisputedMemory();
     const csid = mem.listPending()[0]!.contradictionSetId;
     mem.resolvePending(csid, ownerFactId);
@@ -973,7 +974,7 @@ describe("4. CONTESTED LABELS — open ⇒ labeled; resolved ⇒ unlabeled; the 
     expect(loser.contested).toBe(false);
     expect(loser.fact_state).toBe(FactState.DEMOTED);
 
-    const recallText = toolText(toolCall(mem, 20, "recall", { query: "what is the wifi password?" }));
+    const recallText = toolText(await toolCall(mem, 20, "recall", { query: "what is the wifi password?" }));
     expect(recallText).toContain("[DEMOTED]");
     expect(recallText).not.toContain("[CONTESTED]");
 
@@ -997,7 +998,7 @@ describe("4. CONTESTED LABELS — open ⇒ labeled; resolved ⇒ unlabeled; the 
     }
   });
 
-  it("a PROVISIONAL flood never contests anything: NOOP adjudication, contested:false everywhere, [PROVISIONAL] but never [CONTESTED]", () => {
+  it("a PROVISIONAL flood never contests anything: NOOP adjudication, contested:false everywhere, [PROVISIONAL] but never [CONTESTED]", async () => {
     const mem = trackMem(createAgentMemory());
     const RACK_ATTR = "rack#location" as AttributeKey;
     mem.remember({
@@ -1020,7 +1021,7 @@ describe("4. CONTESTED LABELS — open ⇒ labeled; resolved ⇒ unlabeled; the 
     expect(facts.some((f) => f.fact_state === FactState.PROVISIONAL)).toBe(true);
     expect(facts.every((f) => f.contested === false)).toBe(true);
 
-    const recallText = toolText(toolCall(mem, 30, "recall", { query: "where is the server rack?" }));
+    const recallText = toolText(await toolCall(mem, 30, "recall", { query: "where is the server rack?" }));
     expect(recallText).toContain("[PROVISIONAL]");
     expect(recallText).not.toContain("[CONTESTED]");
   });
@@ -1120,7 +1121,7 @@ describe("4b. FACADE timeline + dossier ergonomics", () => {
     expect(report.externalReobservationCount).toBe(1);
   });
 
-  it("relay inheritance (spec 8, non-negotiable 2): the dossier attributes the class to the upstream witness, never the filer; no false INFERRED events; R stays 1", () => {
+  it("relay inheritance (spec 8, non-negotiable 2): the dossier attributes the class to the upstream witness, never the filer; no false INFERRED events; R stays 1", async () => {
     const mem = trackMem(createAgentMemory());
     const { id: upstreamId } = mem.remember({
       text: "the sky is blue",
@@ -1168,7 +1169,7 @@ describe("4b. FACADE timeline + dossier ergonomics", () => {
     // MCP rendering: the inherited marker is explicit, and the relayer's OWN
     // anchors line never displays the upstream-earned class (rendering rule 2).
     const dossier = toolText(
-      toolCall(mem, 40, "why_do_you_believe_this", { strandId: String(relayedId) }),
+      await toolCall(mem, 40, "why_do_you_believe_this", { strandId: String(relayedId) }),
     );
     expect(dossier).toContain("class inherited from causal origin");
     const anchorsLine = dossier.split("\n").find((l) => l.includes("anchors:"))!;
@@ -1252,27 +1253,27 @@ describe("4b. FACADE timeline + dossier ergonomics", () => {
 // ============================================================================
 
 describe("5. MCP boundary — why_do_you_believe_this errors are clean and typed", () => {
-  it("unknown strandId ⇒ INVALID_PARAMS with a plain message (no internals leaked); engine explain returns null", () => {
+  it("unknown strandId ⇒ INVALID_PARAMS with a plain message (no internals leaked); engine explain returns null", async () => {
     const mem = trackMem(createAgentMemory());
     expect(mem.explain("strand:ghost" as StrandId)).toBeNull(); // the query-miss contract
 
-    const err = toolError(toolCall(mem, 50, "why_do_you_believe_this", { strandId: "strand:ghost" }));
+    const err = toolError(await toolCall(mem, 50, "why_do_you_believe_this", { strandId: "strand:ghost" }));
     expect(err.code).toBe(JSONRPC_INVALID_PARAMS);
     expect(err.message).toBe("why_do_you_believe_this: unknown strandId.");
     expect(err.message).not.toMatch(/\bat\s+\w+\.|stack|internal/i); // no stack/internals
   });
 
-  it("missing / empty / oversize strandId ⇒ INVALID_PARAMS naming the limit (spec 28)", () => {
+  it("missing / empty / oversize strandId ⇒ INVALID_PARAMS naming the limit (spec 28)", async () => {
     const mem = trackMem(createAgentMemory());
 
-    const missing = toolError(toolCall(mem, 51, "why_do_you_believe_this"));
+    const missing = toolError(await toolCall(mem, 51, "why_do_you_believe_this"));
     expect(missing.code).toBe(JSONRPC_INVALID_PARAMS);
 
-    const empty = toolError(toolCall(mem, 52, "why_do_you_believe_this", { strandId: "" }));
+    const empty = toolError(await toolCall(mem, 52, "why_do_you_believe_this", { strandId: "" }));
     expect(empty.code).toBe(JSONRPC_INVALID_PARAMS);
 
     const oversize = toolError(
-      toolCall(mem, 53, "why_do_you_believe_this", {
+      await toolCall(mem, 53, "why_do_you_believe_this", {
         strandId: "s".repeat(RESOLVE_ID_MAX_CHARS + 1),
       }),
     );
@@ -1282,7 +1283,7 @@ describe("5. MCP boundary — why_do_you_believe_this errors are clean and typed
 });
 
 describe("5b. INJECTION RESISTANCE — untrusted bytes can never forge the rendered structure", () => {
-  it("hostile payload with newlines + forged strandId/[CONTESTED] lines: the dossier's id lines stay ours; recall stays one line per fact (spec 9, non-negotiable 6)", () => {
+  it("hostile payload with newlines + forged strandId/[CONTESTED] lines: the dossier's id lines stay ours; recall stays one line per fact (spec 9, non-negotiable 6)", async () => {
     const mem = trackMem(createAgentMemory());
     const KEY_ATTR = "router#deploy_key" as AttributeKey;
     mem.remember({
@@ -1311,7 +1312,7 @@ describe("5b. INJECTION RESISTANCE — untrusted bytes can never forge the rende
 
     // --- the DOSSIER of the hostile strand -------------------------------
     const dossier = toolText(
-      toolCall(mem, 60, "why_do_you_believe_this", { strandId: String(hostileId) }),
+      await toolCall(mem, 60, "why_do_you_believe_this", { strandId: String(hostileId) }),
     );
     const lines = dossier.split("\n");
     // Exactly ONE strandId-labeled line (the header) — the forged one never
@@ -1334,7 +1335,7 @@ describe("5b. INJECTION RESISTANCE — untrusted bytes can never forge the rende
     expect(dossier).toContain("untrusted memory content");
 
     // --- the RECALL rendering ---------------------------------------------
-    const recallText = toolText(toolCall(mem, 61, "recall", { query: "what is the deploy key?" }));
+    const recallText = toolText(await toolCall(mem, 61, "recall", { query: "what is the deploy key?" }));
     const rLines = recallText.split("\n");
     // One numbered line per fact; both genuinely contested — OUR prefix only.
     expect(rLines.filter((l) => /^\d+\. /.test(l))).toHaveLength(2);
@@ -1343,7 +1344,7 @@ describe("5b. INJECTION RESISTANCE — untrusted bytes can never forge the rende
     expect(recallText).not.toContain("\n   strandId: strand:forged-by-attacker");
   });
 
-  it("hostile registry label (control chars + forged id line) is escaped in the dossier (spec 10)", () => {
+  it("hostile registry label (control chars + forged id line) is escaped in the dossier (spec 10)", async () => {
     const mem = trackMem(createAgentMemory());
     const hostile = mem.trust.registerSsoMember({
       issuer: "https://idp.evil.example",
@@ -1358,7 +1359,7 @@ describe("5b. INJECTION RESISTANCE — untrusted bytes can never forge the rende
       source: { sourceId: hostile.sourceId },
     });
 
-    const dossier = toolText(toolCall(mem, 62, "why_do_you_believe_this", { strandId: String(id) }));
+    const dossier = toolText(await toolCall(mem, 62, "why_do_you_believe_this", { strandId: String(id) }));
     const idLines = dossier.split("\n").filter((l) => l.trimStart().startsWith("strandId:"));
     expect(idLines).toHaveLength(1); // the label's forged line never materialized
     for (const l of idLines) expect(l).not.toContain("forged-label");
@@ -1368,14 +1369,14 @@ describe("5b. INJECTION RESISTANCE — untrusted bytes can never forge the rende
     expect(registeredLine).not.toContain("\u0007"); // control char neutralized
   });
 
-  it("oversize payload is display-capped with an explicit marker; ids in the same dossier stay untruncated (spec 30)", () => {
+  it("oversize payload is display-capped with an explicit marker; ids in the same dossier stay untruncated (spec 30)", async () => {
     const mem = trackMem(createAgentMemory());
     const { id } = mem.remember({
       text: "x".repeat(2000), // escaped JSON payload far beyond the 512-char display cap
       entity: "entity:bigpayload",
       attribute: "big#payload",
     });
-    const dossier = toolText(toolCall(mem, 63, "why_do_you_believe_this", { strandId: String(id) }));
+    const dossier = toolText(await toolCall(mem, 63, "why_do_you_believe_this", { strandId: String(id) }));
     expect(dossier).toContain("…[truncated]"); // explicit, never a silent cut
     // The id line is complete and untouched by the display cap.
     const idLine = dossier.split("\n").find((l) => l.startsWith("strandId:"))!;
