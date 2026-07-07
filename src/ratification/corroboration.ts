@@ -390,7 +390,7 @@ class SqliteCorroborationLedgerImpl implements SqliteCorroborationLedger {
   readonly #insertStrand;
   readonly #insertRatified;
   readonly #insertBeneficiary;
-  readonly #count;
+  readonly #lastEvent;
   readonly #all;
   readonly #isReversed;
   readonly #markReversed;
@@ -479,8 +479,16 @@ class SqliteCorroborationLedgerImpl implements SqliteCorroborationLedger {
       `INSERT OR IGNORE INTO corroboration_events_beneficiary (beneficiary_source_id, event_id, seq)
        VALUES (?, ?, ?)`,
     );
-    this.#count = this.#db.prepare(
-      "SELECT COUNT(*) AS n FROM corroboration_events",
+    // O(1) position derivation (was an unconditional `COUNT(*)` full-table scan
+    // on every append): `seq` is `AUTOINCREMENT`, so with no deletes ever issued
+    // against this table (this ledger never deletes a row) the highest persisted
+    // `seq` IS the current row count — and `ORDER BY seq DESC LIMIT 1` resolves
+    // via the primary-key index (effectively O(1)), unlike `COUNT(*)`. Read
+    // fresh on every call rather than cached in memory, so a caller's
+    // transaction rollback (e.g. a mid-`ratify()` throw) can never leave a
+    // stale in-memory counter ahead of what actually committed.
+    this.#lastEvent = this.#db.prepare(
+      "SELECT seq FROM corroboration_events ORDER BY seq DESC LIMIT 1",
     );
     this.#all = this.#db.prepare(
       "SELECT json FROM corroboration_events ORDER BY seq",
@@ -561,7 +569,8 @@ class SqliteCorroborationLedgerImpl implements SqliteCorroborationLedger {
   record(event: CorroborationEventInput): CorroborationEvent {
     // Mint `corrob:<append-position>` from the persisted row count when no id is
     // supplied (continues from the count after a reopen, never colliding).
-    const n = Number((this.#count.get() as { n: number }).n);
+    const lastRow = this.#lastEvent.get();
+    const n = lastRow === undefined ? 0 : Number((lastRow as { seq: number }).seq);
     const eventId = event.eventId ?? `corrob:${n}`;
     const finalEvent: CorroborationEvent = {
       eventId,

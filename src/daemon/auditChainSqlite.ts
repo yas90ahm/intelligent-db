@@ -73,7 +73,6 @@ class SqliteDaemonAuditChainImpl implements SqliteDaemonAuditChain {
 
   readonly #insertRecord;
   readonly #allRecords;
-  readonly #countRecords;
   readonly #lastRecord;
 
   constructor(opts: {
@@ -103,9 +102,6 @@ class SqliteDaemonAuditChainImpl implements SqliteDaemonAuditChain {
     this.#allRecords = this.#db.prepare(
       "SELECT json FROM daemon_audit_records ORDER BY seq",
     );
-    this.#countRecords = this.#db.prepare(
-      "SELECT COUNT(*) AS n FROM daemon_audit_records",
-    );
     this.#lastRecord = this.#db.prepare(
       "SELECT json FROM daemon_audit_records ORDER BY seq DESC LIMIT 1",
     );
@@ -124,10 +120,19 @@ class SqliteDaemonAuditChainImpl implements SqliteDaemonAuditChain {
   }
 
   #append(kind: DaemonRecordKind, payload: DaemonPayload): DaemonLedgerRecord {
-    const seq = Number((this.#countRecords.get() as { n: number }).n);
-    const tail = this.#lastRecord.get();
-    const prevHash =
-      seq === 0 ? DAEMON_GENESIS_HASH : this.#parse(asString((tail as { json: unknown }).json)).thisHash;
+    // O(1) seq derivation (was an unconditional `COUNT(*)` full-table scan on
+    // every append): `#lastRecord` is ALREADY fetched here to compute `prevHash`
+    // (an indexed `ORDER BY seq DESC LIMIT 1`, effectively O(1) via the `seq`
+    // primary-key index) — reuse that single query for `seq` too instead of a
+    // second, separate `COUNT(*)` pass. Deriving `seq` fresh from the persisted
+    // tail on every call (rather than caching a counter in memory) means this is
+    // automatically correct even if a caller wraps `#append` in a transaction
+    // that later rolls back — there is no in-memory state that could go stale.
+    const tailRow = this.#lastRecord.get();
+    const tail =
+      tailRow === undefined ? null : this.#parse(asString((tailRow as { json: unknown }).json));
+    const seq = tail === null ? 0 : tail.seq + 1;
+    const prevHash = tail === null ? DAEMON_GENESIS_HASH : tail.thisHash;
     const thisHash = sha256Hex(hashPreimage(seq, prevHash, kind, payload));
     const record: DaemonLedgerRecord = { seq, prevHash, kind, payload, thisHash };
     // Ship-before-write (same ordering contract as pendingLedger's AppendSink):

@@ -19,8 +19,12 @@ import { DAEMON_GENESIS_HASH } from "../auditChain.js";
 import { createSqliteDaemonAuditChain } from "../auditChainSqlite.js";
 
 const require = createRequire(import.meta.url);
-const { DatabaseSync } = require("node:sqlite") as {
+const { DatabaseSync, StatementSync } = require("node:sqlite") as {
   DatabaseSync: new (path: string) => DatabaseSyncType;
+  StatementSync: new (...args: never[]) => {
+    readonly sourceSQL: string;
+    get(...args: unknown[]): unknown;
+  };
 };
 
 let dir = "";
@@ -116,7 +120,53 @@ describe("SqliteDaemonAuditChain: durability across reopen (H4 fix)", () => {
     chain2.close();
   });
 
-  it("AppendSink-compatible: ships before the local write; a throwing sink aborts (nothing persisted)", () => {
+  it("perf regression: zero COUNT(*) executions across 300 appends, O(1) seq derivation", () => {
+    // RE-AUDIT FIX (finding #11 / observability lane): `#append` used to run an
+    // unconditional `SELECT COUNT(*) FROM daemon_audit_records` on EVERY append to
+    // derive `seq`, even though it already fetches the persisted tail row one line
+    // later to compute `prevHash`. Fixed: `seq` is now derived from that SAME
+    // already-fetched tail row (`tail.seq + 1`) instead of a second query. Spy
+    // installed at the statement-execution level (not `prepare()`) so it would
+    // have caught the OLD code, which prepared its COUNT(*) statement once and
+    // reused it via `.get()` on every append.
+    const dbPath = freshDbPath();
+    const chain = createSqliteDaemonAuditChain(dbPath);
+
+    // Patch `StatementSync.prototype.get` directly (the SHARED prototype every
+    // prepared statement instance looks up methods through) rather than wrapping
+    // `DatabaseSync.prototype.prepare`: this chain's statements are all prepared
+    // ONCE in the constructor (before this spy could ever be installed) and
+    // reused thereafter, so a `prepare()`-only spy would never observe their
+    // later `.get()` calls at all — silently passing even against the unfixed
+    // O(n) code (verified: this exact spy shape, installed after construction,
+    // correctly turns red when `#append` is reverted to a cached `COUNT(*)`
+    // statement).
+    const proto = StatementSync.prototype as unknown as {
+      get: (...args: unknown[]) => unknown;
+    };
+    const origGet = proto.get;
+    let countStarCalls = 0;
+    proto.get = function (this: { sourceSQL: string }, ...args: unknown[]) {
+      if (/count\(\*\)/i.test(this.sourceSQL)) countStarCalls++;
+      return origGet.apply(this, args);
+    };
+    try {
+      for (let i = 0; i < 300; i++) {
+        chain.recordConnectionAccepted({ fingerprint: `fp${i}`, sourceId: `src${i}` });
+      }
+    } finally {
+      proto.get = origGet;
+    }
+    expect(countStarCalls).toBe(0);
+
+    const records = chain.records();
+    expect(records.length).toBe(300);
+    records.forEach((r, i) => expect(r.seq).toBe(i)); // gapless, matches array position
+    expect(chain.verifyChain()).toEqual({ ok: true, firstBrokenSeq: null });
+    chain.close();
+  });
+
+  it("AppendSink-compatible: ships before the local write; a throwing sink aborts (nothing persisted), and does not consume a seq", () => {
     const dbPath = freshDbPath();
     const shipped: string[] = [];
     const chain = createSqliteDaemonAuditChain(dbPath, {
@@ -127,13 +177,26 @@ describe("SqliteDaemonAuditChain: durability across reopen (H4 fix)", () => {
     chain.close();
 
     const dbPath2 = freshDbPath();
+    let armed = true;
     const throwingChain = createSqliteDaemonAuditChain(dbPath2, {
       onAppend: () => {
-        throw new Error("sink down");
+        if (armed) throw new Error("sink down");
       },
     });
     expect(() => throwingChain.recordAuthFailure({ reason: "TIMEOUT" })).toThrow("sink down");
     expect(throwingChain.records().length).toBe(0);
+
+    // The property that matters (same class of risk an in-memory seq counter
+    // without rollback-recovery would get wrong): the ABORTED append must not
+    // have consumed seq 0 — deriving `seq` fresh from the persisted tail on
+    // every call (never cached) means the next SUCCESSFUL append still lands at
+    // seq 0, not seq 1.
+    armed = false;
+    const real = throwingChain.recordAuthFailure({ reason: "MALFORMED" });
+    expect(real.seq).toBe(0);
+    expect(real.prevHash).toBe(DAEMON_GENESIS_HASH);
+    expect(throwingChain.records().length).toBe(1);
+    expect(throwingChain.verifyChain()).toEqual({ ok: true, firstBrokenSeq: null });
     throwingChain.close();
   });
 });

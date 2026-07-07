@@ -1319,7 +1319,6 @@ class SqlitePendingLedgerImpl implements SqlitePendingLedger {
 
   readonly #insertRecord;
   readonly #allRecords;
-  readonly #countRecords;
   readonly #lastRecord;
 
   // -- the incrementally-maintained OPEN-PENDING index (the perf fix) ---------
@@ -1385,9 +1384,6 @@ class SqlitePendingLedgerImpl implements SqlitePendingLedger {
     );
     this.#allRecords = this.#db.prepare(
       "SELECT json FROM ratification_records ORDER BY seq",
-    );
-    this.#countRecords = this.#db.prepare(
-      "SELECT COUNT(*) AS n FROM ratification_records",
     );
     this.#lastRecord = this.#db.prepare(
       "SELECT json FROM ratification_records ORDER BY seq DESC LIMIT 1",
@@ -1697,12 +1693,24 @@ class SqlitePendingLedgerImpl implements SqlitePendingLedger {
     payload: PendingPayload | ApprovalPayload | MutationPayload,
     signer: SourceId,
   ): LedgerRecord {
-    const seq = Number((this.#countRecords.get() as { n: number }).n);
-    const tail = this.#lastRecord.get();
-    const prevHash =
-      seq === 0
-        ? GENESIS_PREV_HASH
-        : this.#parse(pendingAsString((tail as { json: unknown }).json)).thisHash;
+    // O(1) seq derivation (was an unconditional `COUNT(*)` full-table scan on
+    // every append, same anti-pattern `adjudicationProvenance.ts` avoided via
+    // `lastInsertRowid`): `#lastRecord` is ALREADY fetched here to compute
+    // `prevHash` (an indexed `ORDER BY seq DESC LIMIT 1`, effectively O(1) via
+    // the `seq` primary-key index) — reuse that single query for `seq` too
+    // instead of a second, separate `COUNT(*)` pass. Deriving `seq` fresh from
+    // the persisted tail on every call (rather than caching a counter in
+    // memory) means this stays correct even when `#append` runs inside a
+    // caller's transaction that later rolls back (e.g. `approve()`'s
+    // resync-on-rollback path) — there is no in-memory counter that could go
+    // stale relative to what actually committed.
+    const tailRow = this.#lastRecord.get();
+    const tail =
+      tailRow === undefined
+        ? null
+        : this.#parse(pendingAsString((tailRow as { json: unknown }).json));
+    const seq = tail === null ? 0 : tail.seq + 1;
+    const prevHash = tail === null ? GENESIS_PREV_HASH : tail.thisHash;
     const thisHash = sha256Hex(
       hashPreimage(seq, prevHash, kind, payload, signer),
     );
