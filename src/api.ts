@@ -1686,6 +1686,107 @@ function byBeliefEventOrder(a: BeliefEvent, b: BeliefEvent): number {
   return compareStrings(beliefEventTieKey(a), beliefEventTieKey(b));
 }
 
+/**
+ * BOUNDED SCAR-LIMITER STORE (Wave-3 remediation item
+ * `scar-limiter-unbounded-and-non-durable`) — the concrete storage backing
+ * {@link IntelligentDbImpl}'s per-`(contradictor,target,class)` anti-grief scar
+ * rate-limit (see `#admitScar` below). A plain `Map<string, EpochMs>` with no
+ * pruning grows without bound for the lifetime of a long-lived process under
+ * sustained disown/contradiction traffic — a slow memory leak, not a
+ * belief/trust-invariant weakening: the rate-limit DECISION ({@link admit}) is
+ * byte-identical to the original unbounded-Map logic; only the STORAGE is now
+ * bounded, via two independent, non-interacting safety valves:
+ *
+ *  1. STALE PRUNE (age-based): any entry whose recorded scar time is already
+ *     `>= windowMs` in the past can never again change a future {@link admit}
+ *     decision for that key — a fresh call would already treat it as expired
+ *     and re-arm. Sweeping such entries out is therefore a pure memory
+ *     optimization with NO behavior change, amortized so a single `admit()`
+ *     call never pays a full O(n) sweep: the sweep itself runs at most once
+ *     per `pruneIntervalMs` of the injected clock's progress.
+ *  2. SIZE CAP (oldest-first eviction): bounds worst-case memory even before
+ *     entries age out, against a flood of never-repeating distinct keys
+ *     inside one window. `Map` iteration order is INSERTION order (re-`set`ting
+ *     an EXISTING key does not move its position), so evicting from the front
+ *     is a cheap, deterministic "oldest tracked pair" proxy. Evicting an entry
+ *     that happens to still be in-window only ever lets THAT ONE pair's rate
+ *     limit re-arm early under extreme cardinality — it can never suppress a
+ *     scar that should have fired (the failure direction is "check again",
+ *     never "silently drop a real betrayal").
+ *
+ * PERSISTENCE ACROSS RESTART is deliberately OUT OF SCOPE, documented not
+ * silently dropped: this store is a short-window (90-day) RATE LIMIT on how
+ * often a repeat contradiction between the same pair/class may escalate into
+ * the NON-DECAYING scar path — it is not the substantive penalty itself. The
+ * substantive clawback (`scarBeta`, via the reputation ledger) is already
+ * durably persisted through the store. Losing this limiter's state on restart
+ * re-opens, at worst, ONE extra scar opportunity per `(contradictor,target,
+ * class)` triple — bounded, and a strictly smaller exposure than the
+ * durability work already shipped for facts/trust/audit — so an attacker
+ * forcing a restart gains a single extra scar, never an unbounded one and
+ * never a way to un-scar a betrayal already recorded in the reputation ledger.
+ */
+export class ScarLimiterStore {
+  readonly #entries = new Map<string, EpochMs>();
+  readonly #windowMs: number;
+  readonly #maxEntries: number;
+  readonly #pruneIntervalMs: number;
+  #lastPrunedAt: number | null = null;
+
+  constructor(windowMs: number, maxEntries = 50_000, pruneIntervalMs = Math.max(1, windowMs / 10)) {
+    this.#windowMs = windowMs;
+    this.#maxEntries = maxEntries;
+    this.#pruneIntervalMs = pruneIntervalMs;
+  }
+
+  /** Current tracked-entry count. Bounded by `maxEntries` at all times; a diagnostic/test-only surface. */
+  get size(): number {
+    return this.#entries.size;
+  }
+
+  /** Whether `key` currently has a tracked (possibly stale-but-not-yet-swept) entry. */
+  has(key: string): boolean {
+    return this.#entries.has(key);
+  }
+
+  /**
+   * Byte-identical decision to the original unbounded-Map logic: true (and
+   * records `at`) the first time `key` is admitted, or once `windowMs` has
+   * elapsed since its last admission; false for a repeat inside the window.
+   */
+  admit(key: string, at: EpochMs): boolean {
+    this.#pruneStale(at);
+    const last = this.#entries.get(key);
+    if (last !== undefined && (at as number) - (last as number) < this.#windowMs) {
+      return false; // already admitted this key in-window
+    }
+    this.#entries.set(key, at);
+    this.#evictOverflow();
+    return true;
+  }
+
+  /** Amortized sweep: removes every entry whose age has already exceeded the window. */
+  #pruneStale(at: EpochMs): void {
+    const nowMs = at as number;
+    if (this.#lastPrunedAt !== null && nowMs - this.#lastPrunedAt < this.#pruneIntervalMs) return;
+    this.#lastPrunedAt = nowMs;
+    for (const [key, ts] of this.#entries) {
+      if (nowMs - (ts as number) >= this.#windowMs) this.#entries.delete(key);
+    }
+  }
+
+  /** Hard size cap: evict oldest-inserted entries (LRU-style) until back at `maxEntries`. */
+  #evictOverflow(): void {
+    let overflow = this.#entries.size - this.#maxEntries;
+    if (overflow <= 0) return;
+    for (const key of this.#entries.keys()) {
+      if (overflow <= 0) break;
+      this.#entries.delete(key);
+      overflow--;
+    }
+  }
+}
+
 // ---------------------------------------------------------------------------
 // Concrete engine
 // ---------------------------------------------------------------------------
@@ -1714,6 +1815,9 @@ class IntelligentDbImpl implements IntelligentDb {
    */
   readonly #ratification: RatificationDeps | null;
 
+  /** The per-pair scar rate-limit window (one decay half-life, 90 days). */
+  readonly #SCAR_WINDOW_MS = 90 * 86_400_000;
+
   /**
    * M3 anti-grief (BATCH 4, OD-2 seam family) — the per-source-pair contradiction
    * RATE-LIMITER. Keyed `${contradictor}->${target}:${class}` → the witness time it
@@ -1723,10 +1827,13 @@ class IntelligentDbImpl implements IntelligentDb {
    * STACKING many w-weighted contradictions to grief an honest incumbent, while leaving
    * a genuine SECOND independent class free to scar (different pair / different class).
    * First-arrival-safe: the scar penalizes the CONTRADICTED party, never the late-arriver.
+   *
+   * BACKED BY {@link ScarLimiterStore} (not a raw `Map`): bounded memory under a
+   * long-lived process via age-based pruning + a hard size cap (see that class's
+   * doc for the full rationale, including the deliberate persistence-out-of-scope
+   * call). The rate-limit DECISION is unchanged; only the storage is now bounded.
    */
-  readonly #scarLimiter = new Map<string, EpochMs>();
-  /** The per-pair scar rate-limit window (one decay half-life, 90 days). */
-  readonly #SCAR_WINDOW_MS = 90 * 86_400_000;
+  readonly #scarLimiter = new ScarLimiterStore(this.#SCAR_WINDOW_MS);
 
   /**
    * TRUST-TIERED INGEST (Phase 3): the resolved {@link IngestPolicy.quarantineThreshold}.
@@ -1901,12 +2008,7 @@ class IntelligentDbImpl implements IntelligentDb {
    */
   #admitScar(contradictor: SourceId | null, target: SourceId, klass: string, at: EpochMs): boolean {
     const key = `${String(contradictor ?? "?")}->${String(target)}:${klass}`;
-    const last = this.#scarLimiter.get(key);
-    if (last !== undefined && (at as number) - (last as number) < this.#SCAR_WINDOW_MS) {
-      return false; // already scarred this pair/class in-window ⇒ ordinary contradiction
-    }
-    this.#scarLimiter.set(key, at);
-    return true;
+    return this.#scarLimiter.admit(key, at); // already scarred this pair/class in-window ⇒ false
   }
 
   /**
