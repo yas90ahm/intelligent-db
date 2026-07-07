@@ -20,7 +20,10 @@
 import { dirname, join } from "node:path";
 
 import { createAgentMemory } from "../agent/agentMemory.js";
+import { createSqlitePendingLedger } from "../ratification/pendingLedger.js";
+import type { ChainHead as FactChainHead, ChainVerification as FactChainVerification } from "../ratification/pendingLedger.js";
 import { createSqliteDaemonAuditChain } from "./auditChainSqlite.js";
+import type { DaemonAuditChain } from "./auditChain.js";
 import { createTokenStore, ownerTokenFilePath } from "./tokens.js";
 import { DaemonServer } from "./server.js";
 import { daemonLog } from "./log.js";
@@ -88,6 +91,81 @@ export function parseArgs(argv: readonly string[]): CliConfig {
 }
 
 // ---------------------------------------------------------------------------
+// verifychain-never-invoked-by-product fix: neither checksum chain was ever
+// self-verified by SHIPPED code — corruption at rest was only ever caught by
+// a human manually scripting a call to `verifyChain()`. Closed two ways: (1)
+// MANDATORY at every startup (below, `verifyChainsAtStartup` — refuses to
+// serve on failure), and (2) on-demand via the OWNER-gated `verifyChains`
+// admin verb (`server.ts`'s `#executeAdminVerb`).
+// ---------------------------------------------------------------------------
+
+/** Thrown by {@link verifyChainsAtStartup} when either chain fails self-verification. */
+export class ChainVerificationFailedError extends Error {
+  constructor(
+    public readonly chain: "daemon_audit" | "fact_ratification",
+    public readonly firstBrokenSeq: number | null,
+  ) {
+    super(
+      `intelligent-db-daemon: refusing to start — the ${chain} checksum chain failed ` +
+        `self-verification at seq ${String(firstBrokenSeq)}. Corruption at rest is not ` +
+        `safe to serve from; restore from a known-good snapshot (see OPERATIONS.md).`,
+    );
+    this.name = "ChainVerificationFailedError";
+  }
+}
+
+/**
+ * Open a SHORT-LIVED second connection to the SAME durable memory db
+ * (`dbPath`) whose `ratification_records` table already lives there (see
+ * `agent/agentMemory.ts`'s "one shared handle" doc — the default facade wires
+ * the pending ledger onto the SAME file when `dbPath` is given), purely to
+ * run a READ-ONLY chain operation, then close it. `createSqlitePendingLedger`
+ * only ever runs idempotent DDL/pragmas at construction (its own module doc:
+ * "safe regardless of which subsystem happens to construct first against a
+ * shared handle") — this never mutates the file, so it is safe to run
+ * concurrently alongside the daemon's own open handle on the same path.
+ */
+function withFactChain<T>(dbPath: string, fn: (ledger: { verifyChain(): FactChainVerification; chainHead(): FactChainHead }) => T): T {
+  const ledger = createSqlitePendingLedger({ path: dbPath });
+  try {
+    return fn(ledger);
+  } finally {
+    ledger.close();
+  }
+}
+
+/**
+ * Self-verify BOTH checksum chains — the daemon's own (dedicated file,
+ * `auditChain`) and the fact/ratification chain (inside the shared memory db
+ * at `dbPath`) — and throw {@link ChainVerificationFailedError} (refuse to
+ * serve) if either is inconsistent. Logs loudly via `daemonLog` before
+ * throwing either way, so an operator sees WHICH chain and at what seq even
+ * if the process then exits non-zero.
+ */
+export function verifyChainsAtStartup(opts: { auditChain: DaemonAuditChain; dbPath: string }): void {
+  const daemonResult = opts.auditChain.verifyChain();
+  if (!daemonResult.ok) {
+    daemonLog({
+      event: "chain_verification_failed",
+      level: "error",
+      chain: "daemon_audit",
+      firstBrokenSeq: daemonResult.firstBrokenSeq,
+    });
+    throw new ChainVerificationFailedError("daemon_audit", daemonResult.firstBrokenSeq);
+  }
+  const factResult = withFactChain(opts.dbPath, (l) => l.verifyChain());
+  if (!factResult.ok) {
+    daemonLog({
+      event: "chain_verification_failed",
+      level: "error",
+      chain: "fact_ratification",
+      firstBrokenSeq: factResult.firstBrokenSeq,
+    });
+    throw new ChainVerificationFailedError("fact_ratification", factResult.firstBrokenSeq);
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Runnable entrypoint
 // ---------------------------------------------------------------------------
 
@@ -105,12 +183,25 @@ export async function main(argv: readonly string[] = process.argv.slice(2)): Pro
   // identity layer already uses — one swappable trust root, no parallel one.
   const trustRegistry = memory.trust;
 
+  // verifychain-never-invoked-by-product fix: refuse to serve if either
+  // checksum chain is already inconsistent at rest — before opening the
+  // listener, before any client can connect.
+  try {
+    verifyChainsAtStartup({ auditChain, dbPath: config.dbPath });
+  } catch (err) {
+    auditChain.close();
+    memory.close();
+    throw err;
+  }
+
   const server = new DaemonServer({
     memory,
     tokens,
     auditChain,
     trustRegistry,
     endpointBase: config.endpointBase,
+    factChainHead: () => withFactChain(config.dbPath, (l) => l.chainHead()),
+    verifyFactChain: () => withFactChain(config.dbPath, (l) => l.verifyChain()),
   });
 
   const { endpoint } = await server.start();

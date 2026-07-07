@@ -3,8 +3,8 @@
  * never-raw (R3).
  */
 
-import { describe, it, expect, beforeEach, afterEach } from "vitest";
-import { mkdtempSync, rmSync, statSync, readFileSync } from "node:fs";
+import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
+import { mkdtempSync, rmSync, statSync, readFileSync, writeFileSync, mkdirSync, readdirSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -15,6 +15,7 @@ import {
   mintRawToken,
   readOwnerTokenFile,
   ownerTokenFilePath,
+  atomicWriteFileSync,
   TOKEN_BYTES,
 } from "../tokens.js";
 
@@ -209,5 +210,98 @@ describe("tokens: R3 fingerprint-never-raw", () => {
     const contents = readFileSync(registryPath, "utf8");
     expect(contents).not.toContain(minted.raw);
     expect(contents).toContain(minted.record.fingerprint);
+  });
+});
+
+describe("tokens: atomicWriteFileSync (token-registry-silent-wipe root cause)", () => {
+  it("writes the file with the requested content, and leaves no orphaned temp file behind", () => {
+    const path = join(dataDir, "atomic-target.json");
+    atomicWriteFileSync(path, JSON.stringify({ v: 1 }), 0o600);
+    expect(JSON.parse(readFileSync(path, "utf8"))).toEqual({ v: 1 });
+    const leftovers = readdirSync(dataDir).filter((f) => f.includes(".tmp-"));
+    expect(leftovers).toEqual([]);
+  });
+
+  it(
+    "a FAILED rename never corrupts an existing target: the real production write path " +
+      "is atomic (stage-then-rename), never a partial in-place write",
+    () => {
+      // Force the rename step to fail by making the TARGET a directory (a
+      // file can never be renamed onto an existing directory, on either
+      // POSIX or Windows) — this exercises the real `atomicWriteFileSync`
+      // function's failure path, not a re-derived model of it.
+      const targetDir = join(dataDir, "target-is-a-dir.json");
+      mkdirSync(targetDir);
+
+      expect(() => atomicWriteFileSync(targetDir, "new content", 0o600)).toThrow();
+
+      // The "existing file" (here, a directory) is completely untouched —
+      // the defining atomicity property: a failed write can NEVER leave the
+      // destination half-written, because content is only ever staged at a
+      // SEPARATE temp path first.
+      expect(statSync(targetDir).isDirectory()).toBe(true);
+      // No orphaned temp file left behind after the failed rename either.
+      const leftovers = readdirSync(dataDir).filter((f) => f.includes(".tmp-"));
+      expect(leftovers).toEqual([]);
+    },
+  );
+
+  it("mint()/ensureOwnerToken() never leave an orphaned .tmp- file in dataDir (the real write path)", () => {
+    const store = createTokenStore(dataDir);
+    store.ensureOwnerToken("ep-atomic-probe");
+    store.mint(AnchorClass.DOMAIN, "agent-atomic-probe");
+    store.revoke(store.mint(AnchorClass.EMAIL_OAUTH).record.fingerprint);
+    const leftovers = readdirSync(dataDir).filter((f) => f.includes(".tmp-"));
+    expect(leftovers).toEqual([]);
+  });
+});
+
+describe("tokens: token-registry-silent-wipe — loud logging on corrupt-registry fallback", () => {
+  it("a corrupt daemon-tokens.json logs LOUDLY (structured stderr) and falls back to empty, never silently", () => {
+    const registryPath = join(dataDir, "daemon-tokens.json");
+    // Simulate exactly the pre-fix crash symptom: a truncated write (what a
+    // non-atomic writeFileSync leaves behind on a SIGKILL mid-write).
+    writeFileSync(registryPath, '{"records":[{"fingerprint":"ab', "utf8");
+
+    const stderrSpy = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+    // The REAL production constructor path (FsTokenStore's constructor calls
+    // reloadTokens() immediately).
+    const store = createTokenStore(dataDir);
+    const loggedLines = stderrSpy.mock.calls.map((c) => String(c[0]));
+    stderrSpy.mockRestore();
+
+    // Fails CLOSED to empty (no non-owner records trusted from a half-parsed file) —
+    // the correct, UNCHANGED default — but no longer silently.
+    expect(store.activeRecords()).toEqual([]);
+    const parsed = loggedLines
+      .map((l) => {
+        try {
+          return JSON.parse(l) as Record<string, unknown>;
+        } catch {
+          return null;
+        }
+      })
+      .find((r) => r?.["event"] === "token_registry_corrupt_fallback_empty");
+    expect(parsed).toBeDefined();
+    expect(parsed!["level"]).toBe("error");
+    expect(parsed!["path"]).toBe(registryPath);
+    expect(typeof parsed!["message"]).toBe("string");
+  });
+
+  it("a corrupt registry does NOT prevent an owner token from still being usable (fold-back-in survives)", () => {
+    const store1 = createTokenStore(dataDir);
+    const owner = store1.ensureOwnerToken("ep");
+
+    // Corrupt ONLY the registry file (not the separate owner-token file).
+    writeFileSync(join(dataDir, "daemon-tokens.json"), "{ not json at all", "utf8");
+
+    const stderrSpy = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+    const store2 = createTokenStore(dataDir);
+    stderrSpy.mockRestore();
+
+    // The owner record is folded back in from the SEPARATE owner-token file
+    // regardless of the registry's corruption (reloadTokens' own documented
+    // behavior) — only non-owner issued tokens were ever at risk.
+    expect(store2.verify(owner.raw)).not.toBeNull();
   });
 });

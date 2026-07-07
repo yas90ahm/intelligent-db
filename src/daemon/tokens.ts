@@ -33,11 +33,14 @@ import {
   mkdirSync,
   readFileSync,
   writeFileSync,
+  renameSync,
+  unlinkSync,
   chmodSync,
 } from "node:fs";
 import { join } from "node:path";
 
 import { AnchorClass } from "../core/types.js";
+import { daemonLog } from "./log.js";
 
 // ---------------------------------------------------------------------------
 // Raw token minting + fingerprinting
@@ -111,6 +114,43 @@ const REGISTRY_FILENAME = "daemon-tokens.json";
 interface RegistryFile {
   readonly records: readonly TokenRecord[];
   readonly revoked: readonly string[];
+}
+
+// ---------------------------------------------------------------------------
+// token-registry-silent-wipe fix (root cause, not just louder logging): every
+// persisted token file (the registry AND the owner-token file) is now written
+// ATOMICALLY — stage the full content at a sibling temp path, then ONE
+// `renameSync` onto the real path. `renameSync` is a single filesystem
+// operation the OS guarantees is all-or-nothing: a process killed at any point
+// before it either never touched the real path (the temp file is simply
+// orphaned) or has already fully replaced it — there is no window where a
+// SIGKILL leaves the real path holding a half-written/truncated file. This is
+// what actually stops `reloadTokens()`'s corrupt-JSON fallback from being
+// reachable via a crash mid-write in the first place (previously a plain
+// `writeFileSync` truncates-then-writes the REAL path directly, so a crash
+// mid-write left exactly the truncated-JSON shape the fallback below has to
+// degrade for).
+// ---------------------------------------------------------------------------
+
+export function atomicWriteFileSync(path: string, data: string, mode?: number): void {
+  const tmpPath = `${path}.tmp-${randomBytes(8).toString("hex")}`;
+  if (mode !== undefined) {
+    writeFileSync(tmpPath, data, { encoding: "utf8", mode });
+  } else {
+    writeFileSync(tmpPath, data, "utf8");
+  }
+  try {
+    renameSync(tmpPath, path);
+  } catch (err) {
+    // Never leave an orphaned temp file behind on a failed rename — best
+    // effort; the ORIGINAL error (not this cleanup) is what the caller sees.
+    try {
+      unlinkSync(tmpPath);
+    } catch {
+      /* best-effort */
+    }
+    throw err;
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -262,10 +302,26 @@ class FsTokenStore implements TokenStore {
         const parsed = JSON.parse(readFileSync(path, "utf8")) as RegistryFile;
         this.#records = new Map(parsed.records.map((r) => [r.fingerprint, r]));
         this.#revoked = new Set(parsed.revoked);
-      } catch {
+      } catch (err) {
         // A corrupt/unreadable registry reloads to EMPTY (fail-closed: nothing
         // is trusted rather than trusting a half-parsed file) rather than
         // throwing and leaving the daemon unable to start.
+        //
+        // token-registry-silent-wipe fix: this fallback used to be COMPLETELY
+        // SILENT — every non-owner token an operator had issued vanished with
+        // zero trace (no log, no thrown warning, no audit record), so the
+        // very first symptom was "every other agent's token stopped working"
+        // with nothing pointing at why. Now logged LOUDLY at "error" level
+        // before falling back, naming the path and the parse failure — the
+        // fallback-to-empty ITSELF is unchanged (still the correct fail-closed
+        // default: never trust a half-parsed file), only its silence is fixed.
+        daemonLog({
+          event: "token_registry_corrupt_fallback_empty",
+          level: "error",
+          path,
+          dataDir: this.dataDir,
+          message: err instanceof Error ? err.message : String(err),
+        });
         this.#records = new Map();
         this.#revoked = new Set();
       }
@@ -292,7 +348,12 @@ class FsTokenStore implements TokenStore {
       revoked: [...this.#revoked],
     };
     const path = join(this.dataDir, REGISTRY_FILENAME);
-    writeFileSync(path, JSON.stringify(file, null, 2), "utf8");
+    // token-registry-silent-wipe fix: ATOMIC (temp file + rename), never a
+    // partial in-place write — see the module comment above `atomicWriteFileSync`.
+    // `mode: 0o600` is baked in at the temp file's CREATION (daemon-token-
+    // file-toctou fix's same discipline, applied here too): the rename
+    // preserves it, so this registry is never briefly loosely-permissioned.
+    atomicWriteFileSync(path, JSON.stringify(file, null, 2), 0o600);
     this.#bestEffortPrivate(path);
   }
 
@@ -306,25 +367,49 @@ class FsTokenStore implements TokenStore {
     }
   }
 
+  /**
+   * daemon-token-file-toctou fix: `{mode:0o600}` is passed directly to the
+   * write that CREATES the temp file (`atomicWriteFileSync`), not applied via
+   * a separate `chmodSync` AFTER a plain `writeFileSync` — the old shape had a
+   * real create-then-chmod window where the file briefly existed at default
+   * (often world/group-readable) permissions holding the RAW bearer token.
+   * Because `atomicWriteFileSync` stages content at a fresh temp path and only
+   * EVER makes it visible at `path` via one atomic `renameSync` (which
+   * preserves the temp file's mode bits — a rename is a metadata-only
+   * operation on the same inode), the owner-token file is 0600 from the very
+   * first instant it is observable at `path`, on every write (first mint AND
+   * every subsequent endpoint refresh) — there is no window to close.
+   */
   #writeOwnerFile(file: OwnerTokenFile): void {
     const path = join(this.dataDir, OWNER_TOKEN_FILENAME);
-    writeFileSync(path, JSON.stringify(file, null, 2), "utf8");
+    atomicWriteFileSync(path, JSON.stringify(file, null, 2), 0o600);
+    // Defense in depth only (the atomic write above already establishes 0600
+    // from creation): a best-effort re-assertion, e.g. against an unusual
+    // filesystem that does not honor `open()`'s mode argument.
     this.#bestEffortPrivate(path);
   }
 
   /**
-   * R1: best-effort 0600 on POSIX. On Windows `chmod` has no POSIX-bit
-   * semantics — the file's privacy there comes from the user-profile directory
-   * ACLs (the module doc's disclosed R9 compensating control), so this is a
-   * genuine no-op there; the try/catch is what makes it "best-effort" on every
-   * platform (a read-only filesystem or an exotic ACL setup must never crash
-   * daemon startup over a permission tightening).
+   * R1: best-effort 0600 on POSIX, defense in depth on top of the atomic
+   * writes above (which already bake `mode: 0o600` in at creation — see
+   * `#writeOwnerFile`'s doc). On Windows `chmod` has no POSIX-bit semantics —
+   * the file's privacy there comes from the user-profile directory ACLs (the
+   * module doc's disclosed R9 compensating control), so this is a genuine
+   * no-op there; still best-effort (a read-only filesystem or an exotic ACL
+   * setup must never crash daemon startup over a permission tightening) —
+   * but daemon-token-file-toctou fix: a failure is now LOGGED, not silently
+   * swallowed (previously zero log/stderr output on any platform).
    */
   #bestEffortPrivate(path: string): void {
     try {
       chmodSync(path, 0o600);
-    } catch {
-      // best-effort only — see doc comment.
+    } catch (err) {
+      daemonLog({
+        event: "token_file_chmod_failed",
+        level: "warn",
+        path,
+        message: err instanceof Error ? err.message : String(err),
+      });
     }
   }
 }
