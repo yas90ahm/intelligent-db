@@ -446,8 +446,8 @@ export function createSourceIdentityLayer(
       let maxSetSize: number;
       if (n <= MAX_EXACT_ROOTS) {
         // ─── EXACT PATH: maximum clique in the "independent" graph ───────────
-        // Precompute the symmetric adjacency as bitmasks (n ≤ MAX_EXACT_ROOTS ≤
-        // 30, so a single number bitmask per vertex is exact and fast). adj[i]
+        // Precompute the symmetric adjacency as bitmasks (n ≤ MAX_EXACT_ROOTS,
+        // i.e. ≤ 18, so a single number bitmask per vertex is exact and fast). adj[i]
         // has bit j set iff orderedᵢ and orderedⱼ are INDEPENDENT. Each predicate
         // is evaluated once per unordered pair; `independent` is symmetric.
         const adj: number[] = new Array<number>(n).fill(0);
@@ -463,8 +463,12 @@ export function createSourceIdentityLayer(
         // Bron–Kerbosch with pivoting, tracking only the LARGEST clique size.
         // R = current clique (bitmask), P = candidates extendable into R, X =
         // already-processed. Deterministic: candidate vertices are visited in
-        // ascending index order. n ≤ 30 ⇒ bounded recursion, never hangs.
-        const ALL = n === 31 ? 0x7fffffff : (1 << n) - 1;
+        // ascending index order. n ≤ MAX_EXACT_ROOTS (18) here ⇒ `(1 << n) - 1`
+        // never needs the n===31 overflow special-case a bare `1 << j` bitmask
+        // would require at the true 31-bit ceiling this scheme supports (this
+        // branch is only ever entered for n ≤ 18, well under that ceiling) —
+        // bounded recursion, never hangs.
+        const ALL = (1 << n) - 1;
         let best = 0;
 
         const popcount = (m: number): number => {
