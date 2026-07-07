@@ -942,6 +942,10 @@ export interface SqliteReputationLedger extends ReputationLedger {
   /**
    * Close the underlying database handle (no-op when the ledger was handed a
    * borrowed, shared handle — only the path-opening factory owns close).
+   * Composing the shared-handle recipe by hand? Prefer
+   * `store/sharedSqliteHandle.ts`'s {@link createSharedSqliteHandle} — it owns
+   * the handle and gives the whole recipe one obvious `closeAll()` instead of
+   * three same-shaped-but-no-op `close()`s (see that module's doc for why).
    */
   close(): void;
 }

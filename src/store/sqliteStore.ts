@@ -94,6 +94,11 @@ export interface SqliteStrandStore extends StrandStore {
    * No-op when the store was handed a BORROWED, shared `db` handle (only the single
    * owner — the path-opening factory or the caller that opened the handle — may
    * close it).
+   *
+   * Composing the shared-handle recipe by hand? Prefer
+   * `store/sharedSqliteHandle.ts`'s {@link createSharedSqliteHandle} — it owns the
+   * handle and gives the whole recipe one obvious `closeAll()` instead of three
+   * same-shaped-but-no-op `close()`s (see that module's doc for why).
    */
   close(): void;
 

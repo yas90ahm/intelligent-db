@@ -1263,7 +1263,13 @@ const { DatabaseSync } = require("node:sqlite") as {
  * the in-memory ledger everywhere.
  */
 export interface SqlitePendingLedger extends PendingLedger {
-  /** Close the underlying handle (no-op for a borrowed, shared handle). */
+  /**
+   * Close the underlying handle (no-op for a borrowed, shared handle).
+   * Composing the shared-handle recipe by hand? Prefer
+   * `store/sharedSqliteHandle.ts`'s {@link createSharedSqliteHandle} — it owns
+   * the handle and gives the whole recipe one obvious `closeAll()` instead of
+   * three same-shaped-but-no-op `close()`s (see that module's doc for why).
+   */
   close(): void;
 }
 

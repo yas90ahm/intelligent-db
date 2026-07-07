@@ -31,7 +31,6 @@
  */
 
 import { createHash } from "node:crypto";
-import { createRequire } from "node:module";
 import type { DatabaseSync as DatabaseSyncType } from "node:sqlite";
 
 import type {
@@ -54,6 +53,8 @@ import type { StrandStore } from "../store/StrandStore.js";
 import { createMemoryStore } from "../store/memoryStore.js";
 import { createSqliteStore } from "../store/sqliteStore.js";
 import type { SqliteStrandStore } from "../store/sqliteStore.js";
+import { createSharedSqliteHandle } from "../store/sharedSqliteHandle.js";
+import type { SharedSqliteHandle } from "../store/sharedSqliteHandle.js";
 
 import { createSourceIdentityLayer } from "../identity/index.js";
 import type {
@@ -84,18 +85,6 @@ import type { AppendSink } from "../ratification/pendingLedger.js";
 import type { PendingLedger, PendingPayload, ResolvedDispute } from "../ratification/pendingLedger.js";
 import { sourceIdFor } from "../identity/sources.js";
 import type { DownstreamDisownResult } from "../ratification/disown.js";
-
-/**
- * Load `node:sqlite`'s {@link DatabaseSync} constructor via a runtime `require`
- * rather than a static `import` — see `store/sqliteStore.ts`'s identical note
- * (bundlers/test transformers choke on a static `import "node:sqlite"` for a
- * built-in newer than their hardcoded list). Zero new runtime deps: still Node
- * stdlib, resolved by Node's own loader exactly as in production.
- */
-const require = createRequire(import.meta.url);
-const { DatabaseSync } = require("node:sqlite") as {
-  DatabaseSync: new (path: string) => DatabaseSyncType;
-};
 
 import { createLexicalCueResolver, strandText } from "../recall/cueResolver.js";
 import type { Cue, CueResolver, LexicalCueResolverOptions } from "../recall/cueResolver.js";
@@ -492,18 +481,19 @@ export function deriveEntity(text: string): EntityId {
  */
 export function createAgentMemory(opts?: AgentMemoryOptions): AgentMemory {
   // The single shared handle this facade OWNS when durable (null for in-memory).
-  // Only the owner may close it — see `close()` below.
+  // Only the owner may close it — see `close()` below. `createSharedSqliteHandle`
+  // (shared-handle-close-footgun fix) owns the open + WAL-set-and-verify step and
+  // exposes the one obvious `closeAll()`; the store/reputation/pending-ledger
+  // constructors below only ever BORROW `sharedHandle.db` and their own `close()`
+  // stays a documented no-op against it (see that module's doc).
+  let sharedHandle: SharedSqliteHandle | null = null;
   let ownedDb: DatabaseSyncType | null = null;
   let store: StrandStore;
 
   if (opts?.dbPath !== undefined) {
-    const db = new DatabaseSync(opts.dbPath);
-    // The OWNER of a shared handle must set WAL BEFORE any shared-handle
-    // constructor borrows it (`createSqliteStore`'s `{ db }` overload verifies
-    // WAL and throws `SharedHandleNotWalError` otherwise — see sqliteStore.ts).
-    db.exec("PRAGMA journal_mode=WAL");
-    ownedDb = db;
-    store = createSqliteStore({ db });
+    sharedHandle = createSharedSqliteHandle(opts.dbPath);
+    ownedDb = sharedHandle.db;
+    store = createSqliteStore({ db: ownedDb });
   } else {
     store = createMemoryStore();
   }
@@ -894,11 +884,11 @@ export function createAgentMemory(opts?: AgentMemoryOptions): AgentMemory {
     close(): void {
       // The store/reputation-ledger/pending-ledger `close()` calls are no-ops
       // for a BORROWED (shared) handle — see each backend's own `ownsDb` guard.
-      // This facade OWNS `ownedDb` directly (it opened it above), so IT closes
-      // the handle — the single point that actually flushes the SQLite WAL.
+      // This facade OWNS `sharedHandle` (created above), so ITS `closeAll()` is
+      // the single, idempotent point that actually flushes/closes the SQLite WAL.
       const closable = store as Partial<SqliteStrandStore>;
       if (typeof closable.close === "function") closable.close();
-      if (ownedDb !== null) ownedDb.close();
+      if (sharedHandle !== null) sharedHandle.closeAll();
     },
   };
 }
