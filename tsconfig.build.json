@@ -15,6 +15,16 @@
     "src/__torture__",
     "src/testSupport",
     "src/**/*.test.ts",
+    // PHASE3_DAEMON_SPEC.md deliverable 4 (verifier pass): the daemon's own
+    // E2E harness (`daemon/__e2e__/support.ts`) and its crash-torture driver
+    // (`daemon/__torture__/daemonKillLoop.ts`) are test-support code, not
+    // library surface — nested under `src/daemon/` (not `src/__torture__`),
+    // so the top-level excludes above miss them; without this they leaked
+    // into `dist/` (and therefore `npm pack`, per `package.json`'s
+    // `files: ["dist", ...]`) alongside every OTHER shipped module. Found by
+    // this pass's adversarial packaging check; fixed here.
+    "src/daemon/__e2e__",
+    "src/daemon/__torture__",
     "dist",
     "node_modules"
   ]

@@ -33,6 +33,11 @@
  */
 
 import { sha256Hex } from "../ratification/pendingLedger.js";
+// Re-exported (not just imported) so a durable implementation
+// (`daemon/auditChainSqlite.ts`) can recompute/verify the EXACT same checksum
+// over a persisted record without duplicating the hash primitive (mirrors
+// `ratification/pendingLedger.ts`'s own re-export for the identical reason).
+export { sha256Hex };
 
 // ---------------------------------------------------------------------------
 // Record kinds + payloads (R8's enumerated daemon event set)
@@ -141,7 +146,7 @@ export const DAEMON_GENESIS_HASH = sha256Hex("DAEMON_AUDIT_CHAIN_GENESIS");
 // hand-ordered primitive fields — never free-form JSON.stringify)
 // ---------------------------------------------------------------------------
 
-function canonicalPayload(kind: DaemonRecordKind, payload: DaemonPayload): string {
+export function canonicalPayload(kind: DaemonRecordKind, payload: DaemonPayload): string {
   switch (kind) {
     case "CONNECTION_ACCEPTED": {
       const p = payload as ConnectionAcceptedPayload;
@@ -183,7 +188,7 @@ function canonicalPayload(kind: DaemonRecordKind, payload: DaemonPayload): strin
   }
 }
 
-function hashPreimage(
+export function hashPreimage(
   seq: number,
   prevHash: string,
   kind: DaemonRecordKind,

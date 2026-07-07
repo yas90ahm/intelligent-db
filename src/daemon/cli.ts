@@ -20,7 +20,7 @@
 import { dirname, join } from "node:path";
 
 import { createAgentMemory } from "../agent/agentMemory.js";
-import { createDaemonAuditChain } from "./auditChain.js";
+import { createSqliteDaemonAuditChain } from "./auditChainSqlite.js";
 import { createTokenStore, ownerTokenFilePath } from "./tokens.js";
 import { DaemonServer } from "./server.js";
 
@@ -41,6 +41,8 @@ export interface CliConfig {
   readonly dbPath: string;
   readonly dataDir: string;
   readonly endpointBase: string;
+  /** Durable (SQLite-backed, R8) daemon audit chain's OWN file — never the memory db. */
+  readonly auditDbPath: string;
 }
 
 /** Pure argv → config parser (unit-testable without touching the network/fs). */
@@ -53,7 +55,8 @@ export function parseArgs(argv: readonly string[]): CliConfig {
   const socketArg = argVal(argv, "--socket");
   const endpointBase =
     socketArg ?? (process.platform === "win32" ? "intelligent-db-daemon" : join(dataDir, "daemon.sock"));
-  return { dbPath, dataDir, endpointBase };
+  const auditDbPath = join(dataDir, "daemon-audit.db");
+  return { dbPath, dataDir, endpointBase, auditDbPath };
 }
 
 // ---------------------------------------------------------------------------
@@ -65,7 +68,11 @@ export async function main(argv: readonly string[] = process.argv.slice(2)): Pro
 
   const memory = createAgentMemory({ dbPath: config.dbPath });
   const tokens = createTokenStore(config.dataDir);
-  const auditChain = createDaemonAuditChain();
+  // R8, durable: its OWN SQLite file (never the memory db) so the daemon's
+  // connection/auth/revocation/admin/shutdown trail survives a restart or an
+  // unclean (SIGKILL) exit instead of vanishing with the process (see
+  // `auditChainSqlite.ts`'s module doc for the gap this closes).
+  const auditChain = createSqliteDaemonAuditChain(config.auditDbPath);
   // H2: bind daemon-client identity into the SAME trust registry this memory's
   // identity layer already uses — one swappable trust root, no parallel one.
   const trustRegistry = memory.trust;
@@ -90,6 +97,7 @@ export async function main(argv: readonly string[] = process.argv.slice(2)): Pro
     server
       .stop({ clean: true })
       .then(() => {
+        auditChain.close();
         memory.close();
         process.exit(0);
       })
