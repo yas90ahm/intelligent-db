@@ -333,6 +333,45 @@ describe("live reputation pillar — stateful Beta ledger", () => {
     expect(floored.alpha).toBe(1);
     expect(ledger.scoreOf(src)).toBe(0);
   });
+
+  it("EXACT reversal MOVES THE LCB READOUT in the well-corroborated case (depth-floor unwind)", () => {
+    // Reproduces the audit's exact numeric repro (audit-trust-identity-verified.md
+    // #1, reverse-credit-ignores-depth-floor): a source corroborated by >=
+    // floorDeadband=2 independent classes earns a NON-DECAYING depth-floor
+    // (alphaFloor = 1 + floorMass(corroborationDepth)) that PINS the readout's
+    // effective alpha. Pre-fix, `reverseCredit` only ever subtracted `w` from the
+    // raw `alpha` and left `corroborationDepth` untouched, so the floor kept pinning
+    // the SAME effective alpha before and after the "exact" reversal — the LCB
+    // readout (`scoreOf`) never moved even though the internal `alpha` genuinely
+    // dropped. This test calls the REAL `ratify`/`reverseCredit`/`scoreOf` verbs (not
+    // re-derived math) and asserts on the real LCB readout.
+    const ledger = createReputationLedger(() => 1 as Unit, undefined, () => NOW);
+    const src = "src:well-corroborated" as SourceId;
+
+    // ratify(w=1, depth=2) on a fresh Beta(1,1): alpha=2, corroborationDepth=2, so
+    // alphaFloor = 1 + floorMass(2) = 3 pins the effective alpha to 3 (not the raw 2).
+    const afterRatify = ledger.ratify(src, NOW, 1, 2);
+    expect(afterRatify.alpha).toBe(2);
+    expect(afterRatify.corroborationDepth).toBe(2);
+    // mean=3/4, sd=sqrt(3/80), lcb = 0.75 - sqrt(3)*sqrt(3/80) ≈ 0.41459 — matches the
+    // audit's independently-recomputed numeric claim exactly.
+    const lcbAfterRatify = ledger.scoreOf(src);
+    expect(lcbAfterRatify).toBeCloseTo(0.41458980337503, 9);
+
+    // Reverse EXACTLY the recorded corroboration credit (w=1, the same delta earned).
+    const afterReversal = ledger.reverseCredit(src, 1, NOW);
+    expect(afterReversal.alpha).toBe(1); // raw alpha genuinely dropped back to the prior
+
+    // THE BUG: pre-fix, this stayed at ~0.41459 (byte-identical to before the
+    // reversal) because the untouched `corroborationDepth: 2` kept pinning
+    // alphaFloor=3 regardless of the live (reversed) alpha=1. Post-fix, the
+    // reversal also unwinds the depth-floor mass this same `w` funded
+    // (corroborationDepth -> max(0, 2-1) = 1, below floorDeadband=2 => floorMass=0),
+    // so the readout genuinely reflects the reversed credit.
+    const lcbAfterReversal = ledger.scoreOf(src);
+    expect(lcbAfterReversal).toBeLessThan(lcbAfterRatify);
+    expect(lcbAfterReversal).toBeCloseTo(0, 9);
+  });
 });
 
 describe("live reputation pillar — wired live into the engine + stamp", () => {

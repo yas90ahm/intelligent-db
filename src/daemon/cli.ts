@@ -23,6 +23,34 @@ import { createAgentMemory } from "../agent/agentMemory.js";
 import { createSqliteDaemonAuditChain } from "./auditChainSqlite.js";
 import { createTokenStore, ownerTokenFilePath } from "./tokens.js";
 import { DaemonServer } from "./server.js";
+import { daemonLog } from "./log.js";
+
+// ---------------------------------------------------------------------------
+// daemon-auditchain-write-crashes-process fix: LAST-RESORT process-wide
+// backstop. Every known internal throw site (audit-chain writes, the FIFO
+// queue's drain loop) is now caught at its own call site (see server.ts) and
+// turned into a typed per-connection response or a logged no-op — these
+// handlers exist for whatever still slips past that (a future regression, a
+// third-party/runtime throw). Before this fix, ZERO such handlers existed
+// anywhere in src/, so ANY unguarded throw/rejection took the whole
+// multi-client daemon down with it. Logged and SURVIVED, never a bare crash —
+// registered at module scope (not inside `main()`) so it is active for the
+// entire process lifetime, including during startup.
+// ---------------------------------------------------------------------------
+
+process.on("uncaughtException", (err: unknown) => {
+  daemonLog({
+    event: "uncaught_exception",
+    message: err instanceof Error ? (err.stack ?? err.message) : String(err),
+  });
+});
+
+process.on("unhandledRejection", (reason: unknown) => {
+  daemonLog({
+    event: "unhandled_rejection",
+    message: reason instanceof Error ? (reason.stack ?? reason.message) : String(reason),
+  });
+});
 
 // ---------------------------------------------------------------------------
 // Argument parsing (minimal, dependency-free)

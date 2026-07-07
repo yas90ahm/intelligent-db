@@ -87,7 +87,8 @@ import type { TrustRegistry } from "../identity/trustRegistry.js";
 
 import { fingerprintToken } from "./tokens.js";
 import type { TokenStore } from "./tokens.js";
-import type { DaemonAuditChain } from "./auditChain.js";
+import type { DaemonAuditChain, DaemonLedgerRecord } from "./auditChain.js";
+import { daemonLog } from "./log.js";
 
 // ---------------------------------------------------------------------------
 // Resource-limit defaults (R5 / H6)
@@ -130,13 +131,33 @@ interface QueueItem {
  */
 export class FifoQueue {
   readonly #maxDepth: number;
+  readonly #onItemError: (err: unknown, ownerId: number) => void;
   #items: QueueItem[] = [];
   #executing = false;
   #draining = false;
   #currentOwnerId: number | null = null;
 
-  constructor(maxDepth: number = DEFAULT_MAX_QUEUE_DEPTH) {
+  /**
+   * @param maxDepth Backpressure ceiling (H6).
+   * @param onItemError daemon-auditchain-write-crashes-process fix: invoked
+   *   when a queued item's `run()` throws/rejects — the LAST-RESORT backstop
+   *   for whatever slips past a caller's own per-item try/catch (every
+   *   `DaemonServer` call site wraps its own `run` and turns a failure into a
+   *   typed per-connection response; this is defense in depth, not the primary
+   *   mechanism). Defaults to a `daemonLog` stderr line so a bare `new
+   *   FifoQueue()` is never silently unsafe. MUST NOT throw.
+   */
+  constructor(
+    maxDepth: number = DEFAULT_MAX_QUEUE_DEPTH,
+    onItemError: (err: unknown, ownerId: number) => void = (err, ownerId) =>
+      daemonLog({
+        event: "fifo_queue_item_failed",
+        message: err instanceof Error ? err.message : String(err),
+        ownerId,
+      }),
+  ) {
     this.#maxDepth = maxDepth;
+    this.#onItemError = onItemError;
   }
 
   get depth(): number {
@@ -204,6 +225,19 @@ export class FifoQueue {
       this.#currentOwnerId = item.ownerId;
       try {
         await item.run();
+      } catch (err) {
+        // daemon-auditchain-write-crashes-process fix: WITHOUT this catch, a
+        // throw/rejection here propagated out of this `async` method, and
+        // `enqueue()` invokes it as `void this.#drain()` (fire-and-forget) —
+        // an unhandled rejection that, with zero global handlers registered
+        // (the pre-fix state), crashes the ENTIRE daemon process on the very
+        // next queued item's failure. WORSE: because the throw escaped the
+        // `while` loop entirely, `this.#draining` below was NEVER reset to
+        // `false`, so even a process that survived the rejection would have
+        // its queue wedged forever (`enqueue`'s `if (!this.#draining)` guard
+        // would never fire `#drain()` again for this instance). Isolating the
+        // failure HERE — one item, not the whole queue — is the fix for both.
+        this.#onItemError(err, item.ownerId);
       } finally {
         this.#executing = false;
         this.#currentOwnerId = null;
@@ -542,7 +576,20 @@ export class DaemonServer {
     }
     this.#connections.clear();
     this.#fingerprintToConnIds.clear();
-    this.#auditChain.recordShutdown({ clean: opts?.clean ?? true }, this.#clock());
+    // daemon-auditchain-write-crashes-process fix: a failed shutdown-marker
+    // write must never prevent the CALLER (cli.ts) from reaching its own
+    // cleanup (`auditChain.close()`, `memory.close()`) — before this fix, a
+    // throw here rejected `stop()`'s promise, which cli.ts's `shutdown()`
+    // catches only to `process.exit(1)` WITHOUT ever closing the db handles.
+    try {
+      this.#auditChain.recordShutdown({ clean: opts?.clean ?? true }, this.#clock());
+    } catch (err) {
+      daemonLog({
+        event: "audit_chain_write_failed",
+        phase: "SHUTDOWN_MARKER",
+        message: err instanceof Error ? err.message : String(err),
+      });
+    }
   }
 
   // ---- connection lifecycle ------------------------------------------------
@@ -706,21 +753,46 @@ export class DaemonServer {
       grade: record.grade,
       ...(record.label !== undefined ? { label: record.label } : {}),
     });
+
+    // daemon-auditchain-write-crashes-process fix: this CONNECTION_ACCEPTED
+    // write happens on EVERY successful handshake attempt (the finding's
+    // "worst" case — the handshake path triggers an unguarded audit-chain
+    // write on every connection). Attempted BEFORE mutating `state` so a write
+    // failure leaves the connection cleanly un-authenticated rather than
+    // half-bound; R8's whole rationale is post-hoc detectability of who
+    // connected, so a broken audit chain fails this handshake CLOSED (a typed
+    // auth error) instead of either (a) crashing the daemon (the bug) or
+    // (b) silently letting an un-audited connection through.
+    const requestId = typeof msg.requestId === "string" ? msg.requestId : undefined;
+    let accepted: DaemonLedgerRecord | null = null;
+    try {
+      accepted = this.#auditChain.recordConnectionAccepted(
+        {
+          fingerprint: record.fingerprint,
+          sourceId: String(ref.sourceId),
+          ...(requestId !== undefined ? { requestId } : {}),
+        },
+        this.#clock(),
+      );
+    } catch (err) {
+      daemonLog({
+        event: "audit_chain_write_failed",
+        phase: "CONNECTION_ACCEPTED",
+        message: err instanceof Error ? err.message : String(err),
+      });
+    }
+    if (accepted === null) {
+      state.dropped = true;
+      this.#writeLine(state.socket, authErr("internal error: unable to record connection"));
+      this.#endSocketSafely(state.socket);
+      return;
+    }
+
     state.authenticated = true;
     state.sourceId = ref.sourceId;
     state.grade = record.grade;
     state.fingerprint = record.fingerprint;
     this.#trackFingerprint(record.fingerprint, state.id);
-
-    const requestId = typeof msg.requestId === "string" ? msg.requestId : undefined;
-    this.#auditChain.recordConnectionAccepted(
-      {
-        fingerprint: record.fingerprint,
-        sourceId: String(ref.sourceId),
-        ...(requestId !== undefined ? { requestId } : {}),
-      },
-      this.#clock(),
-    );
 
     this.#writeLine(state.socket, authOk(String(ref.sourceId)));
   }
@@ -736,10 +808,21 @@ export class DaemonServer {
       clearTimeout(state.handshakeTimer);
       state.handshakeTimer = null;
     }
-    this.#auditChain.recordAuthFailure(
-      { reason, ...(fingerprint !== undefined ? { fingerprint } : {}) },
-      this.#clock(),
-    );
+    // daemon-auditchain-write-crashes-process fix: never let a broken audit
+    // chain block delivering the (already-decided) failure response — this is
+    // already a rejection path, so there's nothing further to fail closed on.
+    try {
+      this.#auditChain.recordAuthFailure(
+        { reason, ...(fingerprint !== undefined ? { fingerprint } : {}) },
+        this.#clock(),
+      );
+    } catch (err) {
+      daemonLog({
+        event: "audit_chain_write_failed",
+        phase: "AUTH_FAILURE",
+        message: err instanceof Error ? err.message : String(err),
+      });
+    }
     // H1: fixed 1s delay before the failure response (rate-limits a repeated-
     // failure loop from new connections), then drop — no retry on this connection.
     setTimeout(() => {
@@ -828,73 +911,100 @@ export class DaemonServer {
 
   #executeAdminVerb(state: ConnectionState, id: number, method: string, params: Record<string, unknown>): void {
     const actorSourceId = String(state.sourceId!);
-    switch (method) {
-      case "issueToken": {
-        const grade = parseGrade(params["grade"]) ?? AnchorClass.EMAIL_OAUTH;
-        const label = typeof params["label"] === "string" ? params["label"] : undefined;
-        const minted = this.#tokens.mint(grade, label);
-        this.#auditChain.recordAdminVerb(
-          { verb: "issueToken", actorSourceId, detail: minted.record.fingerprint },
-          this.#clock(),
-        );
-        // The RAW token is returned ONLY here, in the direct response to the
-        // requesting OWNER connection — never logged, audited, or persisted
-        // beyond this one response (R3).
-        this.#writeLine(
-          state.socket,
-          envOk(id, { token: minted.raw, fingerprint: minted.record.fingerprint, grade: minted.record.grade }),
-        );
-        return;
-      }
-      case "revokeToken": {
-        const fingerprint = params["fingerprint"];
-        if (typeof fingerprint !== "string") {
-          this.#writeLine(state.socket, envErr(id, DAEMON_ERR_INTERNAL, "revokeToken requires 'fingerprint'."));
+    // daemon-auditchain-write-crashes-process fix: every branch below used to
+    // call `#auditChain.record*` completely unguarded — a throw there (e.g. a
+    // disk-full/EACCES/corrupt-chain write) propagated straight out of the
+    // FIFO queue's `run()` (see FifoQueue#drain's fix) and crashed the whole
+    // daemon process, on top of never sending ANY response to this connection.
+    // Wrapping the whole method: (a) the process survives (isolated here,
+    // never reaching the queue's drain loop uncaught), (b) the connection
+    // gets a genuine typed `DAEMON_ERR_INTERNAL` response instead of a hang.
+    // The underlying security-relevant MUTATION (token revoke + the R3
+    // "immediate effect" connection drop) is performed BEFORE the audit-trail
+    // write in each branch, so a broken audit chain can degrade
+    // *observability* of an admin action without silently skipping the action
+    // itself or its immediate enforcement.
+    try {
+      switch (method) {
+        case "issueToken": {
+          const grade = parseGrade(params["grade"]) ?? AnchorClass.EMAIL_OAUTH;
+          const label = typeof params["label"] === "string" ? params["label"] : undefined;
+          const minted = this.#tokens.mint(grade, label);
+          this.#auditChain.recordAdminVerb(
+            { verb: "issueToken", actorSourceId, detail: minted.record.fingerprint },
+            this.#clock(),
+          );
+          // The RAW token is returned ONLY here, in the direct response to the
+          // requesting OWNER connection — never logged, audited, or persisted
+          // beyond this one response (R3).
+          this.#writeLine(
+            state.socket,
+            envOk(id, { token: minted.raw, fingerprint: minted.record.fingerprint, grade: minted.record.grade }),
+          );
           return;
         }
-        const revoked = this.#tokens.revoke(fingerprint);
-        if (revoked) {
-          this.#auditChain.recordRevocation({ fingerprint, revokedBySourceId: actorSourceId }, this.#clock());
-          this.#dropConnectionsFor(fingerprint, state.id);
+        case "revokeToken": {
+          const fingerprint = params["fingerprint"];
+          if (typeof fingerprint !== "string") {
+            this.#writeLine(state.socket, envErr(id, DAEMON_ERR_INTERNAL, "revokeToken requires 'fingerprint'."));
+            return;
+          }
+          const revoked = this.#tokens.revoke(fingerprint);
+          if (revoked) {
+            // R3's "immediate effect" enforcement FIRST — never held hostage
+            // to a downstream audit-chain write failure.
+            this.#dropConnectionsFor(fingerprint, state.id);
+            this.#auditChain.recordRevocation({ fingerprint, revokedBySourceId: actorSourceId }, this.#clock());
+          }
+          this.#auditChain.recordAdminVerb(
+            { verb: "revokeToken", actorSourceId, detail: fingerprint },
+            this.#clock(),
+          );
+          this.#writeLine(state.socket, envOk(id, { revoked }));
+          return;
         }
-        this.#auditChain.recordAdminVerb(
-          { verb: "revokeToken", actorSourceId, detail: fingerprint },
-          this.#clock(),
-        );
-        this.#writeLine(state.socket, envOk(id, { revoked }));
-        return;
-      }
-      case "revokeAllTokens": {
-        const { revokedFingerprints, newOwnerToken } = this.#tokens.revokeAllTokens(
-          state.fingerprint,
-          this.#endpoint ?? this.#endpointBase,
-        );
-        for (const fp of revokedFingerprints) {
-          this.#auditChain.recordRevocation({ fingerprint: fp, revokedBySourceId: actorSourceId }, this.#clock());
-          this.#dropConnectionsFor(fp, state.id);
+        case "revokeAllTokens": {
+          const { revokedFingerprints, newOwnerToken } = this.#tokens.revokeAllTokens(
+            state.fingerprint,
+            this.#endpoint ?? this.#endpointBase,
+          );
+          for (const fp of revokedFingerprints) {
+            this.#dropConnectionsFor(fp, state.id);
+            this.#auditChain.recordRevocation({ fingerprint: fp, revokedBySourceId: actorSourceId }, this.#clock());
+          }
+          this.#auditChain.recordAdminVerb(
+            { verb: "revokeAllTokens", actorSourceId, detail: `count:${revokedFingerprints.length}` },
+            this.#clock(),
+          );
+          this.#writeLine(
+            state.socket,
+            envOk(id, {
+              revokedCount: revokedFingerprints.length,
+              ownerToken: newOwnerToken.raw,
+              ownerFingerprint: newOwnerToken.record.fingerprint,
+            }),
+          );
+          return;
         }
-        this.#auditChain.recordAdminVerb(
-          { verb: "revokeAllTokens", actorSourceId, detail: `count:${revokedFingerprints.length}` },
-          this.#clock(),
-        );
-        this.#writeLine(
-          state.socket,
-          envOk(id, {
-            revokedCount: revokedFingerprints.length,
-            ownerToken: newOwnerToken.raw,
-            ownerFingerprint: newOwnerToken.record.fingerprint,
-          }),
-        );
-        return;
+        case "reloadTokens": {
+          this.#tokens.reloadTokens();
+          this.#auditChain.recordAdminVerb({ verb: "reloadTokens", actorSourceId }, this.#clock());
+          this.#writeLine(state.socket, envOk(id, { ok: true }));
+          return;
+        }
+        default:
+          this.#writeLine(state.socket, envErr(id, DAEMON_ERR_METHOD_NOT_FOUND, `Unknown admin verb: ${method}`));
       }
-      case "reloadTokens": {
-        this.#tokens.reloadTokens();
-        this.#auditChain.recordAdminVerb({ verb: "reloadTokens", actorSourceId }, this.#clock());
-        this.#writeLine(state.socket, envOk(id, { ok: true }));
-        return;
-      }
-      default:
-        this.#writeLine(state.socket, envErr(id, DAEMON_ERR_METHOD_NOT_FOUND, `Unknown admin verb: ${method}`));
+    } catch (err) {
+      daemonLog({
+        event: "admin_verb_failed",
+        method,
+        message: err instanceof Error ? err.message : String(err),
+      });
+      this.#writeLine(
+        state.socket,
+        envErr(id, DAEMON_ERR_INTERNAL, err instanceof Error ? err.message : String(err)),
+      );
     }
   }
 
