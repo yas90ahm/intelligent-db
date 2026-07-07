@@ -64,6 +64,8 @@ import {
   DAEMON_ERR_ADMIN_FORBIDDEN,
   DAEMON_ERR_METHOD_NOT_FOUND,
   DAEMON_ERR_OVERSIZED_LINE,
+  DAEMON_ERR_INSUFFICIENT_GRADE,
+  DAEMON_ERR_INVALID_ANCHOR,
 } from "./protocol.js";
 import type { DaemonAuthResponse, DaemonResponseEnvelope } from "./protocol.js";
 
@@ -76,6 +78,7 @@ import type {
   SourceId,
   StrandId,
 } from "../core/types.js";
+import { ANCHOR_TABLE, STAKE_INDEPENDENCE_MAX } from "../identity/anchors.js";
 import type { Cue } from "../recall/cueResolver.js";
 import type { AdjudicateOptions, DisownOptions } from "../api.js";
 import type { AgentMemory, RememberInput } from "../agent/agentMemory.js";
@@ -247,6 +250,70 @@ function parseGrade(v: unknown): AnchorClass | null {
 }
 
 // ---------------------------------------------------------------------------
+// daemon-unauthorized-trust-mutation fix: TRUST-MUTATING AgentMemory verbs
+// require the SAME per-grade (OWNER-only) authorization check as the four
+// admin verbs above. Before this fix, MEMORY_METHODS dispatched
+// registerSource/disown/approve/adjudicate/ratify to ANY authenticated
+// connection regardless of `state.grade` — defeating the entire trust model
+// from outside the engine (any minted, even EMAIL_OAUTH-grade, token could
+// mint itself an OWNER anchor via registerSource, or disown/approve/adjudicate/
+// ratify arbitrary sources/strands). All five mutate durable trust/belief
+// state and are gated OWNER-only, mirroring `#dispatchAdminVerb`'s check.
+// ---------------------------------------------------------------------------
+
+const TRUST_MUTATING_VERBS = new Set(["registerSource", "disown", "approve", "adjudicate", "ratify"]);
+
+function isTrustMutatingVerb(method: string): boolean {
+  return TRUST_MUTATING_VERBS.has(method);
+}
+
+/** Thrown by the `registerSource` handler when a caller-supplied anchor binding
+ * is invalid; mapped to {@link DAEMON_ERR_INVALID_ANCHOR} by `#dispatchMemoryCall`. */
+class AnchorValidationError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "AnchorValidationError";
+  }
+}
+
+/**
+ * daemon-unauthorized-trust-mutation fix (2nd half): `registerSource`'s wire
+ * `anchors` are free-form caller-supplied data — `TrustRegistry.bind()` (the
+ * path they land on) is purely additive/unvalidated against `ANCHOR_TABLE`, so
+ * without this check a caller could submit e.g.
+ * `{anchorClass:'OWNER', independenceWeight:1, realizedCost:1}` and mint a
+ * stronger anchor than OWNER's OWN canonical ceiling (0.9) permits, onto ANY
+ * source id (not even necessarily the caller's own). Reject the WHOLE
+ * `registerSource` call (never silently clamp — a silent clamp would still let
+ * a forged low-cost class name carry inflated weight through unnoticed) if any
+ * binding names an unknown `AnchorClass`, or claims an `independenceWeight`/
+ * `realizedCost` above that class's `ANCHOR_TABLE` ceiling.
+ */
+function validateAnchorBindings(anchors: readonly AnchorBinding[]): void {
+  for (const a of anchors) {
+    const spec = ANCHOR_TABLE[a.anchorClass];
+    if (spec === undefined) {
+      throw new AnchorValidationError(`registerSource: unknown anchorClass ${JSON.stringify(a.anchorClass)}.`);
+    }
+    // FINANCIAL_STAKE is deliberately stake-scaled: ANCHOR_TABLE's row stores
+    // the FLOOR of its 0.30-0.85 range (the realized value depends on posted
+    // deposit size), so its true ceiling is STAKE_INDEPENDENCE_MAX, not the
+    // table row's own independenceWeight.
+    const ceiling =
+      a.anchorClass === AnchorClass.FINANCIAL_STAKE ? STAKE_INDEPENDENCE_MAX : spec.independenceWeight;
+    if (a.independenceWeight > ceiling || a.realizedCost > ceiling) {
+      throw new AnchorValidationError(
+        `registerSource: anchor binding for ${a.anchorClass} exceeds its ANCHOR_TABLE ceiling ` +
+          `(independenceWeight/realizedCost must be <= ${ceiling}).`,
+      );
+    }
+    if (a.independenceWeight < 0 || a.realizedCost < 0) {
+      throw new AnchorValidationError(`registerSource: anchor binding for ${a.anchorClass} has a negative weight/cost.`);
+    }
+  }
+}
+
+// ---------------------------------------------------------------------------
 // AgentMemory method dispatch table — H2's identity binding lives HERE: every
 // handler that names an actor takes it from `actor` (the connection's bound
 // SourceId), never from `params`. Params SHAPES below match EXACTLY what
@@ -300,6 +367,7 @@ const MEMORY_METHODS: Record<string, MemoryHandler> = {
   },
   registerSource: (memory, params) => {
     const p = params as { source: SourceRef; anchors?: readonly AnchorBinding[] };
+    if (p.anchors !== undefined) validateAnchorBindings(p.anchors);
     return memory.registerSource(p.source, p.anchors);
   },
   stampFor: (memory, params) => memory.stampFor(params as SourceId),
@@ -697,15 +765,29 @@ export class DaemonServer {
       this.#writeLine(state.socket, envErr(id, DAEMON_ERR_METHOD_NOT_FOUND, `Unknown method: ${method}`));
       return;
     }
+    // daemon-unauthorized-trust-mutation fix: the SAME per-grade authorization
+    // check `#dispatchAdminVerb` applies to the four admin verbs, applied here
+    // to the five TRUST-MUTATING AgentMemory verbs (registerSource/disown/
+    // approve/adjudicate/ratify) — checked BEFORE enqueueing, so a rejected
+    // call never even occupies a FIFO slot.
+    if (isTrustMutatingVerb(method) && state.grade !== AnchorClass.OWNER) {
+      this.#writeLine(
+        state.socket,
+        envErr(
+          id,
+          DAEMON_ERR_INSUFFICIENT_GRADE,
+          `Method '${method}' mutates trust state and requires an OWNER-grade connection.`,
+        ),
+      );
+      return;
+    }
     this.#enqueue(state, () => {
       try {
         const result = handler(this.#memory, params, state.sourceId!);
         this.#writeLine(state.socket, envOk(id, result));
       } catch (err) {
-        this.#writeLine(
-          state.socket,
-          envErr(id, DAEMON_ERR_INTERNAL, err instanceof Error ? err.message : String(err)),
-        );
+        const code = err instanceof AnchorValidationError ? DAEMON_ERR_INVALID_ANCHOR : DAEMON_ERR_INTERNAL;
+        this.#writeLine(state.socket, envErr(id, code, err instanceof Error ? err.message : String(err)));
       }
     });
   }

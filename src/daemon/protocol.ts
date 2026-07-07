@@ -147,3 +147,14 @@ export const DAEMON_ERR_ADMIN_FORBIDDEN = "ADMIN_FORBIDDEN";
 export const DAEMON_ERR_METHOD_NOT_FOUND = "METHOD_NOT_FOUND";
 /** H1/H6 — a post-handshake line exceeded {@link MAX_LINE_BYTES} and was discarded. */
 export const DAEMON_ERR_OVERSIZED_LINE = "OVERSIZED_LINE";
+/** daemon-unauthorized-trust-mutation fix — a non-OWNER-grade connection tried a
+ * TRUST-MUTATING `AgentMemory` verb (`registerSource`/`disown`/`approve`/
+ * `adjudicate`/`ratify`). Distinct from {@link DAEMON_ERR_ADMIN_FORBIDDEN} (which
+ * gates the four daemon-management verbs) so callers can tell the two
+ * authorization surfaces apart. */
+export const DAEMON_ERR_INSUFFICIENT_GRADE = "INSUFFICIENT_GRADE";
+/** daemon-unauthorized-trust-mutation fix — `registerSource`'s caller-supplied
+ * anchor bindings named an unknown `AnchorClass`, or claimed an
+ * `independenceWeight`/`realizedCost` above that class's ANCHOR_TABLE ceiling
+ * (a forged high-grade anchor riding a cheap/arbitrary class label). */
+export const DAEMON_ERR_INVALID_ANCHOR = "INVALID_ANCHOR";
