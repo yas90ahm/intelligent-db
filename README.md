@@ -56,10 +56,10 @@ free attack into a *priced, visible, self-limiting* one. An attacker who buys ge
 independent, expensive anchors (real domains, real devices, real reputations) **can** still
 win; the degradation curve as an attacker pays more is measured and published, not hidden
 (`docs/ARCHITECTURE_BENCHMARKS.md` §2.5, "costly-independent boundary"). The known,
-deliberate limitations of the current single-process prototype (cross-process
-concurrency — a written, unimplemented daemon-mode design proposal exists for this,
-`docs/specs/PHASE3_DAEMON_PROPOSAL.md` — the asserted-attribution trade-off, offline
-class-assignment liability) are enumerated in **Known Limitations** in
+deliberate limitations of the current single-process prototype (the asserted-attribution
+trade-off, offline class-assignment liability — plus the opt-in daemon mode's own
+asserted-bearer-token and shared-fate-blast-radius trade-offs, see **MCP server** below)
+are enumerated in **Known Limitations** in
 [`CLAUDE.md`](./CLAUDE.md), not swept under the rug. Encryption-at-rest, schema migrations,
 and snapshot/point-in-time recovery are no longer gaps — see **Durability and security**
 below.
@@ -214,9 +214,15 @@ disclosed design deviations (why WAL-archive replay uses its own base file rathe
 splicing onto a `VACUUM INTO` snapshot, and why the encrypted adapter is value-level rather
 than full-file), plus the crash-torture invariant list and the one non-crash finding it
 surfaced: [`CLAUDE.md`](./CLAUDE.md) Known Limitations, [`docs/BENCHMARK_NARRATIVE.md`](./docs/BENCHMARK_NARRATIVE.md) §3.
-A design proposal for a future multi-client daemon mode exists
-([`docs/specs/PHASE3_DAEMON_PROPOSAL.md`](./docs/specs/PHASE3_DAEMON_PROPOSAL.md)) but is
-explicitly **not implemented** — no code, no flag — pending a product-owner security review.
+An **opt-in daemon mode** lets several client processes (multiple IDE windows/agent
+sessions, a CLI, a background indexer) share one memory instead of each opening its own
+SQLite file: a Unix-socket/Windows-named-pipe transport, bearer-token auth through the same
+crypto-free trust registry, and a single serialized write queue — approved by a binding
+security review ([`docs/specs/PHASE3_DAEMON_SPEC.md`](./docs/specs/PHASE3_DAEMON_SPEC.md))
+and verified end-to-end against a real spawned daemon process plus 30 real `SIGKILL` crash
+cycles. The in-process default (`createAgentMemory()`, above) is unchanged and remains the
+default forever; reach for `intelligent-db-daemon` (see [`OPERATIONS.md`](./OPERATIONS.md))
+only once you actually have multiple processes needing shared memory.
 
 ---
 

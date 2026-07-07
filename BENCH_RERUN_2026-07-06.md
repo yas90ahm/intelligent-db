@@ -1590,3 +1590,147 @@ Full experiment artifacts:
 `.arbor/sessions/retrieval-quality/experiments/1.1.1.1.4.isolation/` (D1/D2),
 `.arbor/sessions/retrieval-quality/experiments/1.1.1.1.5.calibration/` (DEV sweep +
 TEST scoring).
+
+## Phase 3 — daemon mode: end-to-end verification + crash torture — 2026-07-06
+
+Verifier/finisher pass over `docs/specs/PHASE3_DAEMON_SPEC.md` (deliverables 4-5),
+following the server lane (`src/daemon/server.ts`, `tokens.ts`, `auditChain.ts`) and
+client lane (`src/daemon/client.ts`, `mcp/server.ts`'s daemon-backing switch). Full
+methodology and runbook: [`OPERATIONS.md`](./OPERATIONS.md).
+
+### What shipped in this pass
+
+- `src/daemon/__e2e__/` — a REAL-child-process test harness (`support.ts`: spawns
+  the actual compiled `dist/daemon/cli.js`, not an in-process `DaemonServer`) plus
+  three test files: `securityMatrix.e2e.test.ts` (handshake/auth matrix, H2 identity
+  binding, R3 revocation, H6 connection-cap/backpressure, R9 pipe discovery),
+  `serialization.e2e.test.ts` (H3 under real concurrent sockets),
+  `adversarial.e2e.test.ts` (attacker-minded pass).
+- `src/daemon/__torture__/daemonKillLoop.ts` + `.test.ts` — H4 crash semantics
+  extended to the DAEMON PROCESS ITSELF: a real client hammers a real daemon child
+  process while it gets genuinely `SIGKILL`ed, then a fresh daemon process reopens
+  the same files. Env-gated `DAEMON_TORTURE=1` (mirrors the existing
+  `src/__torture__/killLoop.test.ts` convention — never runs in the default suite).
+- `src/daemon/auditChainSqlite.ts` — a durable, SQLite-backed R8 audit chain,
+  fixing a finding from the adversarial pass (see below). Wired as the default in
+  `daemon/cli.ts`; the original in-memory `createDaemonAuditChain()` stays
+  available (still used by the fast in-process unit tests in
+  `daemon/__tests__/`).
+- `tsconfig.build.json` — excludes `src/daemon/__e2e__` and `src/daemon/__torture__`
+  from the shipped `dist/` build (a packaging finding, see below).
+- `OPERATIONS.md` (new), `CLAUDE.md` KNOWN LIMITATIONS additions, a `README.md`
+  daemon paragraph rewrite (the daemon proposal reference was stale — the daemon is
+  now implemented).
+
+### Security matrix — pass/fail (all against a REAL spawned daemon process + real socket/pipe)
+
+| # | Case | Spec ref | Result |
+|---|---|---|---|
+| 1 | Valid token handshake -> real remember()/recall() round trip | R1/H1 | **PASS** |
+| 2 | Bad/unknown token -> rejected, dropped, raw token never echoed | R3/H1 | **PASS** |
+| 3 | Malformed JSON as first line -> dropped, daemon survives for other clients | H1 | **PASS** |
+| 4 | Non-auth first line (well-formed JSON) -> rejected, never an implicit auth | H1 | **PASS** |
+| 5 | Admin verb from non-OWNER connection -> `ADMIN_FORBIDDEN`; OWNER succeeds | R3 | **PASS** |
+| 6 | Self-escalation attempt (`issueToken` grade=OWNER from a non-owner token) | R3 | **PASS** |
+| 7 | H2 identity binding: client-claimed `source` in payload is ignored, connection identity wins | H2 | **PASS** |
+| 8 | H3: 8 concurrent connections x 25 writes = 200 writes, zero loss/duplication/content-bleed | H3 | **PASS** |
+| 9 | R3: revoked token rejects a new request on the live connection or drops it | R3 | **PASS** |
+| 10 | R3: revoked token's fresh reconnect attempt fails at handshake | R3 | **PASS** |
+| 11 | R3: `revokeAllTokens` spares the caller, invalidates every other live token immediately | R3 | **PASS** |
+| 12 | H6: connection cap (32) refuses the 33rd connection pre-handshake | R5/H6 | **PASS** |
+| 13 | H6: queue-depth flood (1400 requests on one connection) yields typed `BACKPRESSURE`, no hang/crash | H6 | **PASS** |
+| 14 | R9: bound Windows pipe endpoint carries a 32-hex-char random suffix, matches the token file | R9 | **PASS** (this machine is Windows) |
+| 15 | R9: guessing the base pipe name without the suffix fails to connect | R9 | **PASS** |
+| 16 | R9: two consecutive daemon starts mint different random suffixes | R9 | **PASS** |
+
+**16/16 PASS.** (POSIX socket-permission assertions are written per spec, gated on
+`process.platform`, and are not independently exercised here — this machine is
+Windows, per the task's own scoping note.)
+
+### Adversarial pass — found vs. fixed
+
+Attacker-minded pass (`src/daemon/__e2e__/adversarial.e2e.test.ts`, 10 test cases):
+pre-auth verb execution attempts, oversized/malformed frames (pre- and
+post-handshake), slowloris (byte-at-a-time trickling, both a never-completed line
+and a legitimately chunked one), token-fingerprint-vs-raw discipline across every
+serialized response + stderr, admin-verb escalation from a non-OWNER token (all four
+verbs individually), and connecting during shutdown drain (raced against a real
+`SIGTERM`).
+
+| Finding | Category | Outcome |
+|---|---|---|
+| Pre-auth admin/data verbs (`issueToken`, `revokeAllTokens`, `remember`, `recall`, `disown`) execute nothing — the daemon treats ANY non-`auth` first line identically, regardless of method name | Already defended | Confirmed, not a gap |
+| Oversized post-handshake line -> typed `OVERSIZED_LINE`, connection and daemon both survive | Already defended | Confirmed, not a gap |
+| Malformed JSON post-handshake -> typed parse error, connection and daemon both survive | Already defended | Confirmed, not a gap |
+| Unknown method name -> typed `METHOD_NOT_FOUND`, never a crash | Already defended | Confirmed, not a gap |
+| Slowloris (never-completing trickle) -> dropped at the FIXED handshake deadline from connection-open time, not extended by trickling activity (the timer is set once and only cleared on success/failure, never reset per byte) | Already defended | Confirmed, not a gap |
+| Legitimately chunked (but complete-in-time) auth line -> succeeds normally | Already defended | Confirmed, not a gap |
+| Raw token never appears in any post-handshake response, error, or stderr line for any token OTHER than the one direct `issueToken` response that must return it once | Already defended | Confirmed, not a gap |
+| Every one of the four admin verbs individually rejected for a non-OWNER connection (not just one sampled verb); data verbs remain usable on the same connection | Already defended | Confirmed, not a gap |
+| A connection attempt raced against a real `SIGTERM` never completes a handshake once shutdown has begun | Already defended | Confirmed, not a gap |
+| **The daemon's own R8 audit chain (`createDaemonAuditChain()`) was IN-MEMORY ONLY, and `daemon/cli.ts` wired it with no `AppendSink`** — the entire connection/auth/revocation/admin/shutdown trail was lost on every process exit, including a crash, the exact moment R3's "at least post-hoc detectable" rationale needs it most | **Real gap** | **FIXED** — `src/daemon/auditChainSqlite.ts`, a durable SQLite-backed drop-in (own file, `daemon-audit.db`), wired as the CLI default; verified to continue the same chain (not restart at genesis) across a reopen and to still name the first broken seq after an at-rest tamper |
+| **Test-support code (`daemon/__e2e__/support.ts`, `daemon/__torture__/daemonKillLoop.ts`) leaked into the published `dist/` build** — `tsconfig.build.json`'s exclude list covered only the top-level `src/__torture__`, missing these nested daemon-scoped directories | **Real gap** | **FIXED** — both added to `tsconfig.build.json`'s exclude list; confirmed via a clean `rm -rf dist && npm run build` that neither directory appears in `dist/daemon/` afterward |
+
+**10 already-defended, 2 real findings, both fixed.**
+
+### Crash torture (H4) — 30 real `SIGKILL` cycles against the compiled daemon binary
+
+Driver: `src/daemon/__torture__/daemonKillLoop.ts`. Per cycle: spawn the real
+`dist/daemon/cli.js`, a live client fires a 300-request burst of `remember()` calls
+(fire-and-forget, no per-call await — a slow trickle would let every request
+round-trip before the kill, never exercising the disconnect-mid-flight path at all),
+wait a random 1-20ms, `SIGKILL` the daemon child process, then respawn a fresh
+daemon against the SAME db/data-dir (the real WAL-recovery-on-reopen), confirm it
+serves a request normally, stop it gracefully, and directly open the persisted files
+to check `PRAGMA integrity_check` (memory store) and `verifyChain()` (the daemon's
+own durable R8 chain — the fix above).
+
+Command: `DAEMON_TORTURE=1 DAEMON_TORTURE_CYCLES=30 npx vitest run src/daemon/__torture__/daemonKillLoop.test.ts`
+
+**30/30 cycles: zero violations.** Representative per-cycle detail (kill delay
+varied 1-20ms at random; 24/30 cycles genuinely landed mid-backlog, the remaining
+6 completed the whole 300-request burst before the kill arrived — both are valid,
+and the checker demands the same guarantees either way):
+
+| Cycle | Kill delay (ms) | In-flight | Fulfilled | UNKNOWN | Reopen OK | `integrity_check` | Daemon chain `verifyChain()` |
+|---|---|---|---|---|---|---|---|
+| 1 | 4 | 300 | 2 | 298 | true | true | true |
+| 2 | 13 | 300 | 2 | 298 | true | true | true |
+| 9 | 2 | 300 | 1 | 299 | true | true | true |
+| 19 | 12 | 300 | 300 | 0 | true | true | true |
+| 27 | 1 | 300 | 1 | 299 | true | true | true |
+| 30 | 2 | 300 | 1 | 299 | true | true | true |
+
+Every one of the 300 x 30 = 9,000 fired requests settled as EITHER a genuine
+fulfilled response or a typed `DaemonUnknownOutcomeError` — never any other kind of
+error, never a fabricated success/failure. Every one of the 30 reopens came up
+clean (a corrupt-on-open db would have surfaced as the respawned daemon never
+printing its "listening on" line, which the harness treats as a hard failure, not a
+silently-skipped cycle). Every one of the 30 direct post-mortem checks passed both
+`PRAGMA integrity_check` (the memory store) and `verifyChain()` (the daemon's own
+R8 chain, continuing the SAME chain across every kill in the run — not resetting to
+genesis each time). See `OPERATIONS.md` §5 and the KNOWN LIMITATIONS addition in
+`CLAUDE.md` for the scope note on what this check does NOT cover (the
+fact/ratification checksum chain, wired in-memory by the `createAgentMemory` facade
+regardless of `dbPath` — a pre-existing facade characteristic, not a daemon
+regression).
+
+### Full suite + typecheck
+
+`npm run typecheck` — clean. `npx vitest run` (full default suite, daemon crash
+torture NOT included — env-gated exactly like the existing engine crash-torture
+suite): **673 passed, 43 skipped, 68 test files passed, 41 skipped (109 total)** —
+up from the pre-verification-pass baseline of 644 passed / 42 skipped (net +29
+tests: 5 new daemon unit tests for the durable audit chain, 13 handshake/identity/
+revocation/cap E2E cases, 1 serialization E2E case, 10 adversarial E2E cases, plus
+the daemon crash-torture smoke test file itself — which counts as 1 skipped in the
+default run and is exercised separately above).
+
+### Commits
+
+- `test: daemon end-to-end security matrix + crash torture` — the E2E harness and
+  test files, the durable audit-chain fix + its tests, the `tsconfig.build.json`
+  packaging fix.
+- `docs: daemon operations, limitations, README` — `OPERATIONS.md`, the `CLAUDE.md`
+  KNOWN LIMITATIONS additions, the `README.md` daemon paragraph rewrite, this
+  section.
