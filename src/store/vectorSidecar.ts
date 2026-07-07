@@ -48,6 +48,7 @@ import type { DatabaseSync as DatabaseSyncType } from "node:sqlite";
 
 import type { ContentHash } from "../core/types.js";
 import { runMigrations } from "./migrations.js";
+import { assertOwnedWal, assertSharedHandleWal } from "./sqliteStore.js";
 
 // ---------------------------------------------------------------------------
 // The contract
@@ -124,9 +125,133 @@ function compareStrings(a: string, b: string): number {
 }
 
 /**
+ * FINAL ranking order for a {@link VectorMatch} pair: score descending, then
+ * `content_hash` ascending on an exact tie (determinism). Returns > 0 when `a`
+ * should rank AFTER `b` (`a` is worse), < 0 when `a` should rank BEFORE `b` (`a`
+ * is better), 0 only when `a`/`b` are the same row.
+ */
+function rankOrder(a: VectorMatch, b: VectorMatch): number {
+  if (a.score !== b.score) return b.score - a.score;
+  return compareStrings(String(a.contentHash), String(b.contentHash));
+}
+
+/**
+ * A bounded min-heap of at most `capacity` {@link VectorMatch}es, ordered so the
+ * ROOT is always the CURRENT WORST kept candidate (by {@link rankOrder}). This is
+ * the classic streaming top-K selection primitive: `push` costs O(log capacity)
+ * — never O(log n) — and the heap NEVER grows past `capacity`, so scanning `n`
+ * candidates costs O(n log k) time and, crucially, only O(k) RETAINED memory
+ * (never an O(n) array of every scored candidate).
+ *
+ * Exported (not merely an implementation --detail) so this exact selection
+ * primitive — the one both {@link createMemoryVectorSidecar} and
+ * {@link createSqliteVectorSidecar} run every `topK` call through — is directly
+ * unit-testable for its size bound, not just indirectly via end-to-end output.
+ *
+ * FIXES `vectorsidecar-topk-full-materialization`: the previous implementation
+ * pushed EVERY scored candidate into one array and ran `Array.prototype.sort`
+ * over the whole thing before slicing the first `k` — O(n) retained memory (one
+ * wrapper object per candidate, all alive simultaneously) and O(n log n) time
+ * regardless of how small `k` is.
+ */
+export class BoundedTopKHeap {
+  readonly #capacity: number;
+  readonly #data: VectorMatch[] = [];
+
+  constructor(capacity: number) {
+    this.#capacity = Math.max(0, capacity);
+  }
+
+  /** Number of candidates currently retained (never exceeds `capacity`). */
+  get size(): number {
+    return this.#data.length;
+  }
+
+  /** Offer a candidate: kept if the heap has room, or if it beats the current worst kept. */
+  push(candidate: VectorMatch): void {
+    if (this.#capacity <= 0) return;
+    if (this.#data.length < this.#capacity) {
+      this.#data.push(candidate);
+      this.#siftUp(this.#data.length - 1);
+      return;
+    }
+    const worst = this.#data[0];
+    // worst is defined here: capacity > 0 and the array is already at capacity.
+    if (worst !== undefined && rankOrder(candidate, worst) < 0) {
+      // candidate ranks BEFORE (beats) the current worst kept -> evict the root.
+      this.#data[0] = candidate;
+      this.#siftDown(0);
+    }
+    // else: candidate is worse than or tied-worse-than everything already kept, and
+    // the heap is full -> discard without ever allocating a retained slot for it.
+  }
+
+  /** Drain the heap into the FINAL ranked array (best first), per {@link rankOrder}. */
+  toSorted(): VectorMatch[] {
+    return [...this.#data].sort(rankOrder);
+  }
+
+  #siftUp(i: number): void {
+    let idx = i;
+    while (idx > 0) {
+      const parent = (idx - 1) >> 1;
+      const parentItem = this.#data[parent];
+      const item = this.#data[idx];
+      if (parentItem === undefined || item === undefined) break;
+      // Max-heap on "worseness": a parent must rank AFTER (be worse than or equal
+      // to) its children so the single worst-kept candidate stays at the root.
+      if (rankOrder(parentItem, item) < 0) {
+        this.#data[idx] = parentItem;
+        this.#data[parent] = item;
+        idx = parent;
+      } else {
+        break;
+      }
+    }
+  }
+
+  #siftDown(i: number): void {
+    let idx = i;
+    const n = this.#data.length;
+    for (;;) {
+      const left = 2 * idx + 1;
+      const right = 2 * idx + 2;
+      let worst = idx;
+      const worstItem0 = this.#data[worst];
+      if (worstItem0 === undefined) break;
+      let worstItem = worstItem0;
+      if (left < n) {
+        const leftItem = this.#data[left];
+        if (leftItem !== undefined && rankOrder(leftItem, worstItem) > 0) {
+          worst = left;
+          worstItem = leftItem;
+        }
+      }
+      if (right < n) {
+        const rightItem = this.#data[right];
+        if (rightItem !== undefined && rankOrder(rightItem, worstItem) > 0) {
+          worst = right;
+          worstItem = rightItem;
+        }
+      }
+      if (worst === idx) break;
+      const tmp = this.#data[idx];
+      if (tmp === undefined) break;
+      this.#data[idx] = worstItem;
+      this.#data[worst] = tmp;
+      idx = worst;
+    }
+  }
+}
+
+/**
  * Rank a candidate stream by cosine score descending, `content_hash` ascending on
- * ties, and take the top `k`. Shared by both backends so the ranking rule is
- * defined exactly once.
+ * ties, and take the top `k` — via a bounded {@link BoundedTopKHeap}, never a
+ * full materialize-then-sort. Shared by both backends so the ranking rule and the
+ * O(k)-memory selection algorithm are each defined exactly once. `candidates` is
+ * consumed lazily (one at a time): the SQLite backend feeds this from
+ * `stmt.iterate()` (never `.all()`), so a brute-force scan over N stored vectors
+ * never materializes more than ONE row + at most `k` scored candidates at a time.
  */
 function rankTopK(
   candidates: Iterable<{ contentHash: ContentHash; modelId: string; vec: Float32Array }>,
@@ -135,16 +260,12 @@ function rankTopK(
   k: number,
 ): VectorMatch[] {
   if (k <= 0) return [];
-  const scored: VectorMatch[] = [];
+  const heap = new BoundedTopKHeap(k);
   for (const c of candidates) {
     if (c.modelId !== modelId) continue; // mismatched-model row: silently ignored
-    scored.push({ contentHash: c.contentHash, score: cosineSimilarity(queryVec, c.vec) });
+    heap.push({ contentHash: c.contentHash, score: cosineSimilarity(queryVec, c.vec) });
   }
-  scored.sort((x, y) => {
-    if (y.score !== x.score) return y.score - x.score;
-    return compareStrings(String(x.contentHash), String(y.contentHash));
-  });
-  return scored.slice(0, k);
+  return heap.toSorted();
 }
 
 // ---------------------------------------------------------------------------
@@ -241,9 +362,22 @@ export function createSqliteVectorSidecar(
 
   if (owns) {
     // Standalone/owned handle (e.g. a test or a caller not sharing the main
-    // store's handle): set the same crash-safety floor the main store uses.
-    db.exec("PRAGMA journal_mode=WAL");
+    // store's handle): set the same crash-safety floor the main store uses, and
+    // VERIFY (not just request) that WAL actually took — closes
+    // `vectorsidecar-unverified-wal`: this constructor used to set the pragma and
+    // trust it blindly, unlike `createSqliteStore`'s owned path, which has always
+    // read the pragma back and refused a silent rollback-journal downgrade (e.g. on
+    // a network filesystem). Shared helper, same failure mode as the main store.
+    assertOwnedWal(db, "createSqliteVectorSidecar");
     db.exec("PRAGMA synchronous=NORMAL");
+  } else {
+    // BORROWED shared handle: never set connection-wide pragmas on someone else's
+    // handle — only VERIFY the owner already put it in WAL mode, mirroring
+    // `createSqliteStore`'s `{ db }` overload. Previously this constructor did
+    // NOTHING for the shared-handle path, so a vector sidecar sharing an
+    // unverified (or genuinely non-WAL) handle gave no signal short of an actual
+    // crash losing data.
+    assertSharedHandleWal(db, "createSqliteVectorSidecar");
   }
 
   // Runs the FULL ladder (v1 + v2) on a brand-new handle, or just the pending
@@ -278,9 +412,17 @@ export function createSqliteVectorSidecar(
     },
     topK(queryVec, modelId, k) {
       if (k <= 0) return [];
-      const rows = byModelStmt.all(modelId) as Array<{ content_hash: string; vec: unknown }>;
+      // STREAM rows via stmt.iterate() rather than .all(): the latter materializes
+      // EVERY matching row into one JS array before scoring even begins (the
+      // `vectorsidecar-topk-full-materialization` finding). iterate() yields rows
+      // lazily off the open statement, so combined with rankTopK's bounded heap,
+      // this scan never retains more than one raw row + `k` scored candidates at
+      // once, however many rows `model_id` matches.
       function* iter(): Generator<{ contentHash: ContentHash; modelId: string; vec: Float32Array }> {
-        for (const r of rows) {
+        for (const r of byModelStmt.iterate(modelId) as Iterable<{
+          content_hash: string;
+          vec: unknown;
+        }>) {
           yield {
             contentHash: r.content_hash as ContentHash,
             modelId,

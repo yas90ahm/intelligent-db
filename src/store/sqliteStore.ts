@@ -274,6 +274,44 @@ export function assertSharedHandleWal(db: DatabaseSyncType, caller: string): voi
 }
 
 /**
+ * SET `journal_mode=WAL` on an OWNED handle (a handle this constructor itself just
+ * opened via a bare path — never a borrowed shared handle, see
+ * {@link assertSharedHandleWal} for that half) and VERIFY the request actually took,
+ * throwing a descriptive error otherwise.
+ *
+ * WHY A SHARED HELPER (closes `wal-verification-inconsistent-across-constructors`):
+ * `createSqliteStore`'s owned-path branch has always done this (request + read back +
+ * throw on refusal), but the reputation ledger and pending ledger's owned-path
+ * constructors historically each re-implemented (or omitted) the same read-back —
+ * `store/vectorSidecar.ts`'s owned-path constructor set the pragma and never verified
+ * it took at all. Factoring the ONE check here means every owned-path SQLite
+ * constructor in this codebase enforces the identical crash-safety floor with the
+ * identical failure message, instead of three near-duplicate (and one entirely
+ * missing) copies drifting apart. `:memory:` legitimately reports `"memory"` (no
+ * journal to speak of, non-durable by design — the fast test substrate) and is
+ * accepted; anything else that isn't `"wal"` is refused (the most common real cause is
+ * a network filesystem silently downgrading to a rollback journal).
+ *
+ * @param db the just-opened, OWNED `DatabaseSyncType` (never a borrowed shared handle).
+ * @param caller a short label for the constructing factory, used in the thrown error's
+ *   message (e.g. `"createSqliteVectorSidecar"`).
+ */
+export function assertOwnedWal(db: DatabaseSyncType, caller: string): void {
+  const journalRow = db.prepare("PRAGMA journal_mode=WAL").get() as
+    | Record<string, unknown>
+    | undefined;
+  const journalMode = String(journalRow?.["journal_mode"] ?? "").toLowerCase();
+  if (journalMode !== "wal" && journalMode !== "memory") {
+    throw new Error(
+      `${caller}: PRAGMA journal_mode=WAL did not take (database reports ` +
+        `"${journalMode}"). WAL is the crash-safety floor and cannot be silently ` +
+        `downgraded. The usual cause is a network filesystem (SMB/NFS), where ` +
+        `SQLite refuses WAL — move the database to a local disk.`,
+    );
+  }
+}
+
+/**
  * Durable, WAL-mode, SQLite-backed {@link StrandStore}. Single-file persistence with
  * the same adjacency / entity / attribute indexing the in-memory backend provides,
  * plus crash-safety. All methods are synchronous (the contract is sync; `node:sqlite`
@@ -335,25 +373,13 @@ class SqliteStrandStoreImpl implements SqliteStrandStore {
     if (opts.ownsDb) {
       // WAL: one writer + many concurrent readers; a crash cannot corrupt committed
       // data. This is the durability floor and is NOT negotiable — so we VERIFY the
-      // pragma actually took instead of trusting it. `PRAGMA journal_mode=WAL` is a
-      // REQUEST: SQLite returns the mode it actually set, and it can silently refuse
-      // WAL (most commonly on a network filesystem, where WAL's shared-memory file
-      // does not work) and fall back to a rollback journal — quietly forfeiting the
-      // crash-safety this store's durability claims rest on. An in-memory database
-      // (":memory:") legitimately reports "memory" (it has no journal to speak of and
-      // is non-durable BY DESIGN — the test substrate); anything else is refused.
-      const journalRow = this.#db.prepare("PRAGMA journal_mode=WAL").get() as
-        | Record<string, unknown>
-        | undefined;
-      const journalMode = String(journalRow?.["journal_mode"] ?? "").toLowerCase();
-      if (journalMode !== "wal" && journalMode !== "memory") {
-        throw new Error(
-          `createSqliteStore: PRAGMA journal_mode=WAL did not take (database reports ` +
-            `"${journalMode}"). WAL is the crash-safety floor and cannot be silently ` +
-            `downgraded. The usual cause is a network filesystem (SMB/NFS), where ` +
-            `SQLite refuses WAL — move the database to a local disk.`,
-        );
-      }
+      // pragma actually took instead of trusting it (see assertOwnedWal's doc for why
+      // a `:memory:` database legitimately reports "memory" instead, and why a
+      // network filesystem is the usual silent-refusal cause). Factored into the
+      // shared helper so every owned-path SQLite constructor in this codebase (this
+      // store, the vector sidecar, and the reputation/pending ledgers) enforces the
+      // identical check instead of near-duplicate copies drifting apart.
+      assertOwnedWal(this.#db, "createSqliteStore");
       // synchronous=NORMAL (the DEFAULT) — under WAL, a power-cut/OS-crash can lose
       // only the LAST committed txn, never corrupt the file or leave a half-applied
       // compound op. FULL (fsync on every commit) is the opt-in zero-loss-on-power-cut
