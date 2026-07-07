@@ -521,7 +521,19 @@ export function createEmbeddingCueResolver(
         if (b[1] !== a[1]) return b[1] - a[1];
         return a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : 0;
       });
-      return ranked.map(([strandId, energy]) => ({
+
+      // FINAL TOP-K CAP (Wave-3 `embed-resolver-no-topk-cap`): step 2's "cosine
+      // top-K" bounds the number of MATCHED VECTORS consulted, not the number of
+      // strand ids they resolve to — a single matched `content_hash` can expand
+      // into an arbitrarily large echo bucket (many strands sharing one payload),
+      // so the union above could silently return far more than `k` seeds. Cap the
+      // assembled union at `k`, mirroring the lexical baseline's own `topK`
+      // truncation. Skipped when `k` is non-positive: the embed step above is
+      // ALSO skipped in that case (the doc's "lexical/exact channels still work
+      // with no embedder cost" guarantee), so there is nothing embedding-sourced
+      // to bound and the lexical baseline must pass through completely untouched.
+      const capped = k > 0 ? ranked.slice(0, k) : ranked;
+      return capped.map(([strandId, energy]) => ({
         strandId,
         energy: energy as Activation,
       }));

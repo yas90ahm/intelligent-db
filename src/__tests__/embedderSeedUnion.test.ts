@@ -5,7 +5,7 @@
  * over the real engine + a real (deterministic, zero-network) reference
  * embedder, WITHOUT ever letting similarity leak into belief:
  *
- *   1. `writeFactWithEmbedding` populates the vector sidecar keyed by
+ *   1. `writeFactWithEmbeddingAsync` populates the vector sidecar keyed by
  *      content_hash, reuses an existing vector for an echoed hash, degrades to
  *      a plain `writeFact` when no embedder failed OR no retrieval is wired,
  *      and NEVER rejects on an embedder failure (fail-open).
@@ -19,6 +19,10 @@
  *      provenance) is still the one a fact_state-aware renderer would surface,
  *      and every attacker strand stays labeled PROVISIONAL — seeding energy
  *      never flips belief.
+ *   4. Wave-3 `embed-resolver-no-topk-cap`: `resolveWithEmbeddings`'s final
+ *      union is truncated at `embedSeedK`, even when a matched vector's echo
+ *      bucket (many strands sharing one payload) would otherwise blow the
+ *      output size past it.
  */
 
 import { describe, it, expect } from "vitest";
@@ -116,10 +120,10 @@ function domainAnchor(): AnchorBinding {
 }
 
 // ---------------------------------------------------------------------------
-// 1) writeFactWithEmbedding
+// 1) writeFactWithEmbeddingAsync
 // ---------------------------------------------------------------------------
 
-describe("writeFactWithEmbedding", () => {
+describe("writeFactWithEmbeddingAsync", () => {
   function wire() {
     const store = createMemoryStore();
     const identity = makeIdentityLayer();
@@ -135,7 +139,7 @@ describe("writeFactWithEmbedding", () => {
   it("populates the vector sidecar keyed by the fresh strand's content_hash", async () => {
     const { store, vectors, embedder, db, stamp } = wire();
     const entity = "entity:e1" as EntityId;
-    const id = await db.writeFactWithEmbedding({
+    const id = await db.writeFactWithEmbeddingAsync({
       entity,
       payload: { text: "Berlin is the capital of Germany" },
       stamp,
@@ -152,8 +156,8 @@ describe("writeFactWithEmbedding", () => {
     const { store, vectors, embedder, db, stamp } = wire();
     const entity = "entity:e1" as EntityId;
     const payload = { text: "identical payload" };
-    const idA = await db.writeFactWithEmbedding({ entity, payload, stamp });
-    const idB = await db.writeFactWithEmbedding({ entity, payload, stamp });
+    const idA = await db.writeFactWithEmbeddingAsync({ entity, payload, stamp });
+    const idB = await db.writeFactWithEmbeddingAsync({ entity, payload, stamp });
     expect(idA).not.toBe(idB); // two distinct strands...
 
     const strandA = store.getStrand(idA)!;
@@ -174,7 +178,7 @@ describe("writeFactWithEmbedding", () => {
     const stamp = identity.stampFor(passport.sourceId);
 
     const entity = "entity:e1" as EntityId;
-    const id = await db.writeFactWithEmbedding({ entity, payload: { text: "x" }, stamp });
+    const id = await db.writeFactWithEmbeddingAsync({ entity, payload: { text: "x" }, stamp });
     expect(store.getStrand(id)).not.toBeNull();
   });
 
@@ -198,7 +202,7 @@ describe("writeFactWithEmbedding", () => {
     const stamp = identity.stampFor(passport.sourceId);
 
     const entity = "entity:e1" as EntityId;
-    const id = await db.writeFactWithEmbedding({ entity, payload: { text: "x" }, stamp });
+    const id = await db.writeFactWithEmbeddingAsync({ entity, payload: { text: "x" }, stamp });
     const strand = store.getStrand(id);
     expect(strand).not.toBeNull(); // the fact still landed
     expect(vectors.get(strand!.content_hash)).toBeNull(); // but no vector was written
@@ -227,7 +231,7 @@ describe("createEmbeddingCueResolver: seed-union seam", () => {
     const vectors = createMemoryVectorSidecar();
     const embedder = createHashingEmbedder({ dim: 32 });
 
-    await db.writeFactWithEmbedding({
+    await db.writeFactWithEmbeddingAsync({
       entity: "entity:a" as EntityId,
       payload: { text: "hello world" },
       stamp,
@@ -251,7 +255,7 @@ describe("createEmbeddingCueResolver: seed-union seam", () => {
 
     // A payload with ZERO token overlap with the cue below, so the LEXICAL resolver
     // alone would never seed it — only the embedding channel can.
-    const id = await db.writeFactWithEmbedding({
+    const id = await db.writeFactWithEmbeddingAsync({
       entity: "entity:zzz" as EntityId,
       payload: { text: "xylophone quokka marmalade" },
       stamp,
@@ -275,12 +279,12 @@ describe("createEmbeddingCueResolver: seed-union seam", () => {
     // Exact-entity match => energy 1.0 for entityStrandId; an UNRELATED strand with
     // high cosine similarity to the cue must still clamp <= 1.0 (never exceed exact).
     const entity = "entity:exact" as EntityId;
-    const entityStrandId = await db.writeFactWithEmbedding({
+    const entityStrandId = await db.writeFactWithEmbeddingAsync({
       entity,
       payload: { text: "totally different payload" },
       stamp,
     });
-    await db.writeFactWithEmbedding({
+    await db.writeFactWithEmbeddingAsync({
       entity: "entity:other" as EntityId,
       payload: { text: "cue phrase repeated verbatim" },
       stamp,
@@ -311,7 +315,7 @@ describe("createEmbeddingCueResolver: seed-union seam", () => {
       embedder: oldEmbedder,
       vectors,
     });
-    const id = await dbOld.writeFactWithEmbedding({
+    const id = await dbOld.writeFactWithEmbeddingAsync({
       entity: "entity:stale" as EntityId,
       payload: { text: "some vintage payload text" },
       stamp,
@@ -341,7 +345,7 @@ describe("createEmbeddingCueResolver: seed-union seam", () => {
     const embedder = createHashingEmbedder({ dim: 32 });
 
     for (let i = 0; i < 5; i++) {
-      await db.writeFactWithEmbedding({
+      await db.writeFactWithEmbeddingAsync({
         entity: `entity:cap${i}` as EntityId,
         payload: { text: "shared unrelated cap phrase alpha beta gamma" },
         stamp,
@@ -384,7 +388,7 @@ describe("adversarial embedding-stuffing (spec §5.4)", () => {
     const attribute = "acme#ceo" as AttributeKey;
     const cueText = "who currently runs acme corporation as chief executive";
 
-    const incumbentId = await db.writeFactWithEmbedding({
+    const incumbentId = await db.writeFactWithEmbeddingAsync({
       entity,
       attribute,
       payload: { text: "Jane Doe has served as Acme's chief executive since 2019" },
@@ -403,7 +407,7 @@ describe("adversarial embedding-stuffing (spec §5.4)", () => {
       // DISTINCT strands rather than one echo) — under the deterministic
       // hashing embedder this tokenizes IDENTICALLY to the cue, so cosine is
       // exactly 1.0: the strongest possible embedding-stuffing attack.
-      const id = await db.writeFactWithEmbedding({
+      const id = await db.writeFactWithEmbeddingAsync({
         entity,
         attribute,
         payload: { text: cueText, variant: i },
@@ -448,4 +452,84 @@ describe("adversarial embedding-stuffing (spec §5.4)", () => {
     // TRUSTED source, unaffected by any cosine score.
     expect(incumbent?.provenance[0]?.sourceId).toBe(trustedPassport.sourceId);
   });
+});
+
+// ---------------------------------------------------------------------------
+// 4) FINAL TOP-K CAP (Wave-3 embed-resolver-no-topk-cap)
+// ---------------------------------------------------------------------------
+
+describe("resolveWithEmbeddings: final topK cap (Wave-3 embed-resolver-no-topk-cap)", () => {
+  it("caps the union at embedSeedK even when a matched vector's echo bucket would blow past it", async () => {
+    const store = createMemoryStore();
+    const identity = makeIdentityLayer();
+    const vectors = createMemoryVectorSidecar();
+    const embedder = createHashingEmbedder({ dim: 32 });
+    const db = createIntelligentDb(store, identity, null, null, null, null, { embedder, vectors });
+    const passport = freshSource();
+    identity.register(passport, [domainAnchor()]);
+    const stamp = identity.stampFor(passport.sourceId);
+
+    // Two "clusters" of strands, each cluster sharing ONE payload (=> ONE
+    // content_hash / ONE vector row, per the "echoes share one vector" rule)
+    // across SEVERAL distinct strand ids — a genuine echo bucket. Both
+    // clusters share vocabulary with the cue below so BOTH the lexical channel
+    // and the embedding channel match broadly (proving the cap bounds the
+    // TOTAL union, not merely the embedding side in isolation).
+    const ECHO_COUNT = 6;
+    for (const cluster of ["alpha", "beta"] as const) {
+      for (let i = 0; i < ECHO_COUNT; i++) {
+        await db.writeFactWithEmbeddingAsync({
+          entity: `entity:${cluster}` as EntityId,
+          payload: { text: `shared probe ${cluster} filler padding words` },
+          stamp,
+        });
+      }
+    }
+
+    const resolver = createEmbeddingCueResolver(store, embedder, vectors);
+    const cue = { text: "shared probe query lookup" };
+
+    // Sanity: the lexical channel ALONE already exceeds the tiny topK we are
+    // about to request from the union — proves the truncation below is doing
+    // real work, not a vacuous no-op.
+    const lexicalOnly = resolver.resolve(cue);
+    expect(lexicalOnly.length).toBeGreaterThan(1);
+
+    const seeds = await resolver.resolveWithEmbeddings(cue, { embedSeedK: 1 });
+    expect(seeds.length).toBe(1);
+  });
+
+  it("a non-positive embedSeedK skips the embed step but does NOT truncate the lexical baseline", async () => {
+    const { store, db, stamp } = wireEngineForCap();
+    const vectors = createMemoryVectorSidecar();
+    const embedder = createHashingEmbedder({ dim: 32 });
+
+    for (let i = 0; i < 3; i++) {
+      await db.writeFactWithEmbeddingAsync({
+        entity: `entity:cap${i}` as EntityId,
+        payload: { text: "lexical only cap phrase for zero k" },
+        stamp,
+      });
+    }
+
+    const resolver = createEmbeddingCueResolver(store, embedder, vectors);
+    const cue = { text: "lexical only cap phrase for zero k" };
+    const lexicalOnly = resolver.resolve(cue);
+    expect(lexicalOnly.length).toBe(3);
+
+    const seeds = await resolver.resolveWithEmbeddings(cue, { embedSeedK: 0 });
+    expect(seeds.length).toBe(lexicalOnly.length);
+  });
+
+  function wireEngineForCap(): { store: StrandStore; db: IntelligentDb; stamp: IdentityStamp } {
+    const store = createMemoryStore();
+    const identity = makeIdentityLayer();
+    const vectors = createMemoryVectorSidecar();
+    const embedder = createHashingEmbedder({ dim: 32 });
+    const db = createIntelligentDb(store, identity, null, null, null, null, { embedder, vectors });
+    const passport = freshSource();
+    identity.register(passport, [domainAnchor()]);
+    const stamp = identity.stampFor(passport.sourceId);
+    return { store, db, stamp };
+  }
 });
