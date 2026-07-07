@@ -36,6 +36,10 @@
     ".": {
       "types": "./dist/index.d.ts",
       "default": "./dist/index.js"
+    },
+    "./daemon/client": {
+      "types": "./dist/daemon/client.d.ts",
+      "default": "./dist/daemon/client.js"
     }
   },
   "files": [
