@@ -812,6 +812,30 @@ class InMemoryPendingLedger implements PendingLedger {
   /** Real-time shipping sink (insider-tamper mitigation); null when unwired. */
   private readonly onAppend: AppendSink | null;
 
+  // -- the incrementally-maintained OPEN-PENDING index (the perf fix) ---------
+  //
+  // The PRE-FIX shape rebuilt this from scratch — two full passes over `this.chain`
+  // — on EVERY `listPending()`, EVERY rate-limited `appendPending()`, and EVERY
+  // `approve()`. That is the hot write/dispute path the audit named: a deferred
+  // adjudication ALWAYS supplies `opts` (api.ts), so every disputed write scaled
+  // with total ledger history. These three structures are updated INCREMENTALLY,
+  // exclusively inside `append()` (the chain's single mutation point), so a read
+  // never re-derives them from the chain:
+  //   - `approvedCsids`  — csids that have EVER had an APPROVAL recorded. Once a
+  //     csid is added it is NEVER removed — mirrors the old full-scan's `approved`
+  //     set, which was built by walking the WHOLE chain (so a csid stays
+  //     permanently "closed" even against a PENDING appended after the approval —
+  //     the exact semantics a re-open, which always mints a FRESH csid via a new
+  //     adjudication, never collides with).
+  //   - `openPendingList` — every currently-open PENDING LedgerRecord, in append
+  //     order, sized to the CURRENT open-dispute count (not total history).
+  //   - `latestOpenByCsid` — csid -> its most recent OPEN pending payload, for O(1)
+  //     `openPendingFor` point lookups (mirrors the old scan's "last PENDING seen
+  //     before any APPROVAL" walk).
+  private readonly approvedCsids = new Set<string>();
+  private readonly openPendingList: LedgerRecord[] = [];
+  private readonly latestOpenByCsid = new Map<string, PendingPayload>();
+
   constructor(opts: {
     contentBlind: boolean;
     reputation: ReputationLedger | null;
@@ -835,7 +859,8 @@ class InMemoryPendingLedger implements PendingLedger {
 
     // OD-2 [horn rate-limiting]: dedup + per-source cap. Skipped ENTIRELY when opts is
     // omitted (back-compat: exactly today's unconditional append). On a duplicate /
-    // cap-hit, return the existing OPEN record WITHOUT advancing the chain.
+    // cap-hit, return the existing OPEN record WITHOUT advancing the chain. Reads the
+    // INCREMENTAL index (O(open count)), never the full chain.
     if (opts !== undefined) {
       const limited = hornRateLimitDecision(this.openPendingRecords(), payload, opts);
       if (limited !== null) return limited;
@@ -848,20 +873,10 @@ class InMemoryPendingLedger implements PendingLedger {
     return this.append("MUTATION", payload, signer);
   }
 
-  /** The OPEN PENDING records (a PENDING with no later APPROVAL) — the OD-2 scan set. */
+  /** The OPEN PENDING records (a PENDING with no later APPROVAL) — the OD-2 scan set.
+   *  O(1): reads the incrementally-maintained index, never re-scans the chain. */
   private openPendingRecords(): LedgerRecord[] {
-    const approved = new Set<string>();
-    for (const r of this.chain) {
-      if (r.kind === "APPROVAL") {
-        approved.add(String((r.payload as ApprovalPayload).contradictionSetId));
-      }
-    }
-    const out: LedgerRecord[] = [];
-    for (const r of this.chain) {
-      if (r.kind !== "PENDING") continue;
-      if (!approved.has(String((r.payload as PendingPayload).contradictionSetId))) out.push(r);
-    }
-    return out;
+    return this.openPendingList;
   }
 
   listPending(): readonly PendingPayload[] {
@@ -996,30 +1011,19 @@ class InMemoryPendingLedger implements PendingLedger {
 
   // -- internals ------------------------------------------------------------
 
-  /** The open PENDING payload for a dispute, or null if unknown / already approved. */
+  /** The open PENDING payload for a dispute, or null if unknown / already approved.
+   *  O(1): reads the incrementally-maintained index, never re-scans the chain. */
   private openPendingFor(contradictionSetId: ContradictionSetId): PendingPayload | null {
-    let pending: PendingPayload | null = null;
-    for (const r of this.chain) {
-      if (
-        r.kind === "PENDING" &&
-        (r.payload as PendingPayload).contradictionSetId === contradictionSetId
-      ) {
-        pending = r.payload as PendingPayload;
-      }
-      if (
-        r.kind === "APPROVAL" &&
-        (r.payload as ApprovalPayload).contradictionSetId === contradictionSetId
-      ) {
-        return null; // already resolved
-      }
-    }
-    return pending;
+    const csid = String(contradictionSetId);
+    if (this.approvedCsids.has(csid)) return null; // already resolved
+    return this.latestOpenByCsid.get(csid) ?? null;
   }
 
   /**
    * Append one checksum-chained record. Computes the chain link + canonical hash
-   * and pushes it. The single mutation point of the chain. `signer` is the
-   * ASSERTED author id committed into the checksum.
+   * and pushes it. The single mutation point of the chain — and, correspondingly,
+   * the single mutation point of the incremental open-PENDING index below. `signer`
+   * is the ASSERTED author id committed into the checksum.
    */
   private append(
     kind: LedgerRecordKind,
@@ -1046,6 +1050,30 @@ class InMemoryPendingLedger implements PendingLedger {
     // direction. Never reorder these two lines.
     this.onAppend?.(record);
     this.chain.push(record);
+
+    // Maintain the incremental open-PENDING index (add on a fresh PENDING, remove
+    // on a resolving APPROVAL) — see the field doc comment above for the exact
+    // semantics this reproduces from the old O(n) full-chain scan.
+    if (kind === "PENDING") {
+      const csid = String((payload as PendingPayload).contradictionSetId);
+      if (!this.approvedCsids.has(csid)) {
+        this.openPendingList.push(record);
+        this.latestOpenByCsid.set(csid, payload as PendingPayload);
+      }
+    } else if (kind === "APPROVAL") {
+      const csid = String((payload as ApprovalPayload).contradictionSetId);
+      this.approvedCsids.add(csid);
+      this.latestOpenByCsid.delete(csid);
+      if (this.openPendingList.length > 0) {
+        for (let i = this.openPendingList.length - 1; i >= 0; i--) {
+          const r = this.openPendingList[i]!;
+          if (String((r.payload as PendingPayload).contradictionSetId) === csid) {
+            this.openPendingList.splice(i, 1);
+          }
+        }
+      }
+    }
+
     return record;
   }
 }
@@ -1141,6 +1169,17 @@ class SqlitePendingLedgerImpl implements SqlitePendingLedger {
   readonly #countRecords;
   readonly #lastRecord;
 
+  // -- the incrementally-maintained OPEN-PENDING index (the perf fix) ---------
+  // Same shape + semantics as `InMemoryPendingLedger`'s (see its field doc
+  // comment): built ONCE from the persisted chain at construction (unavoidable —
+  // an existing database's history must be read at least once to know current
+  // state), then updated INCREMENTALLY inside `#append()` so `listPending()` /
+  // the OD-2 rate-limit scan / `approve()`'s dispute lookup never re-read the
+  // whole `ratification_records` table again.
+  readonly #approvedCsids = new Set<string>();
+  readonly #openPendingList: LedgerRecord[] = [];
+  readonly #latestOpenByCsid = new Map<string, PendingPayload>();
+
   constructor(opts: {
     db: DatabaseSyncType;
     ownsDb: boolean;
@@ -1181,6 +1220,13 @@ class SqlitePendingLedgerImpl implements SqlitePendingLedger {
     this.#lastRecord = this.#db.prepare(
       "SELECT json FROM ratification_records ORDER BY seq DESC LIMIT 1",
     );
+
+    // ONE-TIME index rebuild from whatever this database already holds (empty for
+    // a fresh db; a full pass for a reopened one — the same one-time cost class as
+    // the migration ladder just above, paid at OPEN time, never per query).
+    for (const r of this.#chain()) {
+      this.#indexAppendedRecord(r.kind, r.payload, r);
+    }
   }
 
   #parse(json: string): LedgerRecord {
@@ -1219,21 +1265,43 @@ class SqlitePendingLedgerImpl implements SqlitePendingLedger {
     return this.#append("MUTATION", payload, signer);
   }
 
-  /** The OPEN PENDING records (a PENDING with no later APPROVAL) — the OD-2 scan set. */
+  /** The OPEN PENDING records (a PENDING with no later APPROVAL) — the OD-2 scan set.
+   *  O(1): reads the incrementally-maintained index, never re-reads the table. */
   #openPendingRecords(): LedgerRecord[] {
-    const chain = this.#chain();
-    const approved = new Set<string>();
-    for (const r of chain) {
-      if (r.kind === "APPROVAL") {
-        approved.add(String((r.payload as ApprovalPayload).contradictionSetId));
+    return this.#openPendingList;
+  }
+
+  /**
+   * Maintain the incremental open-PENDING index — add on a fresh PENDING, remove
+   * on a resolving APPROVAL — exactly reproducing the semantics the old two-pass
+   * full-table scan computed from scratch on every call (see the field doc comment
+   * on `#approvedCsids` et al.). Called both at construction (once, per persisted
+   * row) and from `#append()` (once, per new row).
+   */
+  #indexAppendedRecord(
+    kind: LedgerRecordKind,
+    payload: PendingPayload | ApprovalPayload | MutationPayload,
+    record: LedgerRecord,
+  ): void {
+    if (kind === "PENDING") {
+      const csid = String((payload as PendingPayload).contradictionSetId);
+      if (!this.#approvedCsids.has(csid)) {
+        this.#openPendingList.push(record);
+        this.#latestOpenByCsid.set(csid, payload as PendingPayload);
+      }
+    } else if (kind === "APPROVAL") {
+      const csid = String((payload as ApprovalPayload).contradictionSetId);
+      this.#approvedCsids.add(csid);
+      this.#latestOpenByCsid.delete(csid);
+      if (this.#openPendingList.length > 0) {
+        for (let i = this.#openPendingList.length - 1; i >= 0; i--) {
+          const r = this.#openPendingList[i]!;
+          if (String((r.payload as PendingPayload).contradictionSetId) === csid) {
+            this.#openPendingList.splice(i, 1);
+          }
+        }
       }
     }
-    const out: LedgerRecord[] = [];
-    for (const r of chain) {
-      if (r.kind !== "PENDING") continue;
-      if (!approved.has(String((r.payload as PendingPayload).contradictionSetId))) out.push(r);
-    }
-    return out;
   }
 
   listPending(): readonly PendingPayload[] {
@@ -1344,23 +1412,11 @@ class SqlitePendingLedgerImpl implements SqlitePendingLedger {
 
   // -- internals ------------------------------------------------------------
 
+  /** O(1): reads the incrementally-maintained index, never re-reads the table. */
   #openPendingFor(contradictionSetId: ContradictionSetId): PendingPayload | null {
-    let pending: PendingPayload | null = null;
-    for (const r of this.#chain()) {
-      if (
-        r.kind === "PENDING" &&
-        (r.payload as PendingPayload).contradictionSetId === contradictionSetId
-      ) {
-        pending = r.payload as PendingPayload;
-      }
-      if (
-        r.kind === "APPROVAL" &&
-        (r.payload as ApprovalPayload).contradictionSetId === contradictionSetId
-      ) {
-        return null;
-      }
-    }
-    return pending;
+    const csid = String(contradictionSetId);
+    if (this.#approvedCsids.has(csid)) return null;
+    return this.#latestOpenByCsid.get(csid) ?? null;
   }
 
   /**
@@ -1399,6 +1455,9 @@ class SqlitePendingLedgerImpl implements SqlitePendingLedger {
     // direction. Never reorder these two lines.
     this.#onAppend?.(record);
     this.#insertRecord.run(seq, JSON.stringify(record));
+    // Index AFTER the row is durably inserted: a throwing sink or a failed insert
+    // aborts the append with the index left untouched too (fail-closed parity).
+    this.#indexAppendedRecord(kind, payload, record);
     return record;
   }
 
