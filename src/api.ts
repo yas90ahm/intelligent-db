@@ -1701,15 +1701,24 @@ class IntelligentDbImpl implements IntelligentDb {
    * Per-VALUE (requires same `content_hash`) — corroboration arrives BOTH as `ratify`
    * appending an external root AND as separate agreeing strands; the old single-strand
    * `winner.provenance` read under-counted the latter.
+   *
+   * Wave-2 [ratify-double-agreement-scan]: accepts an OPTIONAL pre-computed
+   * `agreementSet` (the identical `#deriveAgreementSet(target)` this method would
+   * otherwise derive itself) so a caller that already needed that O(entity-strand-
+   * count) scan for its OWN purposes (e.g. `ratify`'s recorded corroborator list,
+   * `explain`'s `agreementStrandIds`) can compute it ONCE and hand it in here,
+   * rather than this method silently re-deriving the identical set a second time
+   * in the same call. Omitted (every pre-existing caller) ⇒ derives it itself,
+   * byte-identical to before.
    */
-  #R(target: Strand | null): number {
+  #R(target: Strand | null, agreementSet?: readonly StrandId[]): number {
     if (target === null) return 0; // fail-closed
     const byRootId = new Map<ProvenanceRootId, ProvenanceRoot>();
     const absorb = (roots: readonly ProvenanceRoot[]): void => {
       for (const r of roots) if (!byRootId.has(r.rootId)) byRootId.set(r.rootId, r);
     };
     absorb(target.provenance);
-    for (const sid of this.#deriveAgreementSet(target)) {
+    for (const sid of agreementSet ?? this.#deriveAgreementSet(target)) {
       const s = this.#store.getStrand(sid);
       if (s !== null) absorb(s.provenance);
     }
@@ -2147,19 +2156,23 @@ class IntelligentDbImpl implements IntelligentDb {
     // corroboration ledger is wired AND α actually moved (never guessed/coincidental).
     if (this.#reputation !== null) {
       const beforeAlpha = this.#reputation.stateOf(canonicalStamp.source_id)?.alpha ?? 1;
+      // ENGINE-OWNED EVIDENCE (OD-8): the corroborating set is DERIVED from the engine's
+      // own agreement index (same entity + content_hash + LIVE), never supplied by the
+      // caller. The CorroborationEvent ledger field is unchanged — only its source is.
+      //
+      // Wave-2 [ratify-double-agreement-scan]: computed ONCE and handed into `#R`
+      // below (it used to re-derive the IDENTICAL O(entity-strand-count) set a
+      // second time internally — same target strand, same result, wasted scan).
+      const corroborating = this.#deriveAgreementSet(strand);
       // M2 (BATCH 4) — supply the engine-owned MIS corroboration DEPTH so the ledger can
       // raise its NON-DECAYING depth-floor MONOTONE-MAX. `#R` is the SAME shared agreement
       // basis (OD-6): the count of mutually anchor-INDEPENDENT roots backing this value
       // (strand's roots ∪ agreeing LIVE strands' roots, via `independentRootCount`). The
       // model never witnesses — the ledger only stores the max it is handed. A same-class
       // (depth-1) flood passes depth 1 ⇒ `floorMass(1)=0` ⇒ buys no floor.
-      const depth = this.#R(strand);
+      const depth = this.#R(strand, corroborating);
       const after = this.#reputation.ratify(canonicalStamp.source_id, at, undefined, depth);
       const deltaAlpha = after.alpha - beforeAlpha;
-      // ENGINE-OWNED EVIDENCE (OD-8): the corroborating set is DERIVED from the engine's
-      // own agreement index (same entity + content_hash + LIVE), never supplied by the
-      // caller. The CorroborationEvent ledger field is unchanged — only its source is.
-      const corroborating = this.#deriveAgreementSet(strand);
       const namedCorroborators = corroborating.length > 0;
       let recorded = false;
       if (
@@ -3000,8 +3013,14 @@ class IntelligentDbImpl implements IntelligentDb {
 
     // --- the gates' OWN numbers (OD-6/OD-8): #R + a SORTED COPY of the shared
     // agreement basis. The shared helpers' return order is untouched.
-    const independentRootCount = this.#R(strand);
-    const agreementStrandIds = [...this.#deriveAgreementSet(strand)].sort((a, b) =>
+    //
+    // Wave-2 [ratify-double-agreement-scan]: computed ONCE and handed into `#R`
+    // (the same redundant-double-scan pattern the audit named in `ratify`, found
+    // here too — same target strand, same O(entity-strand-count) set, no reason
+    // to derive it twice).
+    const agreementSet = this.#deriveAgreementSet(strand);
+    const independentRootCount = this.#R(strand, agreementSet);
+    const agreementStrandIds = [...agreementSet].sort((a, b) =>
       compareStrings(String(a), String(b)),
     );
 
