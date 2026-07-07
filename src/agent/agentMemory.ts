@@ -505,71 +505,91 @@ export function createAgentMemory(opts?: AgentMemoryOptions): AgentMemory {
   let sharedHandle: SharedSqliteHandle | null = null;
   let ownedDb: DatabaseSyncType | null = null;
   let store: StrandStore;
-
-  if (opts?.dbPath !== undefined) {
-    sharedHandle = createSharedSqliteHandle(opts.dbPath);
-    ownedDb = sharedHandle.db;
-    store = createSqliteStore({ db: ownedDb });
-  } else {
-    store = createMemoryStore();
-  }
-
-  // ONE registry instance serves both the sameness and independence ports, so
-  // register/has and anchorsOf/independentSources read from the same book.
-  const trust: TrustRegistry = createTrustRegistry(opts?.trust);
-
-  // DURABLE reputation ledger sharing the owned handle when `dbPath` is given
-  // (so the winner-ratify / loser-contradict moves `approve()`/`adjudicate()`
-  // drive ride the SAME transaction as the store + ledger writes); the
-  // in-memory path keeps the original constant-0 stub — it was never wired to
-  // anything durable to begin with, and this facade's identity/reputation
-  // wiring is otherwise unchanged.
+  let trust: TrustRegistry;
   let reputationLedger: ReputationLedger | null = null;
-  let reputationPort: ReputationLedgerPort;
-  if (ownedDb !== null) {
-    const repCapOf = (s: SourceId): Unit => repCapFor([...trust.anchorsOf(s)]);
-    reputationLedger = createSqliteReputationLedger(repCapOf, { db: ownedDb });
-    reputationPort = { scoreOf: (s: SourceId): Unit => reputationLedger!.scoreOf(s) };
-  } else {
-    reputationPort = makeReputationLedgerPort();
+  let identity: SourceIdentityLayer;
+  let ledger: PendingLedger;
+  let ratification: RatificationDeps;
+  let engine: IntelligentDb;
+  let resolver: CueResolver;
+
+  // RE-AUDIT FIX (durability lane, MEDIUM): the multi-step shared-handle
+  // construction sequence below (open handle -> store -> reputation ledger ->
+  // pending ledger, each of which runs the migration ladder and/or a WAL
+  // verification pass) can throw AFTER `sharedHandle` has already opened
+  // successfully (the reproduced trigger: a pre-existing db file stamped with a
+  // schema newer than this build knows, `UnknownFutureSchemaError`, surfacing
+  // from `createSqliteStore`'s migration step). `createSharedSqliteHandle`
+  // itself already closes on its OWN failure (WAL verification); what was
+  // missing is the SAME discipline across every step built on top of it —
+  // `store/sqliteStore.ts`'s OWNED-path `createSqliteStore(path)` factory has
+  // had exactly this try/catch all along (see its doc), but the facade's newer
+  // multi-step shared-handle recipe never carried it forward, leaking the
+  // handle (and the OS-level file lock that comes with it) on every such
+  // throw. Any failure anywhere in this block closes `sharedHandle` (a no-op
+  // when `dbPath` was never given, since it stays `null`) before rethrowing.
+  try {
+    if (opts?.dbPath !== undefined) {
+      sharedHandle = createSharedSqliteHandle(opts.dbPath);
+      ownedDb = sharedHandle.db;
+      store = createSqliteStore({ db: ownedDb });
+    } else {
+      store = createMemoryStore();
+    }
+
+    // ONE registry instance serves both the sameness and independence ports, so
+    // register/has and anchorsOf/independentSources read from the same book.
+    trust = createTrustRegistry(opts?.trust);
+
+    // DURABLE reputation ledger sharing the owned handle when `dbPath` is given
+    // (so the winner-ratify / loser-contradict moves `approve()`/`adjudicate()`
+    // drive ride the SAME transaction as the store + ledger writes); the
+    // in-memory path keeps the original constant-0 stub — it was never wired to
+    // anything durable to begin with, and this facade's identity/reputation
+    // wiring is otherwise unchanged.
+    let reputationPort: ReputationLedgerPort;
+    if (ownedDb !== null) {
+      const repCapOf = (s: SourceId): Unit => repCapFor([...trust.anchorsOf(s)]);
+      reputationLedger = createSqliteReputationLedger(repCapOf, { db: ownedDb });
+      reputationPort = { scoreOf: (s: SourceId): Unit => reputationLedger!.scoreOf(s) };
+    } else {
+      reputationPort = makeReputationLedgerPort();
+    }
+
+    identity = createSourceIdentityLayer({
+      sources: trust,
+      anchors: trust,
+      reputation: reputationPort,
+      // stake omitted: the retired pillar defaults to the constant-zero port.
+    });
+
+    // PHASE 4 — WIRE THE DISPUTE HORN. Without a ratification ledger the engine
+    // REFUSES to defer (it throws rather than silently drop an independent
+    // dispute), which made the horn unreachable from the facade. The facade now
+    // wires the checksum-chained pending ledger so a genuine independent dispute
+    // lands as an open PENDING the owner can answer via pendingQuestions() /
+    // resolvePending(). DURABLE + sharing `ownedDb` when `dbPath` is given (see
+    // the atomicity doc above); in-memory otherwise (the fast default — an open
+    // pending is RE-DERIVABLE by re-running adjudicate over the same LIVE
+    // members, so losing it on process exit is harmless there).
+    const onAppend = opts?.onLedgerAppend !== undefined ? { onAppend: opts.onLedgerAppend } : {};
+    ledger =
+      ownedDb !== null
+        ? createSqlitePendingLedger({ db: ownedDb, reputation: reputationLedger, ...onAppend })
+        : createPendingLedger(onAppend);
+    ratification = {
+      ledger,
+      // The engine's own voice on system-authored PENDING/MUTATION records —
+      // asserted attribution only, deliberately NOT a registered witness (the
+      // system must never count as a source of truth about claims).
+      systemSource: sourceIdFor("iddb:system", "agent-memory"),
+    };
+    engine = createIntelligentDb(store, identity, null, reputationLedger, ratification);
+    resolver = createLexicalCueResolver(store, opts?.resolver);
+  } catch (err) {
+    sharedHandle?.closeAll();
+    throw err;
   }
-
-  const identity: SourceIdentityLayer = createSourceIdentityLayer({
-    sources: trust,
-    anchors: trust,
-    reputation: reputationPort,
-    // stake omitted: the retired pillar defaults to the constant-zero port.
-  });
-
-  // PHASE 4 — WIRE THE DISPUTE HORN. Without a ratification ledger the engine
-  // REFUSES to defer (it throws rather than silently drop an independent
-  // dispute), which made the horn unreachable from the facade. The facade now
-  // wires the checksum-chained pending ledger so a genuine independent dispute
-  // lands as an open PENDING the owner can answer via pendingQuestions() /
-  // resolvePending(). DURABLE + sharing `ownedDb` when `dbPath` is given (see
-  // the atomicity doc above); in-memory otherwise (the fast default — an open
-  // pending is RE-DERIVABLE by re-running adjudicate over the same LIVE
-  // members, so losing it on process exit is harmless there).
-  const onAppend = opts?.onLedgerAppend !== undefined ? { onAppend: opts.onLedgerAppend } : {};
-  const ledger: PendingLedger =
-    ownedDb !== null
-      ? createSqlitePendingLedger({ db: ownedDb, reputation: reputationLedger, ...onAppend })
-      : createPendingLedger(onAppend);
-  const ratification: RatificationDeps = {
-    ledger,
-    // The engine's own voice on system-authored PENDING/MUTATION records —
-    // asserted attribution only, deliberately NOT a registered witness (the
-    // system must never count as a source of truth about claims).
-    systemSource: sourceIdFor("iddb:system", "agent-memory"),
-  };
-  const engine: IntelligentDb = createIntelligentDb(
-    store,
-    identity,
-    null,
-    reputationLedger,
-    ratification,
-  );
-  const resolver: CueResolver = createLexicalCueResolver(store, opts?.resolver);
 
   // AUTO-PROVISION the default single-agent source: the deployment OWNER (the
   // PERSONAL preset's ground truth), registered once, its stamp cached. The
