@@ -85,8 +85,13 @@ npm run build
 import { createAgentMemory } from "./dist/index.js";
 
 // Zero configuration: the owner is the trust root. Pass { dbPath } for a durable
-// SQLite/WAL store instead of the in-memory default.
-const memory = createAgentMemory();
+// SQLite/WAL store instead of the in-memory default. `trust.verifiedTenantDomains`
+// configures one SSO tenant as DOMAIN-grade (0.35) — a genuinely independent,
+// trusted witness for the dispute below (the swappable trust root — see
+// "Source-Identity Layer" in CLAUDE.md).
+const memory = createAgentMemory({
+  trust: { verifiedTenantDomains: { "tenant:acme": "acme.example" } },
+});
 
 // Remember: files a provenance-rooted strand, not a row in a table.
 const { id: ownerFactId } = memory.remember({
@@ -111,9 +116,27 @@ memory.remember({
   origin: { kind: "web", resourceId: "https://untrusted.example/post" },
 });
 
-// A genuinely independent, trusted source disputes it instead: two LIVE, independent
-// claims. The engine refuses to pick a winner by majority or arrival order — it
-// defers to a human. The dispute horn surfaces as plain data:
+// A genuinely independent, TRUSTED source disputes it instead: alice is a member
+// of the tenant CONFIGURED above, so her claim clears quarantine and lands LIVE —
+// two LIVE, independent claims. adjudicate() runs the check; with neither side
+// holding a decisive reputation margin, the engine refuses to pick a winner by
+// majority or arrival order — it defers to a human instead:
+const alice = memory.trust.registerSsoMember({
+  issuer: "https://idp.acme.example",
+  subject: "alice",
+  tenantId: "tenant:acme",
+  verifiedCustomDomain: "acme.example",
+  label: "alice@acme",
+});
+memory.remember({
+  text: "the deploy target is stage-cluster-2",
+  entity: "entity:deploy",
+  attribute: "deploy#target",
+  source: { sourceId: alice.sourceId },
+});
+memory.adjudicate("deploy#target");
+
+// The dispute horn surfaces as plain data:
 const disputes = memory.pendingQuestions();
 if (disputes.length > 0) {
   const [question] = disputes;
