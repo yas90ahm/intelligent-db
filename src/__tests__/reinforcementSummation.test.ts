@@ -23,6 +23,9 @@
  *   5. THE GEOMETRIC BOUND: total dispensed (lit) energy across the whole walk
  *      never exceeds `Σ seed energy / (1 - gamma)` — the infinite gamma-
  *      geometric series ceiling — in either mode.
+ *   6. Wave-3 `summation-double-count`: a strand reachable from the SAME pop via
+ *      BOTH a materialized edge AND the derived shared-entity (virtual sibling)
+ *      channel is delivered to exactly ONCE per pop, not twice.
  */
 
 import { describe, expect, it } from "vitest";
@@ -281,5 +284,39 @@ describe("reinforcement-by-summation (Phase-1 retrieval spec §4a)", () => {
       expect(totalDispensed).toBeLessThanOrEqual(bound);
       expect(result.halt.reason).not.toBe(ReasonCode.TRUNCATED);
     }
+  });
+
+  it("Wave-3 [summation-double-count]: a target reachable via BOTH a materialized edge AND the virtual-sibling channel from the SAME pop is delivered to exactly ONCE", () => {
+    const store = createMemoryStore();
+    const a = asStrandId("strand:a");
+    const b = asStrandId("strand:b");
+    // A and B share ONE entity (making B a virtual sibling of A) AND carry a
+    // real materialized edge A->B — the exact double-reachability shape the
+    // finding describes.
+    const entity = "entity:shared" as EntityId;
+    store.putStrand(bareStrand(a, entity));
+    store.putStrand(bareStrand(b, entity));
+    wireEdge(store, a, b);
+    store.recomputeOutWeightSum(a);
+
+    const config: WalkConfig = { ...DEFAULT_WALK_CONFIG, reinforcement: "summation" };
+    const result = activationWalk(
+      store,
+      [{ strandId: a, energy: 1 }],
+      config,
+      createHaltingController(config),
+    );
+
+    const bLit = result.lit.find((l) => l.strandId === b)?.activation ?? 0;
+
+    // Both channels compute the IDENTICAL per-channel delivery here (materialized
+    // edge weight 1, virtual-sibling weight 1, one sibling ⇒ Σ_eff = 2 either
+    // way): childEnergy = 1 * (1/2) * gamma = 0.3. A double-counting bug sums
+    // BOTH deliveries (0.6, which the clamp — 2x the max single delivery, 0.6 —
+    // would not even catch, making the bug invisible to the existing CLAMP
+    // test); the fix records exactly ONE delivery (0.3).
+    const perChannelDelivery = 1 * 0.5 * GAMMA;
+    expect(bLit).toBeCloseTo(perChannelDelivery, 10);
+    expect(bLit).toBeLessThan(2 * perChannelDelivery);
   });
 });

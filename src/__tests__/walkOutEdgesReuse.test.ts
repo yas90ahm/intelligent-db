@@ -183,17 +183,23 @@ describe("walk-redundant-outedges-refetch: outEdges fetched at most once per str
     outEdgesSpy.mockRestore();
     neighborsSpy.mockRestore();
 
-    // 3) PARITY: the walk result is exactly what the pre-fix full-fetch code
-    //    would have produced. Seed's out-edge Σw (materializedOutSum) includes
-    //    BOTH out-edges (the materialized a-edge AND the bridge edge — the
-    //    walk sums ALL out-edges' weight for the share-normalization
-    //    denominator, then the neighbor-spread loop separately SKIPS bridges),
-    //    so seed->a's share is 1/2, not 1/1.
+    // 3) PARITY: the walk result matches the FETCH-COUNT fix's numerics — which
+    //    (as of Wave-3 `bridge-weight-in-denominator`) also EXCLUDES the bridge
+    //    edge from seed's local share-normalization denominator: a bridge's
+    //    weight is never paid out locally (the neighbor-spread loop separately
+    //    SKIPS bridges — they are funded ONLY from the phase-2 sub-budget), so
+    //    folding it into the denominator anyway used to dilute seed->a's share
+    //    to 1/2 for a payout that never happened locally. Excluded, seed->a is
+    //    the ONLY thing in the local denominator and gets the FULL share (1/1).
+    //    This numeric change is orthogonal to THIS test's own subject (fetch
+    //    COUNT, not fetch VALUE) — outEdges is still fetched at most once per
+    //    strand either way; only the arithmetic done with the fetched rows
+    //    changed.
     const gamma = DEFAULT_WALK_CONFIG.gamma;
     const byId = new Map(result.lit.map((l) => [String(l.strandId), l.activation]));
     expect(byId.get(String(seed.id))).toBe(1);
-    expect(byId.get(String(a.id))).toBeCloseTo(0.5 * gamma, 12);
-    expect(byId.get(String(c.id))).toBeCloseTo(0.5 * gamma * gamma, 12);
+    expect(byId.get(String(a.id))).toBeCloseTo(gamma, 12);
+    expect(byId.get(String(c.id))).toBeCloseTo(gamma * gamma, 12);
     // The bridge sweep genuinely crosses the one owed bridge: far is lit at
     // exactly the documented crossing seed energy (config.gamma).
     expect(byId.get(String(far.id))).toBeCloseTo(gamma, 12);

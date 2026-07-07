@@ -335,6 +335,26 @@ const SIBLING_EDGE_WEIGHT = 1;
 const VIRTUAL_SIBLING_FANOUT_CAP = 32;
 
 /**
+ * Validate that an energy value is usable by the walk's monotone-non-increasing
+ * activation math: FINITE (never `NaN`/`±Infinity`) and strictly positive.
+ *
+ * Wave-3 `seed-energy-unvalidated`: the walk's existing "weightless" prune guard
+ * (`if (childEnergy <= 0) continue;`) silently lets a non-finite value through —
+ * `NaN <= 0` and `Infinity <= 0` both evaluate to `false`, so a `NaN` seed energy
+ * (a caller bug) or a `NaN`/`Infinity` edge weight (corrupted store data) used to
+ * sail straight past the guard and light up a strand at an un-orderable energy
+ * (`NaN` compares `false` against everything in {@link frontierComparator}, and a
+ * lit `NaN`/`Infinity` activation is nonsensical to a caller). Every place this
+ * walk gates on "is this energy usable" now calls this ONE predicate instead of
+ * a bare `<= 0`/`> 0` comparison, so every such value — seed energy, a
+ * materialized-edge child, or a virtual-sibling child — is rejected (treated
+ * exactly like the pre-existing "weightless" prune) the same way.
+ */
+function isPositiveFiniteEnergy(x: number): boolean {
+  return Number.isFinite(x) && x > 0;
+}
+
+/**
  * Run a share-normalized best-first spreading-activation walk from `seeds`.
  *
  * THE LOOP the body must implement (CLAUDE.md "Share-normalized best-first walk"):
@@ -479,7 +499,11 @@ export function activationWalk(
       unresolvedSeeds.push(seed.strandId);
       continue;
     }
-    seedsResolved += 1;
+    seedsResolved += 1; // the strand itself DID resolve, regardless of energy validity
+    // Wave-3 [seed-energy-unvalidated]: a NaN/Infinity/non-positive seed energy
+    // (caller bug) is pruned here, at the boundary, exactly like any other
+    // weightless delivery — never pushed onto the frontier, never recorded.
+    if (!isPositiveFiniteEnergy(seed.energy)) continue;
     recordDelivery(seed.strandId, seed.energy);
     frontier.push({
       strandId: seed.strandId,
@@ -566,13 +590,42 @@ export function activationWalk(
     // three (materializedOutSum + `store.neighbors` + the bridge sweep's
     // `litBridgesFrom`, each independently re-querying the SAME rows on the
     // SQLite backend).
+    // Wave-3 [bridge-weight-in-denominator]: CROSS_WEB_BRIDGE edges are excluded
+    // from the sum. A bridge's local SHARE is never paid out here (the loop below
+    // skips it — bridges are funded ONLY from the separate phase-2 sub-budget), so
+    // folding its weight into the LOCAL denominator would dilute every other local
+    // edge's share for a payout that never happens locally: Σ(paid local shares)
+    // would sum to strictly less than 1 whenever a bridge is present, silently
+    // "withholding" energy rather than spreading it to the edges that actually
+    // receive it. Excluding it here means the local shares are computed over
+    // exactly the edges (+ virtual siblings) that can actually receive them.
+    // Wave-3 [seed-energy-unvalidated]: a non-finite `e.w` (corrupted store data)
+    // is excluded from the sum too, rather than NaN-poisoning every OTHER edge's
+    // share via a NaN denominator — it is still individually pruned below via
+    // `isPositiveFiniteEnergy(childEnergy)` when its own share is computed.
     let materializedOutSum = 0;
     const outEdges = store.outEdges(cand.strandId);
-    for (const e of outEdges) materializedOutSum += e.w;
+    for (const e of outEdges) {
+      if (e.edgeType === EdgeType.CROSS_WEB_BRIDGE) continue;
+      if (isPositiveFiniteEnergy(e.w)) materializedOutSum += e.w;
+    }
     outEdgesCache.set(cand.strandId, outEdges);
 
     const effectiveOutSum =
       materializedOutSum + virtualSiblingCount * SIBLING_EDGE_WEIGHT;
+
+    // Wave-3 [summation-double-count]: strands this POP already delivered energy
+    // to via a MATERIALIZED edge (below) — checked by the virtual-sibling loop so
+    // a target reachable via BOTH channels from this SAME pop (a materialized
+    // edge that happens to also connect two same-entity strands) is delivered to
+    // exactly ONCE per pop, not twice. In "dominance" mode this was already
+    // harmless (the `fired` set + best-first keeps only the max), but
+    // "summation" mode SUMS every recorded delivery, so without this a single
+    // pop could double-count one logical delivery as two. Scoped to this pop
+    // only (redeclared each iteration) — a DIFFERENT pop reaching the same
+    // target via a different channel is a genuinely separate delivery and must
+    // still be recorded.
+    const deliveredThisPop = new Set<StrandId>();
 
     // Spread share-normalized, γ-decayed energy to each MATERIALIZED neighbor:
     //   child = parent * (edge.w / Σ_eff) * γ
@@ -601,7 +654,12 @@ export function activationWalk(
       if (alreadyFired && reinforcement === "dominance") continue;
       const share = effectiveOutSum > 0 ? e.w / effectiveOutSum : 0;
       const childEnergy = cand.energy * share * config.gamma;
-      if (childEnergy <= 0) continue; // weightless / hub-starved thread
+      // Wave-3 [seed-energy-unvalidated]: was `childEnergy <= 0` — NaN (a
+      // poisoned parent/edge energy) compares false against `<= 0` and used to
+      // sail straight through as a "weightless" thread. Now pruned exactly like
+      // any other unusable delivery.
+      if (!isPositiveFiniteEnergy(childEnergy)) continue;
+      deliveredThisPop.add(e.to); // Wave-3 [summation-double-count]
       recordDelivery(e.to, childEnergy);
       if (alreadyFired) continue; // summation: tracked, but no re-expansion
       frontier.push({
@@ -627,23 +685,37 @@ export function activationWalk(
     // mathematically unchanged — a hot entity's siblings each still get the true
     // `1/K` share; we merely stop enumerating the negligible tail. Per-pop work is
     // thus O(cap), and total read work is O(popCap · cap) — strictly pop-cap-bounded.
-    // A sibling reachable BOTH here AND via a materialized edge (a hand-built
-    // buildWeb web) is de-duplicated by the `fired` set + best-first dominance: it
-    // fires once at the max energy any path delivers (connectivity additive, never
-    // double-counted).
+    // A sibling reachable BOTH here AND via a materialized edge FROM THIS SAME
+    // POP (a hand-built buildWeb web) is de-duplicated by the `fired` set +
+    // best-first dominance for FRONTIER EXPANSION: it fires once at the max
+    // energy any path delivers (connectivity additive, never double-counted).
+    // Wave-3 [summation-double-count]: that de-dup does NOT, by itself, protect
+    // "summation" mode's ENERGY BOOKKEEPING — `recordDelivery` runs unconditionally
+    // for every channel a target is reached through, so without `deliveredThisPop`
+    // (populated by the materialized-edge loop above) a target reachable via BOTH
+    // a real edge AND the virtual-sibling fan from the SAME pop would have its
+    // energy counted TWICE for one logical "this pop reached this target" event.
     if (virtualSiblingCount > 0) {
       const siblingShare =
         effectiveOutSum > 0 ? SIBLING_EDGE_WEIGHT / effectiveOutSum : 0;
       const siblingEnergy = cand.energy * siblingShare * config.gamma;
-      if (siblingEnergy > 0) {
+      // Wave-3 [seed-energy-unvalidated]: was `siblingEnergy > 0` — see the
+      // materialized-edge loop's identical fix above.
+      if (isPositiveFiniteEnergy(siblingEnergy)) {
         let pushed = 0;
         for (const sib of siblings) {
           if (pushed >= VIRTUAL_SIBLING_FANOUT_CAP) break;
           if (sib.id === cand.strandId) continue;
-          // No-op in dominance mode (recordDelivery short-circuits immediately);
-          // in summation mode this is what lets an ALREADY-FIRED sibling's later
-          // delivery still count toward its reported (clamped) activation.
-          recordDelivery(sib.id, siblingEnergy);
+          // No-op in dominance mode (recordDelivery short-circuits immediately
+          // regardless); in summation mode this is what lets an ALREADY-FIRED
+          // sibling's later delivery still count toward its reported (clamped)
+          // activation — UNLESS this exact pop already delivered to it via a
+          // materialized edge (deliveredThisPop), in which case that edge
+          // delivery already accounted for this pop's contribution and the
+          // sibling channel must not double it. Frontier expansion below is
+          // UNCHANGED either way (never gated on deliveredThisPop) — only the
+          // energy bookkeeping is deduplicated.
+          if (!deliveredThisPop.has(sib.id)) recordDelivery(sib.id, siblingEnergy);
           if (fired.has(sib.id)) continue;
           frontier.push({
             strandId: sib.id,
