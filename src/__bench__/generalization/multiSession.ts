@@ -180,6 +180,11 @@ export function ingestSession1(dbPath: string, poisonCount = 8): MultiSessionWor
   const poisonHash = `chash:${attrKey}:${poisonValue}`;
 
   const db: DatabaseSyncType = new DatabaseSync(dbPath);
+  // The OWNER of this fresh shared handle sets WAL before any shared-handle
+  // ledger/store constructor borrows it — `createSqliteReputationLedger`'s and
+  // `createSqlitePendingLedger`'s `{ db }` overloads now VERIFY journal_mode=WAL
+  // and throw `SharedHandleNotWalError` otherwise (Wave-2 wal-verification fix).
+  db.exec("PRAGMA journal_mode=WAL");
 
   const known = new Set<string>();
   const anchorBindings = new Map<string, AnchorBinding[]>();

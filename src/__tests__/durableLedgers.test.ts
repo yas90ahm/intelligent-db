@@ -42,6 +42,7 @@ import {
   FactOrigin,
   Tier,
 } from "../index.js";
+import { SharedHandleNotWalError } from "../store/sqliteStore.js";
 
 import type {
   ApproveContext,
@@ -447,6 +448,11 @@ describe("END-TO-END restart — facts/trust/audit in ONE crash-consistent file"
 
     // --- session 1: one shared handle backs all three ledgers (one db file) ---
     const db1: DatabaseSyncType = new DatabaseSync(path);
+    // The OWNER of this shared handle sets WAL before any shared-handle ledger
+    // constructor borrows it — both `createSqliteReputationLedger`'s and
+    // `createSqlitePendingLedger`'s `{ db }` overloads now VERIFY journal_mode=WAL
+    // and throw `SharedHandleNotWalError` otherwise (Wave-2 wal-verification fix).
+    db1.exec("PRAGMA journal_mode=WAL");
     const rep1 = createSqliteReputationLedger(() => 0.9 as Unit, { db: db1, clock: pinned });
     const corrob1 = createSqliteCorroborationLedger({ db: db1 });
     const ledger1 = createSqlitePendingLedger({ db: db1, reputation: rep1 });
@@ -497,5 +503,73 @@ describe("END-TO-END restart — facts/trust/audit in ONE crash-consistent file"
     expect(ledger2.listPending().length).toBe(0);
 
     db2.close();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// 5. wal-verification follow-ups (Wave-2): the reputation ledger and the
+//    pending (ratification) ledger's `{ db }`-overload constructors now VERIFY
+//    (never set) that a BORROWED shared handle is already in WAL journal mode —
+//    the SAME check `store/sqliteStore.ts` gained in 1e4df69, previously absent
+//    from these two, so following the documented shared-handle recipe against a
+//    handle whose owner forgot to set WAL silently ran the "one atomic
+//    crash-consistent file" story for TRUST + AUDIT state over a default
+//    rollback journal, with no symptom short of an actual crash losing data.
+// ---------------------------------------------------------------------------
+
+describe("wal-verification follow-ups — shared-handle ledgers verify WAL mode", () => {
+  it("createSqliteReputationLedger({ db }) THROWS SharedHandleNotWalError over a non-WAL shared handle", () => {
+    const path = freshPath("rep-wal-gap");
+    const require = createRequire(import.meta.url);
+    const { DatabaseSync } = require("node:sqlite") as {
+      DatabaseSync: new (p: string) => DatabaseSyncType;
+    };
+    // Deliberately do nothing else: a fresh DatabaseSync defaults to a rollback
+    // journal ("delete"), not WAL — the exact documented shared-handle recipe
+    // followed verbatim, minus the owner's `PRAGMA journal_mode=WAL` step.
+    const handle: DatabaseSyncType = new DatabaseSync(path);
+    track(handle);
+    const mode = handle.prepare("PRAGMA journal_mode").get() as {
+      journal_mode: string;
+    };
+    expect(mode.journal_mode.toLowerCase()).not.toBe("wal");
+
+    expect(() =>
+      createSqliteReputationLedger(() => 0.6 as Unit, { db: handle }),
+    ).toThrow(SharedHandleNotWalError);
+  });
+
+  it("createSqlitePendingLedger({ db }) THROWS SharedHandleNotWalError over a non-WAL shared handle", () => {
+    const path = freshPath("pending-wal-gap");
+    const require = createRequire(import.meta.url);
+    const { DatabaseSync } = require("node:sqlite") as {
+      DatabaseSync: new (p: string) => DatabaseSyncType;
+    };
+    const handle: DatabaseSyncType = new DatabaseSync(path);
+    track(handle);
+    const mode = handle.prepare("PRAGMA journal_mode").get() as {
+      journal_mode: string;
+    };
+    expect(mode.journal_mode.toLowerCase()).not.toBe("wal");
+
+    expect(() => createSqlitePendingLedger({ db: handle })).toThrow(
+      SharedHandleNotWalError,
+    );
+  });
+
+  it("both SUCCEED once the OWNER has set the borrowed handle to WAL mode", () => {
+    const path = freshPath("wal-ok");
+    const require = createRequire(import.meta.url);
+    const { DatabaseSync } = require("node:sqlite") as {
+      DatabaseSync: new (p: string) => DatabaseSyncType;
+    };
+    const handle: DatabaseSyncType = new DatabaseSync(path);
+    track(handle);
+    handle.exec("PRAGMA journal_mode=WAL");
+
+    expect(() =>
+      createSqliteReputationLedger(() => 0.6 as Unit, { db: handle }),
+    ).not.toThrow();
+    expect(() => createSqlitePendingLedger({ db: handle })).not.toThrow();
   });
 });

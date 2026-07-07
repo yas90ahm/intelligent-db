@@ -91,6 +91,7 @@ import type {
 
 import type { ReputationLedger } from "../identity/reputation.js";
 import { runMigrations } from "../store/migrations.js";
+import { assertSharedHandleWal } from "../store/sqliteStore.js";
 
 // ---------------------------------------------------------------------------
 // Record shapes (the VAULT's contents)
@@ -1243,6 +1244,17 @@ class SqlitePendingLedgerImpl implements SqlitePendingLedger {
     if (opts.ownsDb) {
       this.#db.exec("PRAGMA journal_mode=WAL");
       this.#db.exec("PRAGMA synchronous=NORMAL");
+    } else {
+      // BORROWED shared handle: VERIFY (never set) that the owner already put it in
+      // WAL mode — the SAME gap `store/sqliteStore.ts`'s `{ db }` overload closed in
+      // 1e4df69 (`wal-verification follow-ups`, Wave-2). Before this fix, a caller
+      // that constructed this ledger's shared-handle overload FIRST against a fresh
+      // handle (or any handle whose owner forgot to set WAL) got zero verification —
+      // the "one atomic crash-consistent file" story for the AUDIT CHAIN itself
+      // silently ran over a default rollback journal, with no symptom short of an
+      // actual crash losing committed ratification records. Throws
+      // `SharedHandleNotWalError` otherwise.
+      assertSharedHandleWal(this.#db, "createSqlitePendingLedger");
     }
     // SCHEMA MIGRATION LADDER (Phase 2 Durability spec §1) — see store/migrations.ts.
     // Idempotent; safe to run here even if a shared handle already ran it via the

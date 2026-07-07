@@ -131,6 +131,11 @@ function openDb(path: string): DatabaseSyncType {
     DatabaseSync: new (p: string) => DatabaseSyncType;
   };
   const db = new DatabaseSync(path);
+  // The OWNER of this fresh shared handle sets WAL before any shared-handle
+  // ledger constructor borrows it — `createSqlitePendingLedger`'s `{ db }`
+  // overload now VERIFIES journal_mode=WAL and throws `SharedHandleNotWalError`
+  // otherwise (Wave-2 wal-verification fix).
+  db.exec("PRAGMA journal_mode=WAL");
   cleanups.push(() => {
     try {
       db.close();

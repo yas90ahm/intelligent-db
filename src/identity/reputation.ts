@@ -58,6 +58,7 @@ import type { DatabaseSync as DatabaseSyncType } from "node:sqlite";
 import { asEpochMs } from "../core/types.js";
 import type { SourceId, StrandId, EpochMs, Unit } from "../core/types.js";
 import { runMigrations } from "../store/migrations.js";
+import { assertSharedHandleWal } from "../store/sqliteStore.js";
 
 // ---------------------------------------------------------------------------
 // Tunable Beta-model constants (product decision — tune to threat model)
@@ -1040,6 +1041,16 @@ class SqliteReputationLedgerImpl implements SqliteReputationLedger {
     if (ownsDb) {
       this.#db.exec("PRAGMA journal_mode=WAL");
       this.#db.exec("PRAGMA synchronous=NORMAL");
+    } else {
+      // BORROWED shared handle: VERIFY (never set) that the owner already put it in
+      // WAL mode — the SAME gap `store/sqliteStore.ts`'s `{ db }` overload closed in
+      // 1e4df69 (`wal-verification follow-ups`, Wave-2). Before this fix, a caller
+      // that constructed the reputation ledger's shared-handle overload FIRST against
+      // a fresh handle (or against any handle whose owner forgot to set WAL) got zero
+      // verification — the durability story silently ran over a default rollback
+      // journal with no symptom short of an actual crash losing committed reputation
+      // state. Throws `SharedHandleNotWalError` otherwise.
+      assertSharedHandleWal(this.#db, "createSqliteReputationLedger");
     }
     // SCHEMA MIGRATION LADDER (Phase 2 Durability spec §1) — see store/migrations.ts.
     // Idempotent; safe to run here even if a shared handle already ran it via the
