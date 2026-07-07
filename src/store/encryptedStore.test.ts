@@ -57,6 +57,7 @@ import type { StrandStore } from "./StrandStore.js";
 import {
   createEncryptedStore,
   EncryptedStoreIntegrityError,
+  NonceCeilingExceededError,
 } from "./encryptedStore.js";
 
 import { createIntelligentDb, createSourceIdentityLayer } from "../index.js";
@@ -571,6 +572,108 @@ describe("createEncryptedStore — engine drop-in", () => {
       for (const suffix of ["", "-wal", "-shm", "-journal"]) {
         rmSync(dbPath + suffix, { force: true });
       }
+    }
+  });
+});
+
+describe("createEncryptedStore — GCM nonce-volume ceiling (gcm-random-nonce-no-ceiling)", () => {
+  it("allows encryptions up to the configured ceiling, then throws NonceCeilingExceededError and performs no crypto work on the refused call", () => {
+    const store = createEncryptedStore(createMemoryStore(), testKey, {
+      maxEncryptionsPerKey: 3,
+    });
+    store.putStrand(makeStrand("s1", "E1", null));
+    store.putStrand(makeStrand("s2", "E1", null));
+    store.putStrand(makeStrand("s3", "E1", null));
+
+    // The first 3 succeeded (each spent one random nonce); the 4th must be
+    // refused BEFORE any encryption is attempted — the strand never reaches
+    // the inner store at all (fail-closed: no wasted crypto work, no nonce).
+    let threw: unknown;
+    try {
+      store.putStrand(makeStrand("s4", "E1", null));
+    } catch (err) {
+      threw = err;
+    }
+    expect(threw).toBeInstanceOf(NonceCeilingExceededError);
+    const err = threw as NonceCeilingExceededError;
+    expect(err.encryptionCount).toBe(3);
+    expect(err.maxEncryptionsPerKey).toBe(3);
+    expect(err.keyFingerprint).toMatch(/^[0-9a-f]{64}$/);
+    // s4 truly never reached the inner store.
+    expect(store.getStrand("s4" as StrandId)).toBeNull();
+  });
+
+  it("keeps refusing every subsequent call once the ceiling is reached (not a one-shot throw)", () => {
+    const store = createEncryptedStore(createMemoryStore(), testKey, {
+      maxEncryptionsPerKey: 1,
+    });
+    store.putStrand(makeStrand("s1", "E1", null));
+    expect(() => store.putStrand(makeStrand("s2", "E1", null))).toThrow(
+      NonceCeilingExceededError,
+    );
+    expect(() => store.putStrand(makeStrand("s3", "E1", null))).toThrow(
+      NonceCeilingExceededError,
+    );
+  });
+
+  it("counts putStrandsBatch entries toward the same per-key ceiling as putStrand", () => {
+    const store = createEncryptedStore(createSqliteStore(":memory:"), testKey, {
+      maxEncryptionsPerKey: 2,
+    }) as SqliteStrandStore;
+    expect(() =>
+      store.putStrandsBatch([
+        makeStrand("b1", "E1", null),
+        makeStrand("b2", "E1", null),
+        makeStrand("b3", "E1", null),
+      ]),
+    ).toThrow(NonceCeilingExceededError);
+  });
+
+  it("fires onApproachingNonceCeiling exactly once, edge-triggered, before the hard ceiling refuses", () => {
+    const seen: Array<{ encryptionCount: number }> = [];
+    const store = createEncryptedStore(createMemoryStore(), testKey, {
+      maxEncryptionsPerKey: 4,
+      warnAtFraction: 0.5, // warn at count >= 2
+      onApproachingNonceCeiling: (info) => seen.push({ encryptionCount: info.encryptionCount }),
+    });
+    store.putStrand(makeStrand("s1", "E1", null)); // count 1: below warn
+    expect(seen).toHaveLength(0);
+    store.putStrand(makeStrand("s2", "E1", null)); // count 2: crosses warn — fires once
+    expect(seen).toHaveLength(1);
+    expect(seen[0]?.encryptionCount).toBe(2);
+    store.putStrand(makeStrand("s3", "E1", null)); // count 3: already warned, no repeat
+    expect(seen).toHaveLength(1);
+    // count 4 is still allowed (== ceiling is the refusal threshold, not count 4 itself
+    // since the check compares the PRE-increment count against the ceiling).
+    store.putStrand(makeStrand("s4", "E1", null));
+    expect(() => store.putStrand(makeStrand("s5", "E1", null))).toThrow(
+      NonceCeilingExceededError,
+    );
+  });
+
+  it("tracks separate keys separately: rotating the key resets the ceiling clock for the new key", () => {
+    const keys = { current: testKey() };
+    const rotatingProvider = (): Buffer => keys.current;
+    const store = createEncryptedStore(createMemoryStore(), rotatingProvider, {
+      maxEncryptionsPerKey: 2,
+    });
+    store.putStrand(makeStrand("s1", "E1", null));
+    store.putStrand(makeStrand("s2", "E1", null));
+    expect(() => store.putStrand(makeStrand("s3", "E1", null))).toThrow(
+      NonceCeilingExceededError,
+    );
+
+    // Rotate to a fresh key: the ceiling is per-key, so this key gets its own
+    // fresh budget rather than inheriting the exhausted count.
+    keys.current = wrongKey();
+    expect(() => store.putStrand(makeStrand("s4", "E1", null))).not.toThrow();
+  });
+
+  it("defaults to the documented safe ceiling (2**32) when unconfigured — far from tripping in a small test", () => {
+    const store = createEncryptedStore(createMemoryStore(), testKey);
+    // No ceiling option passed at all: ordinary use is completely unaffected.
+    for (let i = 0; i < 25; i++) {
+      expect(() => store.putStrand(makeStrand(`d${i}`, "E1", null))).not.toThrow();
     }
   });
 });

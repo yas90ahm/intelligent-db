@@ -41,6 +41,28 @@
  *     so `verifyChain()` continues to work keyless on an encrypted database exactly
  *     as the spec describes, with zero changes required here.
  *
+ * NONCE CEILING (`gcm-random-nonce-no-ceiling`, Wave 3 polish): each encryption
+ * picks a fresh RANDOM 96-bit nonce (`randomBytes(GCM_IV_BYTES)`), never a
+ * counter — the standard, simplest-to-get-right choice for a store where many
+ * independent callers/processes could otherwise race a shared counter. Random
+ * nonces are safe under AES-GCM only below a volume ceiling: NIST SP 800-38D's
+ * birthday-bound guidance says a single key should not encrypt more than ~2^32
+ * messages with random 96-bit IVs before the chance of an accidental nonce
+ * collision (which breaks GCM's authentication AND confidentiality) stops being
+ * negligible. This module now ENFORCES that bound rather than merely documenting
+ * it: {@link createEncryptedStore}'s optional third argument tracks a running
+ * encryption count per resolved key (fingerprinted by sha256, never the raw key
+ * bytes) and (a) calls an optional `onApproachingNonceCeiling` hook once, edge-
+ * triggered, when the count first crosses a configurable warn fraction (default
+ * 50%) of the ceiling — the "rotate soon" signal — and (b) THROWS a typed
+ * {@link NonceCeilingExceededError} and refuses to perform the encryption at all
+ * once the count would reach the ceiling (default 2**32) — fail-closed, exactly
+ * this codebase's discipline elsewhere: a caller must rotate `keyProvider()` to a
+ * fresh key (an entirely live operation — see the module doc above) rather than
+ * silently keep spending random nonces past the safe volume. The counter is keyed
+ * per resolved key fingerprint, not globally, so rotating the key resets the
+ * clock for the new key exactly as it should.
+ *
  * FORMAT: each encrypted value is `iv (12B) || tag (16B) || ciphertext`, base64-
  * encoded into a small JSON envelope stored AS the strand's `payload` cell (so it
  * round-trips through the inner store's existing JSON persistence untouched).
@@ -70,7 +92,7 @@
  * unmodified — only the strand payload path is intercepted.
  */
 
-import { createCipheriv, createDecipheriv, randomBytes } from "node:crypto";
+import { createCipheriv, createDecipheriv, createHash, randomBytes } from "node:crypto";
 
 import type {
   AttributeKey,
@@ -121,6 +143,126 @@ export class EncryptedStoreIntegrityError extends Error {
     this.name = "EncryptedStoreIntegrityError";
     this.reason = reason;
     this.rowId = rowId;
+  }
+}
+
+/**
+ * Thrown by {@link createEncryptedStore}'s write path when the resolved key
+ * (identified only by its sha256 `keyFingerprint`, never raw bytes) has already
+ * performed `encryptionCount` AES-256-GCM encryptions with random 96-bit
+ * nonces — at or beyond `maxEncryptionsPerKey` (see the module doc's NONCE
+ * CEILING section). Refusing here is a fail-closed safety measure, not a data
+ * error: the fix is to rotate `keyProvider()` to return a fresh key (a live
+ * swap, no restart needed — see the module doc) and retry.
+ */
+export class NonceCeilingExceededError extends Error {
+  readonly keyFingerprint: string;
+  readonly encryptionCount: number;
+  readonly maxEncryptionsPerKey: number;
+
+  constructor(keyFingerprint: string, encryptionCount: number, maxEncryptionsPerKey: number) {
+    super(
+      `createEncryptedStore: refusing to encrypt — key fingerprint ${keyFingerprint} has already ` +
+        `performed ${String(encryptionCount)} AES-256-GCM encryptions with random 96-bit nonces, at ` +
+        `or beyond the configured safe ceiling of ${String(maxEncryptionsPerKey)} (NIST SP 800-38D's ` +
+        `random-IV birthday bound). Rotate keyProvider() to a fresh key to continue — it takes effect ` +
+        `immediately, no restart required.`,
+    );
+    this.name = "NonceCeilingExceededError";
+    this.keyFingerprint = keyFingerprint;
+    this.encryptionCount = encryptionCount;
+    this.maxEncryptionsPerKey = maxEncryptionsPerKey;
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Nonce-volume ceiling tracking (gcm-random-nonce-no-ceiling)
+// ---------------------------------------------------------------------------
+
+/** NIST SP 800-38D's documented safe volume for AES-GCM with random 96-bit IVs. */
+export const DEFAULT_MAX_ENCRYPTIONS_PER_KEY = 2 ** 32;
+
+/** Fraction of {@link DEFAULT_MAX_ENCRYPTIONS_PER_KEY} at which the approaching-ceiling hook fires by default. */
+export const DEFAULT_NONCE_CEILING_WARN_FRACTION = 0.5;
+
+/** Info passed to {@link EncryptedStoreCeilingOptions.onApproachingNonceCeiling}. */
+export interface ApproachingNonceCeilingInfo {
+  /** sha256 fingerprint of the resolved key — never the raw key bytes. */
+  readonly keyFingerprint: string;
+  /** Encryptions performed so far under this key (through this store instance). */
+  readonly encryptionCount: number;
+  readonly maxEncryptionsPerKey: number;
+}
+
+/** Configures the per-key GCM nonce-volume ceiling (module doc's NONCE CEILING section). */
+export interface EncryptedStoreCeilingOptions {
+  /**
+   * Hard ceiling on encryptions performed under the SAME resolved key before
+   * this adapter refuses to encrypt further, throwing
+   * {@link NonceCeilingExceededError}. Default {@link DEFAULT_MAX_ENCRYPTIONS_PER_KEY}
+   * (2**32 — NIST SP 800-38D's random-96-bit-IV safe bound). Lower this only to
+   * exercise the ceiling logic in tests; production callers should rotate the
+   * key long before the default fires.
+   */
+  readonly maxEncryptionsPerKey?: number;
+  /**
+   * Fraction of `maxEncryptionsPerKey` at which {@link onApproachingNonceCeiling}
+   * fires. Default {@link DEFAULT_NONCE_CEILING_WARN_FRACTION} (0.5).
+   */
+  readonly warnAtFraction?: number;
+  /**
+   * Called ONCE (edge-triggered, not level-triggered — a hot write loop never
+   * spams this) per key, the moment its running encryption count first crosses
+   * `warnAtFraction * maxEncryptionsPerKey`. This is the "rotate soon" signal,
+   * strictly before the hard ceiling above starts refusing writes. Omitted by
+   * default (no-op) — deployments that care wire logging/alerting here.
+   */
+  readonly onApproachingNonceCeiling?: (info: ApproachingNonceCeilingInfo) => void;
+}
+
+/** Per-store-instance nonce-ceiling bookkeeping, keyed by key fingerprint (never raw key bytes). */
+interface NonceCeilingTracker {
+  readonly maxEncryptionsPerKey: number;
+  readonly warnAtFraction: number;
+  readonly onApproachingNonceCeiling?: ((info: ApproachingNonceCeilingInfo) => void) | undefined;
+  readonly counts: Map<string, number>;
+  readonly warned: Set<string>;
+}
+
+function makeNonceCeilingTracker(opts?: EncryptedStoreCeilingOptions): NonceCeilingTracker {
+  return {
+    maxEncryptionsPerKey: opts?.maxEncryptionsPerKey ?? DEFAULT_MAX_ENCRYPTIONS_PER_KEY,
+    warnAtFraction: opts?.warnAtFraction ?? DEFAULT_NONCE_CEILING_WARN_FRACTION,
+    onApproachingNonceCeiling: opts?.onApproachingNonceCeiling,
+    counts: new Map(),
+    warned: new Set(),
+  };
+}
+
+/**
+ * Fingerprint `key` (sha256, hex) and account for ONE encryption about to
+ * happen under it. Throws {@link NonceCeilingExceededError} BEFORE performing
+ * any crypto work if the key is already at/over its ceiling (fail-closed — no
+ * wasted encryption, no nonce spent). Otherwise records the encryption and, on
+ * the call where the running count first crosses the warn fraction, fires
+ * `tracker.onApproachingNonceCeiling` exactly once for this key.
+ */
+function accountForEncryption(key: Buffer, tracker: NonceCeilingTracker): void {
+  const fingerprint = createHash("sha256").update(key).digest("hex");
+  const current = tracker.counts.get(fingerprint) ?? 0;
+  if (current >= tracker.maxEncryptionsPerKey) {
+    throw new NonceCeilingExceededError(fingerprint, current, tracker.maxEncryptionsPerKey);
+  }
+  const next = current + 1;
+  tracker.counts.set(fingerprint, next);
+  const warnAt = Math.ceil(tracker.maxEncryptionsPerKey * tracker.warnAtFraction);
+  if (next >= warnAt && !tracker.warned.has(fingerprint)) {
+    tracker.warned.add(fingerprint);
+    tracker.onApproachingNonceCeiling?.({
+      keyFingerprint: fingerprint,
+      encryptionCount: next,
+      maxEncryptionsPerKey: tracker.maxEncryptionsPerKey,
+    });
   }
 }
 
@@ -222,9 +364,15 @@ function decryptValue(blob: Buffer, aad: Buffer, key: Buffer, rowId: string): Bu
  * payload is wrapped as `{ payload: s.payload }` before serializing so `undefined`
  * round-trips faithfully through `JSON.stringify`/`JSON.parse` exactly like every
  * other JSON value (a bare top-level `undefined` is not valid JSON on its own).
+ *
+ * `tracker` accounts for the ONE random nonce this call is about to spend under
+ * the resolved key — see {@link accountForEncryption} — and throws
+ * {@link NonceCeilingExceededError} before any crypto work if that key is
+ * already at/over its configured ceiling (module doc's NONCE CEILING section).
  */
-function encryptStrand(s: Strand, keyProvider: KeyProvider): Strand {
+function encryptStrand(s: Strand, keyProvider: KeyProvider, tracker: NonceCeilingTracker): Strand {
   const key = requireKey(keyProvider);
+  accountForEncryption(key, tracker);
   const plaintext = Buffer.from(JSON.stringify({ payload: s.payload }), "utf8");
   const blob = encryptValue(plaintext, aadFor(s.id), key);
   const envelope: EncryptedPayloadEnvelope = {
@@ -270,6 +418,10 @@ function decryptStrand(s: Strand, keyProvider: KeyProvider): Strand {
  * forwarded unchanged — the store never sees the plaintext content, and the
  * engine never has to change how it talks to the store.
  *
+ * `ceiling` configures the per-key GCM nonce-volume ceiling (module doc's
+ * NONCE CEILING section) — omit it to accept the documented safe default
+ * (2**32 encryptions per resolved key before a hard refusal).
+ *
  * @example
  *   const store = createEncryptedStore(createSqliteStore(path), () => aes256Key);
  *   const db = createIntelligentDb(store, identity); // drop-in, unchanged
@@ -277,7 +429,9 @@ function decryptStrand(s: Strand, keyProvider: KeyProvider): Strand {
 export function createEncryptedStore<S extends StrandStore>(
   inner: S,
   keyProvider: KeyProvider,
+  ceiling?: EncryptedStoreCeilingOptions,
 ): S {
+  const tracker = makeNonceCeilingTracker(ceiling);
   const overrides: Partial<StrandStore> = {
     getStrand(id: StrandId): Strand | null {
       const s = inner.getStrand(id);
@@ -285,12 +439,12 @@ export function createEncryptedStore<S extends StrandStore>(
     },
 
     putStrand(s: Strand): void {
-      inner.putStrand(encryptStrand(s, keyProvider));
+      inner.putStrand(encryptStrand(s, keyProvider, tracker));
     },
 
     putStrandsBatch(strands: Iterable<Strand>): void {
       const encrypted: Strand[] = [];
-      for (const s of strands) encrypted.push(encryptStrand(s, keyProvider));
+      for (const s of strands) encrypted.push(encryptStrand(s, keyProvider, tracker));
       inner.putStrandsBatch(encrypted);
     },
 
