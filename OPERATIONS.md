@@ -295,7 +295,7 @@ over.
 
 ---
 
-## 7. MCP server integration (current scope)
+## 7. MCP server integration — daemon-backed, WIRED end-to-end (PHASE3B_MCP_ASYNC_SPEC.md)
 
 `mcp/server.ts` supports opting a stdio MCP server instance into daemon-backed
 memory via `MEMORY_DAEMON_SOCKET` (the daemon's socket/pipe path) +
@@ -306,17 +306,46 @@ trip to validate the daemon is reachable and the token is accepted, bounded by
 rejects the token fails startup fast with a clear error rather than silently
 falling back to in-process memory.
 
-**Disclosed scope boundary**: full per-request dispatch through daemon-backed
-memory is NOT wired in this pass. `AgentMemory`'s interface is synchronous;
-`daemon/client.ts`'s `createRemoteAgentMemory` is necessarily asynchronous (a
-real socket round trip cannot be made to look synchronous without a native
-addon or a `worker_threads`+`Atomics.wait` bridge — the latter was attempted
-and empirically rejected; see `daemon/client.ts`'s module doc for the
-reproduction). Today, opting into `MEMORY_DAEMON_SOCKET` validates
-connectivity and then fails fast with a clear, typed
-`DaemonBackingNotWiredError` naming this exact gap — it does not silently
-proceed in-process. Wiring full dispatch is a named follow-up item, not a
-hidden gap.
+**Full per-request dispatch is wired.** The binding design decision
+(`docs/specs/PHASE3B_MCP_ASYNC_SPEC.md`): a synchronous bridge over async
+socket I/O stays off the table (a real `worker_threads`+`Atomics.wait` stall
+under genuine socket I/O was reproduced and is documented in
+`daemon/client.ts`'s module doc) — instead the MCP handler's dispatch went
+ASYNC, once, everywhere. `mcp/handler.ts`'s `handleMcpRequestAsync` is the
+SINGLE dispatch implementation (no duplicated switch) against a narrow
+`AsyncAgentMemory` contract (`mcp/asyncMemory.ts`): the in-process default
+path wraps the synchronous facade via the trivial `syncToAsyncMemory` adapter
+(awaiting an already-resolved value costs one microtask tick, not a socket
+round trip); the daemon-backed path hands `daemon/client.ts`'s
+`createRemoteAgentMemory(...)` straight through — its `RemoteAgentMemory`
+already satisfies `AsyncAgentMemory` structurally, no bridge, no adapter.
+`mcp/server.ts`'s `processLine`/`main()` are `async` and await each response
+before writing it and before looking at the next line, serializing requests
+over the single stdio connection (mirroring the daemon's own FIFO queue).
+
+Once `MEMORY_DAEMON_SOCKET`/`MEMORY_DAEMON_TOKEN_FILE` validate at startup, a
+real `RemoteAgentMemory` connection serves every request for the life of the
+MCP server process. Multiple MCP server processes (or MCP clients, or a mix of
+MCP + a raw daemon client) pointed at the SAME daemon share the SAME
+underlying memory — verified end-to-end (`daemon/__e2e__/mcpDaemonBacked.e2e.test.ts`):
+a real daemon process, a real MCP server process driven over its real stdio
+JSON-RPC protocol — remember → recall (citation + fact_state over the wire) →
+a second identity contradicts it (a genuine multi-class dispute, resolved via
+`adjudicate()` over a raw OWNER-grade admin connection — `adjudicate` is a
+trust-mutating verb and is deliberately NOT one of the five tools the MCP
+surface exposes) → `list_pending_questions` renders it WITH a confirmation
+token → `resolve_pending` without the token is REJECTED (the Wave-2
+consent-token binding, preserved unchanged and enforced CLIENT-SIDE inside the
+MCP server process — a rejected attempt never even reaches the daemon) and
+WITH it SUCCEEDS → a SECOND, independent MCP server process (its own daemon
+connection, its own identity) sees the resolved fact.
+
+**Trust-mutating verbs stay off the MCP surface.** The MCP tool list only ever
+exposes `remember`/`recall`/`list_pending_questions`/`resolve_pending`/
+`why_do_you_believe_this` — none of `registerSource`/`disown`/`approve`/
+`adjudicate`/`ratify`. The daemon's OWNER-grade gate on those five verbs
+(§4/§6 above) is unaffected by this wiring: the MCP server is a CLIENT like
+any other and only ever calls the non-mutating verbs over the wire.
 
 ---
 
