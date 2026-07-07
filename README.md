@@ -250,8 +250,10 @@ crash-torture invariant list and the one non-crash finding it surfaced:
 An **opt-in daemon mode** lets several client processes (multiple IDE windows/agent
 sessions, a CLI, a background indexer) share one memory instead of each opening its own
 SQLite file: a Unix-socket/Windows-named-pipe transport, bearer-token auth through the same
-crypto-free trust registry, every trust-mutating verb (`registerSource`/`disown`/`approve`/
-`adjudicate`/`ratify`) gated to an OWNER-grade token, and a single serialized write queue —
+crypto-free trust registry, every trust-mutating verb — `registerSource`/`disown`/`approve`/
+`adjudicate`/`ratify`/`resolvePending`, all six (the sixth closed 2026-07-07 after a re-audit
+found it had been left out of the first five, see [`CLAUDE.md`](./CLAUDE.md)'s "Audit remediation
+(Wave 4 / re-audit fixes)") — gated to an OWNER-grade token, and a single serialized write queue —
 approved by a binding security review ([`docs/specs/PHASE3_DAEMON_SPEC.md`](./docs/specs/PHASE3_DAEMON_SPEC.md))
 and verified end-to-end against a real spawned daemon process plus 30 real `SIGKILL` crash
 cycles. The in-process default (`createAgentMemory()`, above) is unchanged and remains the
@@ -271,8 +273,19 @@ regression test. An independent verifier re-ran the full suite and the trust-int
 (Sybil 24/24 in both rank modes, FactWorld 0% ASR) with no regression and no belief/trust
 invariant weakened. Full list, fix-by-fix, with the regression test for each:
 [`CLAUDE.md`](./CLAUDE.md#audit-remediation-wave-1--2026-07-07) and
-[`CLAUDE.md`](./CLAUDE.md#audit-remediation-wave-2--2026-07-07). The audit's Wave 3 backlog
-(polish items, none of them a broken invariant) remains open.
+[`CLAUDE.md`](./CLAUDE.md#audit-remediation-wave-2--2026-07-07).
+
+A Wave 3 polish pass and Phase 3b (wiring the MCP server to a daemon-backed memory over async
+dispatch) followed and were independently verified clean. Then a hostile RE-AUDIT of the whole
+remediation history found two of the Wave-1 fixes above were each still incomplete in a way their
+own narrow regression tests hadn't caught: the daemon's trust-mutating-verb gate was missing a
+sixth verb (`resolvePending` — the daemon security note above now names all six), and
+`reverseCredit`'s "exact" depth-floor unwind only genuinely moved the LCB at the one depth its sole
+test exercised, not at a realistic well-corroborated depth (see the credit-reversal note above).
+Both, plus three adjacent perf/durability/operability regressions the same re-audit surfaced, were
+fixed and independently re-verified over a real spawned daemon process and a hand-derived,
+independent re-implementation of the trust-math formula — full account:
+[`CLAUDE.md`](./CLAUDE.md#audit-remediation-wave-4--re-audit-fixes--2026-07-07).
 
 ---
 

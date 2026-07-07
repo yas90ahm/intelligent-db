@@ -340,12 +340,29 @@ MCP server process — a rejected attempt never even reaches the daemon) and
 WITH it SUCCEEDS → a SECOND, independent MCP server process (its own daemon
 connection, its own identity) sees the resolved fact.
 
-**Trust-mutating verbs stay off the MCP surface.** The MCP tool list only ever
-exposes `remember`/`recall`/`list_pending_questions`/`resolve_pending`/
-`why_do_you_believe_this` — none of `registerSource`/`disown`/`approve`/
-`adjudicate`/`ratify`. The daemon's OWNER-grade gate on those five verbs
-(§4/§6 above) is unaffected by this wiring: the MCP server is a CLIENT like
+**The five admin-only trust-mutating verbs stay off the MCP surface.** The MCP
+tool list only ever exposes `remember`/`recall`/`list_pending_questions`/
+`resolve_pending`/`why_do_you_believe_this` — none of `registerSource`/
+`disown`/`approve`/`adjudicate`/`ratify`. The daemon's OWNER-grade gate on
+those five verbs is unaffected by this wiring: the MCP server is a CLIENT like
 any other and only ever calls the non-mutating verbs over the wire.
+
+**`resolve_pending` is the one MCP tool that IS a trust-mutating verb, and is
+now gated too.** It drives the daemon's `resolvePending` wire method, which
+internally runs an unconditional owner-override `approve()`. A 2026-07-07
+re-audit found this verb had been left OUT of `TRUST_MUTATING_VERBS` — the
+fix added five verbs to that gate but missed the sixth — so ANY authenticated
+connection at ANY grade could force-resolve any open dispute, and the
+resulting audit record always misattributed the decision to OWNER regardless
+of who actually called. Fixed the same day: `resolvePending` is now gated
+identically to the other five (`src/daemon/__tests__/trustMutationGate.test.ts`).
+**Practical effect for MCP deployments:** a daemon-backed MCP server only
+retains `resolve_pending`'s owner-override power if the token it was started
+with is itself OWNER-grade — exactly the shape §1/§2 above describe (the
+auto-provisioned owner token, or a token you deliberately issued at OWNER
+grade). An MCP server started with a lower-grade per-agent token now gets a
+`DAEMON_ERR_INSUFFICIENT_GRADE` rejection on `resolve_pending` instead of
+silently succeeding with borrowed owner authority.
 
 ---
 
@@ -462,7 +479,21 @@ scheduled `verifyChains` sweep is itself part of the audit trail.
 ### 8.6 Health and status
 
 Any authenticated connection, at any grade, can call `status` (or its alias `ping`) — this verb
-bypasses the FIFO write queue entirely, so a slow or stuck write never blocks a health check:
+bypasses the FIFO write queue entirely, so a slow or stuck write never blocks a health check.
+
+**Fixed 2026-07-07 (Wave 4): `status`/`ping` itself used to be able to stall the daemon**, despite
+bypassing the write queue. `factChainHead()` — one of the fields in the response below — used to be
+called inline on every poll, and that callback opens a fresh `SqlitePendingLedger` connection whose
+constructor synchronously rebuilds the whole ratification-ledger open-dispute index; polling
+`status` frequently (which is what this section recommends) re-triggered that rebuild on every
+poll, blocking every other connected client's I/O for its duration. Fixed: `factChainHead()` is now
+read from an in-memory cache, refreshed once at daemon startup and then on a background timer
+(`factChainHeadRefreshMs`, default 5000ms) — `status`/`ping` never calls the slow path inline again.
+Regression coverage: `src/daemon/__tests__/server.test.ts`'s `"DaemonServer: factChainHead caching"`
+block. The `factChainHead` value in a `status` response can therefore lag a just-completed write by
+up to the refresh interval; `daemonChainHead` (the daemon's own audit chain) is unaffected and stays
+live. If you need a guaranteed-fresh chain head rather than the cached one, use the `verifyChains`
+admin verb (§8.5 above), which always reads live instead of from this cache.
 
 ```jsonc
 {"id": 1, "method": "status", "params": {}}
