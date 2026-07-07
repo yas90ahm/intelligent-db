@@ -186,6 +186,38 @@ No movement in the Sybil or FactWorld trust-integrity gates.
 **Not done, and this file does not claim otherwise:** the audit's Wave 3 backlog (15 items,
 polish-level) is open.
 
+### Audit remediation (Phase 3b) — 2026-07-07
+
+An independent adversarial verifier checked the two Phase 3b lanes (MCP async dispatch, and a
+scar-limiter memory bound in `api.ts`) after they landed and returned both **FIXED, verified**,
+no regressions. What it actually did, not just what it concluded:
+
+- Reproduced the full suite twice on the landed commit: `npm run typecheck` clean, `npx vitest
+  run` at **844 passed / 43 skipped / 0 failed** (887 total), same counts both times.
+- Re-ran the trust-integrity gates fresh: Sybil 24/24 in both plain-rank and blend-rank mode,
+  FactWorld 2/2 at poison rate 1.0 with 0% ASR. No movement from baseline.
+- Independently re-ran the headline E2E (`mcpDaemonBacked.e2e.test.ts`, 4/4) and confirmed by
+  reading `support.ts` — and by breaking it on purpose — that it spawns a real
+  `dist/daemon/cli.js` process over a real socket/pipe and a real `dist/mcp/server.js` process
+  driven over real stdin/stdout JSON-RPC. Not a mocked transport.
+- Audited the MCP surface directly: `TOOLS` and `AsyncAgentMemory` expose exactly the five
+  non-mutating verbs; `registerSource`/`disown`/`approve`/`adjudicate`/`ratify` never appear as
+  dispatchable methods anywhere, only inside rendered dossier text. The daemon's OWNER-grade gate
+  on those five is untouched.
+- Confirmed there is exactly one dispatch implementation (`handleMcpRequestAsync`, one `switch`)
+  and no lingering synchronous `handleMcpRequest` left in `src/`.
+- Reverted three fixes one at a time and watched each fail the way it should, then restored all
+  three byte-identical and re-confirmed the suite green: (1) reverting `api.ts`'s scar-limiter
+  construction breaks all 6 `scarLimiterBounded.test.ts` cases; (2) disabling
+  `syncToAsyncMemory`'s per-instance memoization breaks exactly the consent-token-flow case in
+  `asyncHandlerParity.test.ts` (the other 8 stay green), showing the memoization is load-bearing;
+  (3) reinstating a `DaemonBackingNotWiredError`-style throw in `server.ts`'s daemon path and
+  rebuilding `dist/` breaks all 4 headline E2E tests with real socket timeouts against the live
+  child process.
+
+Daemon-backed MCP is now genuinely wired end-to-end, not just validated at startup — see the
+Phase 3b paragraph above and `OPERATIONS.md` §7.
+
 RE-MEASURED AFTER THE CRYPTO-FREE REBUILD (Phase 5, 2026-07-02 — full numbers + bucket breakdown in `docs/ARCHITECTURE_BENCHMARKS.md` §10): the 97-spec red-team suite scores **35 defended / 18 breached / 44 deferred** against the rebuilt system, vs the crypto-era baselines of 59 (V1) and 25 (V2, all documented residuals). All 18 surviving breaches are identical in id/name/mechanism to their V2 counterparts — zero new breaches. Five Merkle/audit-era attacks are RETIRED with the deleted surface (removed, not defended; their goal is covered by the asserted-attribution trade-off above). The triage produced two real fixes: (1) the weak-influence review queue in `ratification/disown.ts` was ONE-HOP — an incompleteness, not a trade-off — and is now a transitive backward BFS closure (still human-review-only, never auto-demotes; regression case in `disownHardening.test.ts`); (2) an external audit caught the red-team's ce-c3-02 "no PSL" spec still modeling a system that no longer exists — the shipped `identity/binders/publicSuffix.ts` eTLD+1 derivation, wired into `trustRegistry.ts`, defends that attack, so the spec now routes through the SHIPPED resolver (stale-harness artifact reclassified; default-suite regression in `publicSuffix.bothDirections.test.ts`). The locally-runnable poisoning arms re-ran at **0% ASR** (factworld substrate adjudication at poison rate 1.0; the Sybil capability bench at every cheap fleet size up to 500, with the expensive-paid-fleet honesty control flipping at A > 3 exactly as priced-not-prevented predicts). The external-dep benches (LLM-scored factworld, poisonedrag, retrieval, crossdb, deployment) were NOT re-run; their pre-rebuild numbers are labeled HISTORICAL in the benchmarks doc.
 
 CLOSED SINCE WAVE 2 (found by the Wave-1 audit, fixed 2026-07-07 — was "STILL OPEN" in this file until then):

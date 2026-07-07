@@ -193,6 +193,14 @@ Or a `mcpServers` JSON block (Claude Desktop and compatible clients):
 Or via the package bin: `npx intelligent-db-mcp` (after `npm link` / a local install). Omit
 `MEMORY_DB` for an in-memory (non-durable) store — useful for a quick trial.
 
+**Multiple clients, one shared memory:** point the same server at a running
+[daemon](#durability-and-security) instead of a local file by setting `MEMORY_DAEMON_SOCKET`
+(the daemon's socket/pipe path) and `MEMORY_DAEMON_TOKEN_FILE` (a file holding the bearer
+token — never the token itself in an env var) instead of `MEMORY_DB`. Every request goes over
+the wire to the daemon for the life of the process, so two Claude Code windows, a CLI session,
+and a background indexer can all remember and recall against the same facts instead of each
+opening its own SQLite file. Full setup: [`OPERATIONS.md`](./OPERATIONS.md) §7.
+
 ---
 
 ## Architecture overview
