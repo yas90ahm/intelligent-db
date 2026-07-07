@@ -577,6 +577,26 @@ export interface PendingLedger {
 
   /** Raw read of every record (audit / persistence). Order is chain order. */
   records(): readonly LedgerRecord[];
+
+  /**
+   * OPTIONAL: re-derive the incrementally-maintained OPEN-PENDING index
+   * (`listPending()` / the OD-2 scan / `approve()`'s dispute lookup) from
+   * whatever is ACTUALLY durably persisted right now, discarding any in-memory
+   * bookkeeping. Only meaningful for a backend whose `#append()` writes ride an
+   * AMBIENT transaction it does not itself own (the shared-handle SQLite
+   * ledger): the incremental index is updated the instant a row is inserted,
+   * but if that insert's surrounding transaction is later ROLLED BACK by an
+   * outer caller (e.g. `api.ts`'s `approve()`, when a LATER store write in the
+   * SAME transaction throws), the SQL row disappears while the in-memory index
+   * update does not self-undo — a durable-store-vs-in-memory-cache desync of
+   * exactly the shape `approve-desync-default-facade` closed at the ledger/store
+   * boundary, just one layer deeper. Callers that wrap a ledger call in a
+   * transaction THEY may roll back should call this in their catch branch
+   * before rethrowing. The in-memory (non-shared-handle) backend has no ambient
+   * transaction to desync from, so implementing this is optional (omit it —
+   * back-compatible for any existing `PendingLedger` implementer).
+   */
+  resyncIndex?(): void;
 }
 
 // ---------------------------------------------------------------------------
@@ -1451,6 +1471,24 @@ class SqlitePendingLedgerImpl implements SqlitePendingLedger {
     if (tail === undefined) return { seq: -1, headHash: GENESIS_PREV_HASH };
     const rec = this.#parse(pendingAsString((tail as { json: unknown }).json));
     return { seq: rec.seq, headHash: rec.thisHash };
+  }
+
+  /**
+   * See the interface doc: discard the incremental open-PENDING index and
+   * rebuild it from a fresh full read of `ratification_records` — the SAME
+   * one-time pass the constructor runs on open, just re-run on demand. A caller
+   * invokes this after catching a rollback of a transaction that this ledger's
+   * `#append()` participated in (the SQL row is gone; only the in-memory index
+   * needs re-deriving to match). O(total records) — an error-path operation,
+   * never called on the hot path.
+   */
+  resyncIndex(): void {
+    this.#approvedCsids.clear();
+    this.#openPendingList.length = 0;
+    this.#latestOpenByCsid.clear();
+    for (const r of this.#chain()) {
+      this.#indexAppendedRecord(r.kind, r.payload, r);
+    }
   }
 
   // -- internals ------------------------------------------------------------

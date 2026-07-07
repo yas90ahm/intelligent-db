@@ -31,6 +31,8 @@
  */
 
 import { createHash } from "node:crypto";
+import { createRequire } from "node:module";
+import type { DatabaseSync as DatabaseSyncType } from "node:sqlite";
 
 import type {
   StrandId,
@@ -61,6 +63,9 @@ import type {
 } from "../identity/index.js";
 import { createTrustRegistry } from "../identity/trustRegistry.js";
 import type { TrustRegistry, TrustRegistryConfig } from "../identity/trustRegistry.js";
+import { createSqliteReputationLedger } from "../identity/reputation.js";
+import type { ReputationLedger } from "../identity/reputation.js";
+import { repCapFor } from "../identity/anchors.js";
 
 import { createIntelligentDb } from "../api.js";
 import type {
@@ -74,11 +79,23 @@ import type {
   BeliefTimeline,
 } from "../api.js";
 import type { ConsolidationOutcome } from "../forgetting/consolidation.js";
-import { createPendingLedger } from "../ratification/pendingLedger.js";
+import { createPendingLedger, createSqlitePendingLedger } from "../ratification/pendingLedger.js";
 import type { AppendSink } from "../ratification/pendingLedger.js";
-import type { PendingPayload, ResolvedDispute } from "../ratification/pendingLedger.js";
+import type { PendingLedger, PendingPayload, ResolvedDispute } from "../ratification/pendingLedger.js";
 import { sourceIdFor } from "../identity/sources.js";
 import type { DownstreamDisownResult } from "../ratification/disown.js";
+
+/**
+ * Load `node:sqlite`'s {@link DatabaseSync} constructor via a runtime `require`
+ * rather than a static `import` — see `store/sqliteStore.ts`'s identical note
+ * (bundlers/test transformers choke on a static `import "node:sqlite"` for a
+ * built-in newer than their hardcoded list). Zero new runtime deps: still Node
+ * stdlib, resolved by Node's own loader exactly as in production.
+ */
+const require = createRequire(import.meta.url);
+const { DatabaseSync } = require("node:sqlite") as {
+  DatabaseSync: new (path: string) => DatabaseSyncType;
+};
 
 import { createLexicalCueResolver, strandText } from "../recall/cueResolver.js";
 import type { Cue, CueResolver, LexicalCueResolverOptions } from "../recall/cueResolver.js";
@@ -457,19 +474,64 @@ export function deriveEntity(text: string): EntityId {
  * register → stamp) so the single-agent case needs no identity management. The cue
  * resolver rebuilds its index from the store on construction, so a SQLite reopen
  * restores recall.
+ *
+ * ATOMICITY (fixes `approve-desync-default-facade`): when `dbPath` is given, the
+ * facade OWNS a single `DatabaseSync` handle and shares it across the StrandStore,
+ * the reputation ledger, AND the ratification (audit/pending) ledger — the exact
+ * "facts + trust + audit in one crash-consistent file" recipe `api.ts`'s `withTxn`
+ * doc describes and `atomicCompound.test.ts`/`systemCoherence.test.ts` exercise.
+ * Previously this facade opened its OWN separate SQLite handle for the store but
+ * wired the ratification ledger IN-MEMORY regardless of `dbPath`: a mid-`approve()`
+ * (or mid-`adjudicate`/`disown`) throw rolled the store's SQLite transaction back
+ * but left the in-memory ledger's already-appended APPROVAL/PENDING record
+ * permanent — a durable-store-vs-volatile-ledger desync, reproduced end-to-end (an
+ * ordinary thrown exception, no crash required). Sharing ONE handle means the
+ * ledger's `INSERT`s ride the SAME `store.beginTxn()` transaction `withTxn` opens,
+ * so they roll back together. The in-memory path (`dbPath` omitted) is unaffected —
+ * it stays the fast, non-durable, already-atomic-per-call default.
  */
 export function createAgentMemory(opts?: AgentMemoryOptions): AgentMemory {
-  const store: StrandStore = opts?.dbPath !== undefined
-    ? createSqliteStore(opts.dbPath)
-    : createMemoryStore();
+  // The single shared handle this facade OWNS when durable (null for in-memory).
+  // Only the owner may close it — see `close()` below.
+  let ownedDb: DatabaseSyncType | null = null;
+  let store: StrandStore;
+
+  if (opts?.dbPath !== undefined) {
+    const db = new DatabaseSync(opts.dbPath);
+    // The OWNER of a shared handle must set WAL BEFORE any shared-handle
+    // constructor borrows it (`createSqliteStore`'s `{ db }` overload verifies
+    // WAL and throws `SharedHandleNotWalError` otherwise — see sqliteStore.ts).
+    db.exec("PRAGMA journal_mode=WAL");
+    ownedDb = db;
+    store = createSqliteStore({ db });
+  } else {
+    store = createMemoryStore();
+  }
 
   // ONE registry instance serves both the sameness and independence ports, so
   // register/has and anchorsOf/independentSources read from the same book.
   const trust: TrustRegistry = createTrustRegistry(opts?.trust);
+
+  // DURABLE reputation ledger sharing the owned handle when `dbPath` is given
+  // (so the winner-ratify / loser-contradict moves `approve()`/`adjudicate()`
+  // drive ride the SAME transaction as the store + ledger writes); the
+  // in-memory path keeps the original constant-0 stub — it was never wired to
+  // anything durable to begin with, and this facade's identity/reputation
+  // wiring is otherwise unchanged.
+  let reputationLedger: ReputationLedger | null = null;
+  let reputationPort: ReputationLedgerPort;
+  if (ownedDb !== null) {
+    const repCapOf = (s: SourceId): Unit => repCapFor([...trust.anchorsOf(s)]);
+    reputationLedger = createSqliteReputationLedger(repCapOf, { db: ownedDb });
+    reputationPort = { scoreOf: (s: SourceId): Unit => reputationLedger!.scoreOf(s) };
+  } else {
+    reputationPort = makeReputationLedgerPort();
+  }
+
   const identity: SourceIdentityLayer = createSourceIdentityLayer({
     sources: trust,
     anchors: trust,
-    reputation: makeReputationLedgerPort(),
+    reputation: reputationPort,
     // stake omitted: the retired pillar defaults to the constant-zero port.
   });
 
@@ -478,20 +540,29 @@ export function createAgentMemory(opts?: AgentMemoryOptions): AgentMemory {
   // dispute), which made the horn unreachable from the facade. The facade now
   // wires the checksum-chained pending ledger so a genuine independent dispute
   // lands as an open PENDING the owner can answer via pendingQuestions() /
-  // resolvePending(). In-memory even when the store is SQLite: an open pending
-  // is RE-DERIVABLE (re-run adjudicate over the same LIVE members); composing
-  // the durable shared-handle audit chain remains the enterprise deployment's
-  // composition root (see systemCoherence.test.ts).
+  // resolvePending(). DURABLE + sharing `ownedDb` when `dbPath` is given (see
+  // the atomicity doc above); in-memory otherwise (the fast default — an open
+  // pending is RE-DERIVABLE by re-running adjudicate over the same LIVE
+  // members, so losing it on process exit is harmless there).
+  const onAppend = opts?.onLedgerAppend !== undefined ? { onAppend: opts.onLedgerAppend } : {};
+  const ledger: PendingLedger =
+    ownedDb !== null
+      ? createSqlitePendingLedger({ db: ownedDb, reputation: reputationLedger, ...onAppend })
+      : createPendingLedger(onAppend);
   const ratification: RatificationDeps = {
-    ledger: createPendingLedger(
-      opts?.onLedgerAppend !== undefined ? { onAppend: opts.onLedgerAppend } : {},
-    ),
+    ledger,
     // The engine's own voice on system-authored PENDING/MUTATION records —
     // asserted attribution only, deliberately NOT a registered witness (the
     // system must never count as a source of truth about claims).
     systemSource: sourceIdFor("iddb:system", "agent-memory"),
   };
-  const engine: IntelligentDb = createIntelligentDb(store, identity, null, null, ratification);
+  const engine: IntelligentDb = createIntelligentDb(
+    store,
+    identity,
+    null,
+    reputationLedger,
+    ratification,
+  );
   const resolver: CueResolver = createLexicalCueResolver(store, opts?.resolver);
 
   // AUTO-PROVISION the default single-agent source: the deployment OWNER (the
@@ -821,8 +892,13 @@ export function createAgentMemory(opts?: AgentMemoryOptions): AgentMemory {
     },
 
     close(): void {
+      // The store/reputation-ledger/pending-ledger `close()` calls are no-ops
+      // for a BORROWED (shared) handle — see each backend's own `ownsDb` guard.
+      // This facade OWNS `ownedDb` directly (it opened it above), so IT closes
+      // the handle — the single point that actually flushes the SQLite WAL.
       const closable = store as Partial<SqliteStrandStore>;
       if (typeof closable.close === "function") closable.close();
+      if (ownedDb !== null) ownedDb.close();
     },
   };
 }

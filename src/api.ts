@@ -2562,129 +2562,151 @@ class IntelligentDbImpl implements IntelligentDb {
     // it describes — a record claiming a resolution the store never applied (or vice versa).
     // With the audit ledger + reputation ledger riding the SAME shared db handle as the
     // store, all three enroll in this single transaction.
-    const resolved = withTxn(this.#store, () => {
-      // A1 — snapshot the dispute authors' reputation BEFORE the ledger drives its moves
-      // (winner ratified / losers contradicted happen INSIDE `ledger.approve`), so the
-      // EFFECT receipts can carry an exact before/after. Members come from the open
-      // pending; authors are resolved through the same `ctx` the gate uses.
-      const repBefore = new Map<SourceId, ReputationState | null>();
-      if (this.#reputation !== null) {
-        const members =
-          this.#ratification!.ledger
-            .listPending()
-            .find((p) => p.contradictionSetId === contradictionSetId)?.members ?? [];
-        for (const m of members) {
-          for (const a of ctx.authorsOf(m)) {
-            if (!repBefore.has(a)) repBefore.set(a, this.#reputation.stateOf(a));
+    //
+    // RESYNC ON ROLLBACK: `ledger.approve()` (called inside the txn below) both
+    // durably APPENDS the APPROVAL row AND incrementally updates the ledger's
+    // OWN in-memory open-pending index (a plain JS Map/Set, not itself
+    // transactional). A LATER throw in this same txn (e.g. a store write that
+    // fails) rolls the SQL row back, but that in-memory index update does not
+    // self-undo — a residual store-vs-ledger desync one layer deeper than the
+    // one this txn closes. `resyncIndex()` (optional; only the shared-handle
+    // SQLite ledger implements it) re-derives the index from what is ACTUALLY
+    // persisted, so a caught rollback here never leaves `listPending()` /
+    // `approve()`'s own dispute lookup believing a resolution that the store
+    // never durably applied.
+    let resolved: ResolvedDispute;
+    try {
+      resolved = withTxn(this.#store, () => {
+        // A1 — snapshot the dispute authors' reputation BEFORE the ledger drives its moves
+        // (winner ratified / losers contradicted happen INSIDE `ledger.approve`), so the
+        // EFFECT receipts can carry an exact before/after. Members come from the open
+        // pending; authors are resolved through the same `ctx` the gate uses.
+        const repBefore = new Map<SourceId, ReputationState | null>();
+        if (this.#reputation !== null) {
+          const members =
+            this.#ratification!.ledger
+              .listPending()
+              .find((p) => p.contradictionSetId === contradictionSetId)?.members ?? [];
+          for (const m of members) {
+            for (const a of ctx.authorsOf(m)) {
+              if (!repBefore.has(a)) repBefore.set(a, this.#reputation.stateOf(a));
+            }
           }
         }
-      }
 
-      const plan = this.#ratification!.ledger.approve(
-        contradictionSetId,
-        winnerStrandId,
-        approver,
-        when,
-        ctx,
-      );
+        const plan = this.#ratification!.ledger.approve(
+          contradictionSetId,
+          winnerStrandId,
+          approver,
+          when,
+          ctx,
+        );
 
-      // APPLY the resolution to the store (the ledger emitted the PLAN; the engine is
-      // the only thing that may write the StrandStore). Persist each minted OUTRANKS
-      // edge and write back each demoted loser — the EXACT object the ledger mutated
-      // in place (cached in `handed`), so the DEMOTED state + outranked_by persist even
-      // on a clone-on-read backend. Fall back to a fresh read only if (defensively) the
-      // loser was never handed out.
-      for (const edge of plan.outranksEdges) {
-        this.#store.putEdge(edge);
-      }
-      const edgeFor = new Map<StrandId, EdgeId>();
-      for (const edge of plan.outranksEdges) edgeFor.set(edge.to, edge.id);
-      for (const d of plan.demotions) {
-        // A1 — capture the loser's pre-persist store state for the DEMOTE receipt.
-        const fromStore = this.#store.getStrand(d.demoted);
-        const beforeHash = fromStore !== null ? hashStrandState(fromStore) : EMPTY_STATE_HASH;
-        const loser = handed.get(d.demoted) ?? fromStore;
-        if (loser !== null) {
-          this.#store.putStrand(loser);
-          const refEdge = edgeFor.get(d.demoted);
-          this.#emitMutation(
-            mutationReceipt(
-              "DEMOTE",
-              String(d.demoted),
-              String(loser.content_hash),
-              beforeHash,
-              hashStrandState(loser),
-              when,
-              refEdge === undefined ? undefined : String(refEdge),
-            ),
-          );
+        // APPLY the resolution to the store (the ledger emitted the PLAN; the engine is
+        // the only thing that may write the StrandStore). Persist each minted OUTRANKS
+        // edge and write back each demoted loser — the EXACT object the ledger mutated
+        // in place (cached in `handed`), so the DEMOTED state + outranked_by persist even
+        // on a clone-on-read backend. Fall back to a fresh read only if (defensively) the
+        // loser was never handed out.
+        for (const edge of plan.outranksEdges) {
+          this.#store.putEdge(edge);
         }
-      }
-
-      // PERSIST THE PROMOTED WINNER (the disown-reopen-cannot-change-winner fix): a
-      // `REOPENED_BY_DISOWN` dispute's winner can be a strand the ORIGINAL
-      // resolution had already demoted; `plan.winnerPromotion` is non-null exactly
-      // when the ledger flipped it back to LIVE, mirroring the demotion persistence
-      // above (persist the EXACT object the ledger mutated in place — `handed` — so
-      // the promotion survives on a clone-on-read backend too).
-      if (plan.winnerPromotion !== null) {
-        const fromStore = this.#store.getStrand(winnerStrandId);
-        const beforeHash = fromStore !== null ? hashStrandState(fromStore) : EMPTY_STATE_HASH;
-        const winnerObj = handed.get(winnerStrandId) ?? fromStore;
-        if (winnerObj !== null) {
-          this.#store.putStrand(winnerObj);
-          this.#emitMutation(
-            mutationReceipt(
-              "PROMOTE",
-              String(winnerStrandId),
-              String(winnerObj.content_hash),
-              beforeHash,
-              hashStrandState(winnerObj),
-              when,
-            ),
-          );
-        }
-      }
-
-      // A1 — journal the reputation EFFECTS the ledger drove (one receipt per distinct
-      // author per effect, deterministic by source id). The APPROVAL record already
-      // commits the DECISION; these add the EFFECT records so a hidden reputation move
-      // is detectable. before = the pre-approve snapshot; after = the now-final state.
-      if (this.#reputation !== null) {
-        const loserAuthors = new Set<SourceId>();
+        const edgeFor = new Map<StrandId, EdgeId>();
+        for (const edge of plan.outranksEdges) edgeFor.set(edge.to, edge.id);
         for (const d of plan.demotions) {
-          for (const a of ctx.authorsOf(d.demoted)) loserAuthors.add(a);
+          // A1 — capture the loser's pre-persist store state for the DEMOTE receipt.
+          const fromStore = this.#store.getStrand(d.demoted);
+          const beforeHash = fromStore !== null ? hashStrandState(fromStore) : EMPTY_STATE_HASH;
+          const loser = handed.get(d.demoted) ?? fromStore;
+          if (loser !== null) {
+            this.#store.putStrand(loser);
+            const refEdge = edgeFor.get(d.demoted);
+            this.#emitMutation(
+              mutationReceipt(
+                "DEMOTE",
+                String(d.demoted),
+                String(loser.content_hash),
+                beforeHash,
+                hashStrandState(loser),
+                when,
+                refEdge === undefined ? undefined : String(refEdge),
+              ),
+            );
+          }
         }
-        const winnerAuthors = new Set<SourceId>(ctx.authorsOf(winnerStrandId));
-        const sortIds = (xs: Iterable<SourceId>): SourceId[] =>
-          [...xs].sort((x, y) => (String(x) < String(y) ? -1 : String(x) > String(y) ? 1 : 0));
-        for (const a of sortIds(loserAuthors)) {
-          this.#emitMutation(
-            mutationReceipt(
-              "REPUTATION_CONTRADICT",
-              String(a),
-              hashSubjectId(String(a)),
-              hashReputationState(repBefore.get(a) ?? null),
-              hashReputationState(this.#reputation.stateOf(a)),
-              when,
-            ),
-          );
+
+        // PERSIST THE PROMOTED WINNER (the disown-reopen-cannot-change-winner fix): a
+        // `REOPENED_BY_DISOWN` dispute's winner can be a strand the ORIGINAL
+        // resolution had already demoted; `plan.winnerPromotion` is non-null exactly
+        // when the ledger flipped it back to LIVE, mirroring the demotion persistence
+        // above (persist the EXACT object the ledger mutated in place — `handed` — so
+        // the promotion survives on a clone-on-read backend too).
+        if (plan.winnerPromotion !== null) {
+          const fromStore = this.#store.getStrand(winnerStrandId);
+          const beforeHash = fromStore !== null ? hashStrandState(fromStore) : EMPTY_STATE_HASH;
+          const winnerObj = handed.get(winnerStrandId) ?? fromStore;
+          if (winnerObj !== null) {
+            this.#store.putStrand(winnerObj);
+            this.#emitMutation(
+              mutationReceipt(
+                "PROMOTE",
+                String(winnerStrandId),
+                String(winnerObj.content_hash),
+                beforeHash,
+                hashStrandState(winnerObj),
+                when,
+              ),
+            );
+          }
         }
-        for (const a of sortIds(winnerAuthors)) {
-          this.#emitMutation(
-            mutationReceipt(
-              "REPUTATION_RATIFY",
-              String(a),
-              hashSubjectId(String(a)),
-              hashReputationState(repBefore.get(a) ?? null),
-              hashReputationState(this.#reputation.stateOf(a)),
-              when,
-            ),
-          );
+
+        // A1 — journal the reputation EFFECTS the ledger drove (one receipt per distinct
+        // author per effect, deterministic by source id). The APPROVAL record already
+        // commits the DECISION; these add the EFFECT records so a hidden reputation move
+        // is detectable. before = the pre-approve snapshot; after = the now-final state.
+        if (this.#reputation !== null) {
+          const loserAuthors = new Set<SourceId>();
+          for (const d of plan.demotions) {
+            for (const a of ctx.authorsOf(d.demoted)) loserAuthors.add(a);
+          }
+          const winnerAuthors = new Set<SourceId>(ctx.authorsOf(winnerStrandId));
+          const sortIds = (xs: Iterable<SourceId>): SourceId[] =>
+            [...xs].sort((x, y) => (String(x) < String(y) ? -1 : String(x) > String(y) ? 1 : 0));
+          for (const a of sortIds(loserAuthors)) {
+            this.#emitMutation(
+              mutationReceipt(
+                "REPUTATION_CONTRADICT",
+                String(a),
+                hashSubjectId(String(a)),
+                hashReputationState(repBefore.get(a) ?? null),
+                hashReputationState(this.#reputation.stateOf(a)),
+                when,
+              ),
+            );
+          }
+          for (const a of sortIds(winnerAuthors)) {
+            this.#emitMutation(
+              mutationReceipt(
+                "REPUTATION_RATIFY",
+                String(a),
+                hashSubjectId(String(a)),
+                hashReputationState(repBefore.get(a) ?? null),
+                hashReputationState(this.#reputation.stateOf(a)),
+                when,
+              ),
+            );
+          }
         }
-      }
-      return plan;
-    });
+        return plan;
+      });
+    } catch (err) {
+      // RESYNC ON ROLLBACK (see the doc above `withTxn` call): the ledger's
+      // in-memory open-pending index may have advanced past what the store's
+      // rolled-back transaction actually committed. Re-derive it from the
+      // durable table so `listPending()` never reports a phantom resolution.
+      this.#ratification!.ledger.resyncIndex?.();
+      throw err;
+    }
 
     return resolved;
   }
