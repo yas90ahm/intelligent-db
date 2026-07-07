@@ -654,7 +654,7 @@ export function activationWalk(
   // 3) MANDATORY bridge sweep (phase 2). Enumeration is crack-B and currently
   //    yields nothing, so this clears immediately — but the drive loop is fully
   //    wired, so the sweep activates the moment crack-B lands with NO change here.
-  const sweepCtx: HaltContext =
+  const sweepBaseCtx: HaltContext =
     lastCtx ?? {
       strandId: seeds[0]?.strandId ?? ("" as StrandId),
       activation: 0,
@@ -662,8 +662,18 @@ export function activationWalk(
       now: asEpochMs(Date.now()),
       store: view,
     };
-  halting.beginBridgeSweep(sweepCtx);
+  halting.beginBridgeSweep(sweepBaseCtx);
   for (;;) {
+    // FIX (bridge-sweep-backstop-frozen): rebuild the context EVERY iteration
+    // with a FRESH wall-clock reading — `HaltContext` fields are readonly, and
+    // reusing one frozen object (as this used to) across the whole sweep loop
+    // meant `ctx.now` never advanced past the last LOCAL-phase pop, so the hard
+    // backstop's wall-clock check (`now - startedAt >= wallClockMs`) could
+    // never observe real elapsed time during a long-running phase 2. Only
+    // `now` needs to change per call; everything else in the base ctx
+    // (store view, last-popped strand/activation/novelty) is unused by
+    // `nextBridgeCrossing` except through `ctx.store`.
+    const sweepCtx: HaltContext = { ...sweepBaseCtx, now: asEpochMs(Date.now()) };
     const crossing = halting.nextBridgeCrossing(sweepCtx);
     if (crossing === null) break;
     // Perform the one guaranteed exploratory crossing: seed the far side.

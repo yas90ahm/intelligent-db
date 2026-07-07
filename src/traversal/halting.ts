@@ -433,6 +433,26 @@ class TwoPhaseHaltingController implements HaltingController {
       return null;
     }
 
+    // ADVANCE THE (SHARED) POP COUNTER (fixes `bridge-sweep-backstop-frozen`):
+    // `popCount` is the SAME field the hard backstop's absolute pop-cap check
+    // reads (`backstopTripped`, above and in `shouldStopLocal`). During the
+    // LOCAL phase it advances once per `onPop`; the bridge sweep never calls
+    // `onPop` (see the drive-loop doc on {@link HaltingController} — phase 2
+    // only ever calls `nextBridgeCrossing`/`recordCrossingYield`), so without
+    // this the absolute pop-cap dimension of the hard backstop was FROZEN for
+    // the entire sweep — a long-running phase 2 (many pending bridges, or a
+    // misconfigured `bridgeBudgetFraction`) could never trip it, exactly the
+    // "documented backstop never fires during phase 2" gap. Advancing the SAME
+    // counter here (rather than only the separate `bridgePopsConsumed` sub-
+    // budget tally below) makes `popCount` a true whole-walk total, so the
+    // absolute ceiling is a genuine backstop-of-last-resort across BOTH phases
+    // — exactly mirroring how a local phase that already exhausted `popCap`
+    // already blocks EVERY crossing here (the backstop check above, unchanged).
+    // Advanced BEFORE dispatch (mirrors `onPop`'s "record, then decide next
+    // time" pattern): this call's own backstop check already ran above, so the
+    // effect is observed starting with the NEXT `nextBridgeCrossing` call.
+    this.popCount += 1;
+
     // Pull the next owed bridge (all budget/breaker/backstop guards above have
     // passed, so at least one owed bridge remains and budget is available). Mark
     // it crossed so each lit bridge is returned at most once and is excluded from
