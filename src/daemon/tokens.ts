@@ -25,6 +25,20 @@
  *
  * ZERO new runtime deps: `node:crypto` (randomBytes, sha256) + `node:fs` only.
  * STACK NOTE: ESM + NodeNext (`.js` specifiers); `verbatimModuleSyntax`.
+ *
+ * `invalid-token-error-dead-code` (Wave 3 polish): this module used to export an
+ * `InvalidTokenError` class documented as "thrown by admin verbs / verify paths
+ * on an unknown or revoked token" — but nothing ever threw it. {@link
+ * TokenStore.verify} deliberately RETURNS `null` on an unknown/revoked token
+ * rather than throwing: its one production caller, `server.ts`'s handshake
+ * handler, must COMMUNICATE the rejection to a remote client over the wire
+ * (`authErr(...)`, a typed JSON response — see `#failHandshake`), not raise an
+ * in-process exception with no synchronous caller on the other end of a socket
+ * to catch it. The client side already has its own typed rejection,
+ * `client.ts`'s `DaemonAuthError`, thrown when a real client receives that
+ * wire-level rejection. With no genuine throw site on either side of the wire
+ * boundary, the honest fix was deletion, not manufacturing a caller for an
+ * error shape the architecture has no use for.
  */
 
 import { randomBytes, createHash } from "node:crypto";
@@ -90,17 +104,6 @@ export interface OwnerTokenFile {
   /** R9: the bound endpoint (POSIX socket path / Windows pipe name w/ random suffix). */
   readonly endpoint?: string;
   readonly mintedAt: number;
-}
-
-/** Thrown by admin verbs / verify paths on an unknown or revoked token. */
-export class InvalidTokenError extends Error {
-  constructor() {
-    // Deliberately generic: never echoes the fingerprint or any part of the
-    // token the caller presented (R3 — nothing that could aid a guessing
-    // oracle, and the raw value never reaches this class at all).
-    super("Daemon token invalid, unknown, or revoked.");
-    this.name = "InvalidTokenError";
-  }
 }
 
 // ---------------------------------------------------------------------------
