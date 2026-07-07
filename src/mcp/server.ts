@@ -75,6 +75,7 @@ import { readFile } from "node:fs/promises";
 
 import { createAgentMemory } from "../agent/agentMemory.js";
 import { createRemoteAgentMemory } from "../daemon/client.js";
+import { daemonLog } from "../daemon/log.js";
 import { syncToAsyncMemory } from "./asyncMemory.js";
 import type { AsyncAgentMemory } from "./asyncMemory.js";
 import { handleMcpRequestAsync } from "./handler.js";
@@ -222,6 +223,98 @@ export async function processLine(
   return handleMcpRequestAsync(req, memory);
 }
 
+/**
+ * Best-effort extraction of a JSON-RPC request `id` from a raw line, for
+ * {@link errorResponseFor} — never throws; falls back to `null` (mirroring
+ * `processLine`'s own parse-error path) for anything unparseable or
+ * id-shaped-wrong. A JSON-RPC id is always a string, number, or null; anything
+ * else in the parsed object is treated as absent rather than echoed verbatim.
+ */
+function bestEffortRequestId(line: string): McpResponse["id"] {
+  try {
+    const parsed: unknown = JSON.parse(line.trim());
+    if (parsed !== null && typeof parsed === "object" && "id" in parsed) {
+      const rawId = (parsed as { id?: unknown }).id;
+      if (typeof rawId === "string" || typeof rawId === "number" || rawId === null) {
+        return rawId;
+      }
+    }
+  } catch {
+    // Unparseable — falls through to null below.
+  }
+  return null;
+}
+
+/**
+ * mcp-dispatch-unguarded-promise-chain fix: the typed JSON-RPC error response
+ * for a line whose dispatch REJECTED instead of resolving to a response (see
+ * {@link dispatchLineSafely}'s doc for why this can happen even though
+ * `mcp/handler.ts`'s own per-tool branches each carry their own try/catch).
+ */
+function errorResponseFor(line: string, err: unknown): McpResponse {
+  return {
+    jsonrpc: "2.0",
+    id: bestEffortRequestId(line),
+    error: {
+      code: JSONRPC_INTERNAL_ERROR,
+      message: `Internal error while dispatching this request: ${err instanceof Error ? err.message : String(err)}`,
+    },
+  };
+}
+
+/**
+ * mcp-dispatch-unguarded-promise-chain fix (a re-audit finding, 2026-07-07):
+ * `processLine`/`handleMcpRequestAsync` are written to resolve to a typed
+ * JSON-RPC error response for every failure mode `mcp/handler.ts`'s own
+ * per-tool try/catch anticipates — but nothing protected against a failure
+ * mode NEITHER of them anticipates. Concretely reproducible today: a
+ * well-formed JSON line that is not a well-formed REQUEST OBJECT — a bare
+ * scalar/array/`null`, or an object with neither `id` nor `method`
+ * (`processLine`'s notification check `req.id === undefined &&
+ * req.method.startsWith(...)` short-circuits into calling `.startsWith` on
+ * `undefined`) — throws SYNCHRONOUSLY inside `handleMcpRequestAsync`, well
+ * before its own per-tool try/catch is even reached. `processLine` had no
+ * try/catch of its own around that call, so the throw became a REJECTED
+ * promise returned all the way out to `main()`'s `handleBatch`.
+ *
+ * Before this fix, that rejection propagated straight into `main()`'s single
+ * serial `queue` promise chain (see `enqueue` below): a `.then(onFulfilled)`
+ * attached to an ALREADY-REJECTED promise skips `onFulfilled` entirely and
+ * itself re-rejects — so EVERY batch enqueued after the failure silently
+ * stopped running its `handleBatch` body at all. The process would answer NO
+ * further request, ever, without crashing or exiting (a silent, total, and
+ * PERMANENT stall of a session that started working fine) — plus a genuine
+ * process-level `unhandledRejection` once stdin closed (the `end` handler's
+ * bare `queue.then(() => resolve())` is never itself awaited or caught, and
+ * `resolve()` on that branch never fires either, so `main()` itself would
+ * hang forever on top of it).
+ *
+ * Fixed: every line's dispatch gets its OWN try/catch here, so a rejection —
+ * from this exact malformed-request shape, or from any future failure mode
+ * neither `processLine` nor `handler.ts` anticipates (e.g. a daemon-backed
+ * `RemoteAgentMemory` call misbehaving in some new way) — can never escape
+ * into (and permanently wedge) the shared `queue` chain: `queue` itself never
+ * rejects, so every OTHER already- or later-submitted line keeps being served
+ * normally. See `mcp/dispatchErrorBoundary.test.ts` for the regression
+ * coverage (a realistic RANGE of malformed shapes, not one magic value, plus a
+ * direct proof that a batch enqueued AFTER a rejecting one still runs).
+ */
+export async function dispatchLineSafely(
+  line: string,
+  memory: AsyncAgentMemory,
+): Promise<McpResponse | null> {
+  try {
+    return await processLine(line, memory);
+  } catch (err) {
+    daemonLog({
+      event: "mcp_dispatch_error",
+      level: "error",
+      message: err instanceof Error ? (err.stack ?? err.message) : String(err),
+    });
+    return errorResponseFor(line, err);
+  }
+}
+
 // ---------------------------------------------------------------------------
 // Daemon-backed memory switch (opt-in; PHASE3_DAEMON_SPEC.md deliverable 2 +
 // PHASE3B_MCP_ASYNC_SPEC.md — full per-request dispatch is WIRED end-to-end:
@@ -325,7 +418,27 @@ export async function main(): Promise<void> {
     // Fail fast (clear error, bounded wait) BEFORE committing to this backing —
     // see validateDaemonConnectivity's doc. The long-lived connection actually
     // serving requests below is constructed fresh, separately.
-    await validateDaemonConnectivity(daemonConfig);
+    try {
+      await validateDaemonConnectivity(daemonConfig);
+    } catch (err) {
+      // zero-structured-logging fix (mcp/daemon-client layer): mirror the
+      // daemon server's own `daemonLog` — before this fix, a failed startup
+      // handshake surfaced only as a thrown Error caught by this bin's own
+      // top-level `main().catch()` (see the bottom of this file), with no
+      // structured, machine-greppable trace of WHAT was attempted.
+      daemonLog({
+        event: "mcp_daemon_connect_failed",
+        level: "error",
+        socketPath: daemonConfig.socketPath,
+        message: err instanceof Error ? err.message : String(err),
+      });
+      throw err;
+    }
+    daemonLog({
+      event: "mcp_daemon_connected",
+      level: "info",
+      socketPath: daemonConfig.socketPath,
+    });
     memory = createRemoteAgentMemory({ socketPath: daemonConfig.socketPath, token: daemonConfig.token });
   } else {
     const dbPath = process.env["MEMORY_DB"];
@@ -341,7 +454,7 @@ export async function main(): Promise<void> {
       process.stdout.write(JSON.stringify(overflowResponse()) + "\n");
     }
     for (const line of batch.lines) {
-      const response = await processLine(line, memory);
+      const response = await dispatchLineSafely(line, memory);
       if (response !== null) {
         process.stdout.write(JSON.stringify(response) + "\n");
       }
