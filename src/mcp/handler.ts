@@ -3,8 +3,24 @@
  *
  * A REAL Claude/agent connects to a memory server over the Model Context Protocol
  * (MCP), which is JSON-RPC 2.0. This module is the PURE core of that server: it maps
- * a parsed JSON-RPC request + an {@link AgentMemory} to a JSON-RPC response, with NO
- * I/O. The thin stdio transport (mcp/server.ts) frames stdin/stdout around it.
+ * a parsed JSON-RPC request + an {@link AsyncAgentMemory} to a JSON-RPC response,
+ * with NO I/O of its own. The thin stdio transport (mcp/server.ts) frames
+ * stdin/stdout around it.
+ *
+ * ASYNC DISPATCH — THE SINGLE SOURCE OF TRUTH (PHASE3B_MCP_ASYNC_SPEC.md):
+ * {@link handleMcpRequestAsync} is the ONE dispatch implementation, whether the
+ * memory behind it lives in-process (wrapped via `mcp/asyncMemory.ts`'s
+ * `syncToAsyncMemory`, the permanent default) or across a daemon socket
+ * (`daemon/client.ts`'s `createRemoteAgentMemory`, whose `RemoteAgentMemory`
+ * already satisfies {@link AsyncAgentMemory} structurally — no separate glue).
+ * There is deliberately no second, divergent "sync" copy of this switch: a real
+ * synchronous bridge over async socket I/O was tried and rejected (a reproduced
+ * `worker_threads` + `Atomics.wait` stall under genuine socket I/O — see
+ * daemon/client.ts's module doc), so every caller — in-process or daemon-backed,
+ * production code or test — dispatches through this one `async` function.
+ * Awaiting an already-resolved value (the in-process case) costs one microtask
+ * tick, not a socket round trip, so this is not a performance regression for the
+ * common case.
  *
  * We HAND-ROLL a minimal MCP server rather than adding `@modelcontextprotocol/sdk`:
  * the project's hard constraint is ZERO external runtime deps, and the surface we need
@@ -48,7 +64,8 @@
 
 import { randomBytes } from "node:crypto";
 
-import type { AgentMemory, PendingQuestion } from "../agent/agentMemory.js";
+import type { PendingQuestion } from "../agent/agentMemory.js";
+import type { AsyncAgentMemory } from "./asyncMemory.js";
 import type { ExplainReport } from "../api.js";
 import { FactState } from "../core/types.js";
 import type { ContradictionSetId, StrandId } from "../core/types.js";
@@ -130,10 +147,16 @@ const ORIGIN_KINDS = ["user", "web", "document", "tool"] as const;
 // resolve-pending-no-consent-binding fix — confirmation tokens.
 //
 // Minted per QUESTION (keyed by contradictionSetId) at `list_pending_questions`
-// time, single-use, short-TTL. Scoped per `AgentMemory` instance via a
+// time, single-use, short-TTL. Scoped per `AsyncAgentMemory` instance via a
 // `WeakMap` — never a module-global — so distinct memory instances (distinct
 // tests, or in principle distinct sessions sharing this process) never see
 // each other's tokens, and the map is garbage-collected with its memory.
+// IDENTITY NOTE: for the in-process path this key is the MEMOIZED wrapper
+// `mcp/asyncMemory.ts`'s `syncToAsyncMemory` returns (stable per underlying
+// `AgentMemory`, so `list_pending_questions` and a later `resolve_pending`
+// against the SAME session see the SAME token map even if each call re-wraps);
+// for the daemon-backed path it is the one long-lived `RemoteAgentMemory`
+// object the transport constructs once at startup.
 // ---------------------------------------------------------------------------
 
 /** How long a minted confirmation token stays valid (5 minutes). */
@@ -144,9 +167,9 @@ interface ConfirmationEntry {
   readonly expiresAt: number;
 }
 
-const CONFIRMATION_TOKENS = new WeakMap<AgentMemory, Map<string, ConfirmationEntry>>();
+const CONFIRMATION_TOKENS = new WeakMap<AsyncAgentMemory, Map<string, ConfirmationEntry>>();
 
-function confirmationMapFor(memory: AgentMemory): Map<string, ConfirmationEntry> {
+function confirmationMapFor(memory: AsyncAgentMemory): Map<string, ConfirmationEntry> {
   let m = CONFIRMATION_TOKENS.get(memory);
   if (m === undefined) {
     m = new Map();
@@ -161,7 +184,7 @@ function confirmationMapFor(memory: AgentMemory): Map<string, ConfirmationEntry>
  * re-listing an already-open dispute simply re-mints (the newest listing's
  * token is the valid one; nothing is lost by listing twice).
  */
-function mintConfirmationToken(memory: AgentMemory, csid: string, now: number, ttlMs: number): string {
+function mintConfirmationToken(memory: AsyncAgentMemory, csid: string, now: number, ttlMs: number): string {
   const token = randomBytes(16).toString("hex");
   confirmationMapFor(memory).set(csid, { token, expiresAt: now + ttlMs });
   return token;
@@ -172,7 +195,7 @@ function mintConfirmationToken(memory: AgentMemory, csid: string, now: number, t
  * bounded to the currently-open dispute set rather than growing forever over
  * a long session).
  */
-function pruneConfirmationTokens(memory: AgentMemory, openCsids: ReadonlySet<string>): void {
+function pruneConfirmationTokens(memory: AsyncAgentMemory, openCsids: ReadonlySet<string>): void {
   const map = confirmationMapFor(memory);
   for (const csid of [...map.keys()]) {
     if (!openCsids.has(csid)) map.delete(csid);
@@ -185,7 +208,7 @@ function pruneConfirmationTokens(memory: AgentMemory, openCsids: ReadonlySet<str
  * matches exactly — in every case (match or not) the stored entry for `csid`
  * is removed, so a token can never be replayed even against a retry.
  */
-function consumeConfirmationToken(memory: AgentMemory, csid: string, presented: string, now: number): boolean {
+function consumeConfirmationToken(memory: AsyncAgentMemory, csid: string, presented: string, now: number): boolean {
   const map = confirmationMapFor(memory);
   const entry = map.get(csid);
   map.delete(csid);
@@ -405,15 +428,17 @@ export interface McpHandlerDeps {
 }
 
 /**
- * Handle one parsed JSON-RPC request against an {@link AgentMemory}, returning the
- * JSON-RPC response (or `null` for a notification, which carries no id and expects no
- * reply). Pure except for the memory side effects the dispatched tool performs; no I/O.
+ * Handle one parsed JSON-RPC request against an {@link AsyncAgentMemory}, returning
+ * the JSON-RPC response (or `null` for a notification, which carries no id and
+ * expects no reply). THE SINGLE DISPATCH IMPLEMENTATION — see the module doc's
+ * "ASYNC DISPATCH" section. Pure except for the memory side effects the
+ * dispatched tool performs; no I/O of its own.
  */
-export function handleMcpRequest(
+export async function handleMcpRequestAsync(
   req: McpRequest,
-  memory: AgentMemory,
+  memory: AsyncAgentMemory,
   deps?: McpHandlerDeps,
-): McpResponse | null {
+): Promise<McpResponse | null> {
   const id = req.id ?? null;
 
   // Notifications (e.g. "notifications/initialized") have no id and need no reply.
@@ -445,12 +470,12 @@ export function handleMcpRequest(
   }
 }
 
-function handleToolsCall(
+async function handleToolsCall(
   id: string | number | null,
   params: unknown,
-  memory: AgentMemory,
+  memory: AsyncAgentMemory,
   deps?: McpHandlerDeps,
-): McpResponse {
+): Promise<McpResponse> {
   const p = asRecord(params);
   const name = p["name"];
   const args = asRecord(p["arguments"]);
@@ -523,7 +548,7 @@ function handleToolsCall(
     }
 
     try {
-      const { id: strandId } = memory.remember({
+      const { id: strandId } = await memory.remember({
         text,
         ...(typeof entity === "string" ? { entity } : {}),
         ...(typeof attribute === "string" ? { attribute } : {}),
@@ -557,7 +582,7 @@ function handleToolsCall(
     }
     try {
       const cue: Cue = { text: query };
-      const { facts } = memory.recall(cue);
+      const { facts } = await memory.recall(cue);
       return ok(id, textResult(renderFacts(facts)));
     } catch (err) {
       return fail(id, JSONRPC_INTERNAL_ERROR, errorMessage(err));
@@ -567,7 +592,7 @@ function handleToolsCall(
   // PHASE 4 — the personal-tier dispute horn, surfaced to the connected agent.
   if (name === "list_pending_questions") {
     try {
-      const questions = memory.pendingQuestions();
+      const questions = await memory.pendingQuestions();
       const now = deps?.clock?.() ?? Date.now();
       const ttlMs = deps?.pendingConfirmationTtlMs ?? PENDING_CONFIRMATION_TTL_MS;
       // resolve-pending-no-consent-binding fix: mint one fresh, single-use
@@ -652,7 +677,7 @@ function handleToolsCall(
       );
     }
     try {
-      const resolved = memory.resolvePending(
+      const resolved = await memory.resolvePending(
         csid as ContradictionSetId,
         chosen as StrandId,
       );
@@ -689,7 +714,7 @@ function handleToolsCall(
       );
     }
     try {
-      const report = memory.explain(strandId as StrandId);
+      const report = await memory.explain(strandId as StrandId);
       if (report === null) {
         return fail(id, JSONRPC_INVALID_PARAMS, "why_do_you_believe_this: unknown strandId.");
       }

@@ -553,7 +553,11 @@ export type {
 // ===========================================================================
 
 export {
-  handleMcpRequest,
+  // PHASE3B_MCP_ASYNC_SPEC.md: the single async dispatch implementation — see
+  // mcp/handler.ts's module doc. Async everywhere (in-process or daemon-backed);
+  // awaiting an already-resolved value (the in-process case, via
+  // `syncToAsyncMemory`) costs one microtask tick, not a socket round trip.
+  handleMcpRequestAsync,
   TOOLS as MCP_TOOLS,
   SERVER_INFO as MCP_SERVER_INFO,
   MCP_PROTOCOL_VERSION,
@@ -575,6 +579,13 @@ export type {
   McpResponse,
   McpError,
 } from "./mcp/handler.js";
+
+export type {
+  // The narrow async projection of AgentMemory the MCP handler dispatches
+  // against, plus the trivial in-process adapter — see mcp/asyncMemory.ts.
+  AsyncAgentMemory,
+} from "./mcp/asyncMemory.js";
+export { syncToAsyncMemory } from "./mcp/asyncMemory.js";
 
 export {
   processLine as mcpProcessLine,

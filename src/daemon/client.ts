@@ -10,8 +10,7 @@
  * is a pure opt-in alternative backing, selected explicitly by the caller
  * (mcp/server.ts's startup switch, deliverable 2).
  *
- * ── THE SYNC/ASYNC SEAM (read before wiring this into anything — DISCLOSED
- * DEVIATION, not hidden) ─────────────────────────────────────────────────────
+ * ── THE SYNC/ASYNC SEAM (read before wiring this into anything) ─────────────
  * A real socket/pipe round trip is inherently asynchronous in Node. `node:net`
  * has no non-blocking-compatible way to make socket I/O appear synchronous on
  * the calling thread without either (a) a native addon (forbidden — zero new
@@ -39,14 +38,21 @@
  * GC) — a trivial worker (one `setTimeout` + `postMessage`, no allocation
  * pressure) validated the primitive fine in isolation, but a worker doing
  * REAL I/O work reproducibly did not. Shipping that bridge would have meant
- * an intermittently-hanging daemon client — worse than the honest gap this
- * module leaves instead. See mcp/server.ts's daemon-backing switch for how
- * deliverable 2 handles this: the switch wires configuration/construction and
- * validates connectivity at startup; full per-request dispatch through the
- * unchanged, synchronous `handleMcpRequest` is NOT wired in this pass (a
- * disclosed scope boundary, not a silent gap — a follow-up needs either an
- * async-capable transport loop or a proven-safe synchronous bridge, neither
- * of which this pass could respons­ibly ship).
+ * an intermittently-hanging daemon client — worse than the honest async-only
+ * design PHASE3B_MCP_ASYNC_SPEC.md settled on instead: rather than bridge
+ * this module DOWN to a synchronous `AgentMemory` shape, `mcp/handler.ts`'s
+ * dispatch went UP to an async shape (`AsyncAgentMemory`,
+ * `handleMcpRequestAsync` — the SINGLE dispatch implementation for both the
+ * in-process and daemon-backed paths). `RemoteAgentMemory` below already
+ * satisfies `mcp/asyncMemory.ts`'s narrow `AsyncAgentMemory` contract
+ * STRUCTURALLY for the five MCP-surface verbs (`remember`/`recall`/
+ * `pendingQuestions`/`resolvePending`/`explain`) plus `close` — every extra
+ * parameter (`requestId`, H5) is optional, so `mcp/server.ts` hands this
+ * object straight to `handleMcpRequestAsync` with zero glue (see
+ * `__AssertRemoteAgentMemorySatisfiesAsyncAgentMemory` below — a compile-time
+ * proof, no runtime effect). The in-process path needs one trivial adapter
+ * (`syncToAsyncMemory`, in `mcp/asyncMemory.ts`) since `AgentMemory` itself
+ * stays synchronous; this module needs none.
  *
  * `trust` / `engine` are NOT proxied remotely: both are rich, multi-method
  * "advanced caller" escape hatches (a whole `TrustRegistry` / `IntelligentDb`
@@ -78,6 +84,7 @@ import type { AgentMemory } from "../agent/agentMemory.js";
 import type { IntelligentDb } from "../api.js";
 import type { TrustRegistry } from "../identity/trustRegistry.js";
 import type { SourceId } from "../core/types.js";
+import type { AsyncAgentMemory } from "../mcp/asyncMemory.js";
 
 // ---------------------------------------------------------------------------
 // Typed errors (never fabricated success/failure — R6/H4)
@@ -582,6 +589,21 @@ export interface RemoteAgentMemory {
   /** Close the connection; stop reconnecting; fail everything outstanding UNKNOWN. */
   close(): Promise<void>;
 }
+
+/**
+ * COMPILE-TIME PROOF, no runtime effect (PHASE3B_MCP_ASYNC_SPEC.md #2):
+ * {@link RemoteAgentMemory} satisfies `mcp/asyncMemory.ts`'s narrow
+ * {@link AsyncAgentMemory} contract for the five MCP-surface verbs plus
+ * `close` — the SAME object `mcp/server.ts` hands `handleMcpRequestAsync`
+ * directly, with no adapter (unlike the in-process path, which needs
+ * `syncToAsyncMemory`). If a future edit to either interface ever breaks this,
+ * `never` here turns into a type error at this exact line instead of a
+ * silent runtime mismatch discovered only when the daemon-backed MCP path is
+ * exercised.
+ */
+export type __AssertRemoteAgentMemorySatisfiesAsyncAgentMemory = RemoteAgentMemory extends AsyncAgentMemory
+  ? true
+  : never;
 
 export interface RemoteAgentMemoryOptions {
   /** The daemon's Unix socket path / Windows named pipe path. */
