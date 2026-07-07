@@ -214,6 +214,66 @@ function asString(v: unknown): string {
 }
 
 /**
+ * REFUSE-TO-OPEN error: thrown by the `{ db }` (borrowed shared-handle) overload of
+ * every durable, WAL-verifying constructor (`createSqliteStore`, and — sharing this
+ * exported helper per its own doc — `createSqliteReputationLedger` /
+ * `createSqlitePendingLedger`) when the handle it was given is not actually in WAL
+ * journal mode.
+ *
+ * WHY THIS EXISTS: the OWNED-path constructor (a plain string path) has always
+ * verified `PRAGMA journal_mode=WAL` actually took before trusting the store's crash-
+ * safety claims (see the constructor below). The shared-handle recipe this codebase
+ * documents as "the bank's atomic-durability default" (facts + trust + audit riding
+ * one `DatabaseSync`) used to skip that verification ENTIRELY for a borrowed handle —
+ * so following the documented recipe verbatim silently ran the whole compound-write
+ * atomicity story over a default ROLLBACK journal, not WAL, with no symptom short of
+ * an actual crash losing data. See CLAUDE.md's durability pillar.
+ */
+export class SharedHandleNotWalError extends Error {
+  constructor(
+    public readonly caller: string,
+    public readonly foundJournalMode: string,
+  ) {
+    super(
+      `${caller}: a shared { db } handle was passed but it is not in WAL journal mode ` +
+        `(PRAGMA journal_mode reports "${foundJournalMode}"). The shared-handle overload ` +
+        `is a BORROWER: by design it never issues PRAGMA journal_mode=WAL itself (only the ` +
+        `code that OWNS the handle — the first thing to open it — should set connection-wide ` +
+        `pragmas; a borrower silently re-running it could race another borrower's already-open ` +
+        `transaction). It only VERIFIES. Fix: run 'PRAGMA journal_mode=WAL' on the handle (and ` +
+        `confirm it reports back "wal") immediately after opening it with 'new DatabaseSync(path)', ` +
+        `BEFORE constructing ${caller} (or any other shared-handle store/ledger) against it.`,
+    );
+    this.name = "SharedHandleNotWalError";
+  }
+}
+
+/**
+ * Verify (never SET) that a BORROWED `db` handle is already in WAL journal mode, or
+ * legitimately `:memory:` (non-durable by design, e.g. a test substrate) — throwing
+ * {@link SharedHandleNotWalError} otherwise. Every `{ db }`-overload constructor that
+ * durably persists to this handle calls this ONCE from its own constructor so the
+ * shared-handle recipe's "one atomic crash-consistent file" claim actually holds
+ * whichever subsystem happens to construct first against a fresh handle — this
+ * function does not care which. Read-only: issues `PRAGMA journal_mode` (a bare read,
+ * no `=WAL` request), never writes the pragma — mirroring "the owner of the handle
+ * must set it; the borrower verifies."
+ *
+ * @param db `DatabaseSyncType` the caller only holds by BORROW (`ownsDb === false`).
+ * @param caller a short label for the constructing factory, used in the thrown
+ *   error's message (e.g. `"createSqliteStore"`).
+ */
+export function assertSharedHandleWal(db: DatabaseSyncType, caller: string): void {
+  const row = db.prepare("PRAGMA journal_mode").get() as
+    | Record<string, unknown>
+    | undefined;
+  const mode = String(row?.["journal_mode"] ?? "").toLowerCase();
+  if (mode !== "wal" && mode !== "memory") {
+    throw new SharedHandleNotWalError(caller, mode);
+  }
+}
+
+/**
  * Durable, WAL-mode, SQLite-backed {@link StrandStore}. Single-file persistence with
  * the same adjacency / entity / attribute indexing the in-memory backend provides,
  * plus crash-safety. All methods are synchronous (the contract is sync; `node:sqlite`
@@ -321,6 +381,14 @@ class SqliteStrandStoreImpl implements SqliteStrandStore {
       // does not grow unbounded under a long write burst. Default behavior, made
       // explicit; does not affect per-commit crash-safety.
       this.#db.exec("PRAGMA wal_autocheckpoint=1000");
+    } else {
+      // BORROWED shared handle: this constructor must NEVER set connection-wide
+      // pragmas on someone else's handle (see assertSharedHandleWal's doc) — it only
+      // VERIFIES the owner already put it in WAL mode. Without this, the documented
+      // shared-handle recipe (facts + trust + audit riding one DatabaseSync) silently
+      // runs over the DEFAULT rollback journal, not WAL, with no symptom short of an
+      // actual crash losing committed data.
+      assertSharedHandleWal(this.#db, "createSqliteStore");
     }
 
     // SCHEMA MIGRATION LADDER (Phase 2 Durability spec §1): stamps a fresh db at
@@ -661,7 +729,10 @@ class SqliteStrandStoreImpl implements SqliteStrandStore {
  *    live in ONE crash-consistent file and a compound operation's writes across all
  *    three commit together under one {@link SqliteStrandStore.beginTxn}. `close()` is
  *    then a NO-OP — only the single owner of the shared handle may close it. This is
- *    the bank's atomic-durability default.
+ *    the bank's atomic-durability default. The CALLER that opened the handle owns
+ *    putting it in WAL mode (this overload only VERIFIES — see
+ *    {@link assertSharedHandleWal} — and throws {@link SharedHandleNotWalError} if the
+ *    handle is not already WAL/`:memory:` when construction runs).
  *
  * @example
  *   // Owned handle (the simple durable case):
@@ -671,6 +742,7 @@ class SqliteStrandStoreImpl implements SqliteStrandStore {
  * @example
  *   // Shared handle (facts + trust + audit, one atomic file):
  *   const handle = new DatabaseSync("/var/lib/idb/web.db");
+ *   handle.exec("PRAGMA journal_mode=WAL"); // the OWNER sets it; every borrower verifies
  *   const store = createSqliteStore({ db: handle });
  *   const rep   = createSqliteReputationLedger(repCapOf, { db: handle });
  *   const audit = createSqlitePendingLedger({ db: handle, reputation: rep });

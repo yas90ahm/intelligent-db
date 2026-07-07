@@ -23,10 +23,13 @@
  * closes the store and removes the db plus its WAL/SHM siblings.
  */
 
+import { createRequire } from "node:module";
 import { rmSync } from "node:fs";
 import { freshSource } from "../testSupport/identityFixtures.js";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+
+import type { DatabaseSync as DatabaseSyncType } from "node:sqlite";
 
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
@@ -45,7 +48,16 @@ import {
   type Strand,
   type StrandId,
 } from "../core/types.js";
-import { createSqliteStore, type SqliteStrandStore } from "./sqliteStore.js";
+import {
+  createSqliteStore,
+  SharedHandleNotWalError,
+  type SqliteStrandStore,
+} from "./sqliteStore.js";
+
+const require = createRequire(import.meta.url);
+const { DatabaseSync } = require("node:sqlite") as {
+  DatabaseSync: new (path: string) => DatabaseSyncType;
+};
 
 import {
   createIntelligentDb,
@@ -496,5 +508,75 @@ describe("SqliteStrandStore — engine drop-in persists writeFact across a resta
     const litIds = result.lit.map((l) => l.strandId);
     expect(litIds).toContain(a);
     expect(litIds).toContain(b);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Regression: shared-handle-wal-never-enabled
+// ---------------------------------------------------------------------------
+//
+// BUG (pre-fix): the documented `{ db }` shared-handle recipe (`createSqliteStore`'s
+// own JSDoc example — "the bank's atomic-durability default") never verified, or
+// even set, WAL mode for a BORROWED handle (the owned-path string constructor's WAL
+// verification block was gated behind `if (opts.ownsDb)` only). Following that
+// recipe verbatim silently ran the whole "one atomic crash-consistent file" story
+// over a default rollback journal, with no symptom short of an actual crash losing
+// committed data.
+//
+// FIX: the `{ db }` overload now calls `assertSharedHandleWal`, which VERIFIES
+// (never sets) that the borrowed handle already reports `journal_mode = wal` (or
+// the legitimately non-durable `:memory:`), throwing `SharedHandleNotWalError`
+// otherwise. The OWNER of the handle is still the one responsible for setting WAL.
+describe("SqliteStrandStore — { db } shared-handle overload verifies WAL mode", () => {
+  let sharedPath: string;
+  let sharedHandle: DatabaseSyncType | null;
+
+  beforeEach(() => {
+    const unique = `${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+    sharedPath = join(tmpdir(), `idb-sqlite-shared-wal-${unique}.db`);
+    sharedHandle = null;
+  });
+
+  afterEach(() => {
+    try {
+      sharedHandle?.close();
+    } catch {
+      // already closed by the test
+    }
+    for (const suffix of ["", "-wal", "-shm", "-journal"]) {
+      rmSync(sharedPath + suffix, { force: true });
+    }
+  });
+
+  it("THROWS SharedHandleNotWalError when the borrowed handle is not in WAL mode", () => {
+    sharedHandle = new DatabaseSync(sharedPath);
+    // Deliberately do nothing else -- a fresh DatabaseSync defaults to a rollback
+    // journal ("delete"), not WAL. This is the exact documented shared-handle recipe
+    // followed verbatim (no `PRAGMA journal_mode=WAL` call), the shape the audit
+    // reproduced live against the compiled build.
+    const mode = sharedHandle
+      .prepare("PRAGMA journal_mode")
+      .get() as { journal_mode: string };
+    expect(mode.journal_mode.toLowerCase()).not.toBe("wal");
+
+    expect(() => createSqliteStore({ db: sharedHandle! })).toThrow(
+      SharedHandleNotWalError,
+    );
+  });
+
+  it("succeeds once the OWNER has set the borrowed handle to WAL mode", () => {
+    sharedHandle = new DatabaseSync(sharedPath);
+    sharedHandle.exec("PRAGMA journal_mode=WAL");
+
+    const shared = createSqliteStore({ db: sharedHandle });
+    expect(shared.integrityCheck()).toBe(true);
+    shared.putStrand(makeStrand("shared-a", "E1", null));
+    expect(shared.getStrand("shared-a" as StrandId)).not.toBeNull();
+  });
+
+  it("succeeds over a :memory: shared handle (non-durable by design, legitimately reports 'memory')", () => {
+    sharedHandle = new DatabaseSync(":memory:");
+    const shared = createSqliteStore({ db: sharedHandle });
+    expect(shared.integrityCheck()).toBe(true);
   });
 });
