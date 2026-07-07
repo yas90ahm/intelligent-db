@@ -227,15 +227,21 @@ cycles. The in-process default (`createAgentMemory()`, above) is unchanged and r
 default forever; reach for `intelligent-db-daemon` (see [`OPERATIONS.md`](./OPERATIONS.md))
 only once you actually have multiple processes needing shared memory.
 
-**Audit remediation (Wave 1), 2026-07-07:** a hostile pre-launch audit found eight places where
-this README/CLAUDE.md described intent rather than the shipped code — including the daemon
-verb-grading claim above and the atomicity-floor claim above. Ten critical/high findings were
-fixed and independently re-verified (source read, live repro, and revert-and-observe for the
-trust-critical ones); seven of the eight invariant claims are now genuinely true and test-backed,
-one (convergence-ordered pop priority) is still dead code and is named as such rather than
-claimed fixed. Full list, fix-by-fix, with the regression test for each:
-[`CLAUDE.md`](./CLAUDE.md#audit-remediation-wave-1--2026-07-07). The audit's Wave 2/3 backlog
-(hardening and polish items, none of them a broken invariant) remains open.
+**Audit remediation, 2026-07-07:** a hostile pre-launch audit found eight places where this
+README/CLAUDE.md described intent rather than the shipped code — including the daemon
+verb-grading claim above and the atomicity-floor claim above. A first pass (Wave 1) fixed ten
+critical/high findings, independently re-verified (source read, live repro, and
+revert-and-observe for the trust-critical ones); seven of the eight invariant claims came out
+genuinely true and test-backed, and one — convergence-ordered pop priority — was named as still
+dead code rather than claimed fixed. A second pass (Wave 2) closed the remaining 28 findings on
+the backlog, including that eighth claim: the dead ordering tiebreak is now removed from the
+codebase rather than wired up, confirmed a behavioral no-op by direct inspection and a dedicated
+regression test. An independent verifier re-ran the full suite and the trust-integrity gates
+(Sybil 24/24 in both rank modes, FactWorld 0% ASR) with no regression and no belief/trust
+invariant weakened. Full list, fix-by-fix, with the regression test for each:
+[`CLAUDE.md`](./CLAUDE.md#audit-remediation-wave-1--2026-07-07) and
+[`CLAUDE.md`](./CLAUDE.md#audit-remediation-wave-2--2026-07-07). The audit's Wave 3 backlog
+(polish items, none of them a broken invariant) remains open.
 
 ---
 

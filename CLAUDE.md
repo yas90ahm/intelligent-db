@@ -112,22 +112,84 @@ trust-math gates. Two adjacent durability gaps were closed in the same pass, alo
 counted among the ten above: the shared-`{ db }`-handle recipe never actually verified WAL mode had
 taken (`SharedHandleNotWalError`, above), and item 8's restore gap.
 
-**Not done, and this file does not claim otherwise:** the audit's Wave 2 (28 items) and Wave 3 (15
-items) backlogs are open. Of the eight invariant claims the audit named, seven are now genuinely
-true and test-backed (the ten fixes above cover them); the eighth — convergence-ordered pop
-priority — is still dead code (`Strand.register` is never populated to anything but `null` anywhere
-in the engine, so `walk.ts`'s `convergence_factor` ordering key always reads 0; see KNOWN
-LIMITATIONS below) and is corrected here rather than fixed. Other open Wave-2 items, none of which
-falsify a stated invariant the way the Wave-1 items did: the daemon's single FIFO queue still
-serializes reads behind writes; `resolve_pending`'s human-consent gate has no technical (only
-instructional) binding; the daemon and MCP server have no structured logging or health/status verb;
-and `explain()`/`ratify()` still do more ledger scanning than the indexes above would allow. These
-are hardening debt, not broken guarantees, but they are real and unresolved.
+**Wave 1 and Wave 2 are both done. Wave 3 (15 items, polish) is open** — see the Wave 2
+remediation note right after this section for what closed and when. Of the eight invariant
+claims the original audit named, all eight are now genuinely true and test-backed: the ten
+Wave-1 fixes covered seven, and Wave 2 closed the eighth — convergence-ordered pop priority,
+previously dead code, now removed rather than wired up (see KNOWN LIMITATIONS below for why
+removal was the right call, not activation). One item from the earlier Wave-2 punch list stays
+open on purpose, not by oversight: the daemon's single FIFO queue still serializes reads behind
+writes (R4, an accepted v1 scale trade-off at the documented 10-client target — see
+`OPERATIONS.md` §3). Everything else Wave 2 touched — the health/status verb, structured
+daemon logging, `resolve_pending`'s consent binding, and the `explain()`/`ratify()` ledger-scan
+indexing — is closed.
+
+### Audit remediation (Wave 2) — 2026-07-07
+
+A second adversarial pass worked the Wave-2 backlog (28 findings across four lanes: daemon/MCP,
+store/durability, identity/ratification/forgetting, traversal/perf) and an independent
+adversarial verifier re-ran the whole suite plus the trust-integrity gates (Sybil 24/24 in both
+rank modes against a live embedder, FactWorld 0% ASR, the fast no-network Sybil arms), spot-
+checked six of the regression tests by reverting each fix and confirming the test fails with the
+predicted symptom, and confirmed all 28 items closed with no regression and no belief/trust
+invariant weakened. All four lanes verdict **FIXED**; full detail in each lane's own report
+(scratchpad `w2-daemon.md`/`w2-store.md`/`w2-c1.md`/`w2-c2.md`, verifier report `w2-verify.md`).
+
+What closed:
+- **Two genuine trust-semantic bugs**, both in the belief/ratification path, neither weakening
+  a fail-closed gate: `downstreamDisownSweep` was skipping the class-bounded reputation
+  clawback for any derived strand that survived demotion (a strand could carry a THIRD,
+  tainted-class root and keep its accomplice's credit); and `tryConsolidate`'s decisive-margin
+  gate computed the reputation gap against the raw #2-ranked member instead of the true
+  competing claim, so an agreeing corroborator ranked just under the winner could shrink the
+  gap and spuriously defer a genuinely decisive dispute to a human. (This bug only ever
+  over-defers; it can never let a false winner through — confirmed by both the fixing lane and
+  the independent verifier.)
+- **An index-staleness bug one layer deeper than Wave 1's `approve()` fix**: `disown()`'s
+  HARDENING-3 reopen path appended a `REOPENED_BY_DISOWN` dispute inside the sweep's own
+  transaction; a later throw in the same sweep rolled back the durable INSERT but left the
+  pending ledger's in-memory open-dispute index still showing the phantom reopen. Fixed by
+  wiring the same `resyncIndex()` recovery path Wave 1 built for `approve()` into `disown()`'s
+  reopen branch too.
+- **WAL verification extended from the store to every constructor that needed it.** Wave 1
+  closed this for `SqliteStrandStore`; Wave 2 found the identical unverified-borrowed-handle gap
+  in `identity/reputation.ts` and `ratification/pendingLedger.ts`'s shared-handle constructors
+  (and, on the store side, the vector sidecar) and closed all of them the same way: verify, never
+  silently set, throwing `SharedHandleNotWalError` on a borrowed non-WAL handle.
+- **Convergence-ordered pop priority — removed, not activated.** See the note above and in
+  KNOWN LIMITATIONS: `Strand.register`/`ActivationRegister` and the dead ordering tiebreak are
+  gone from the codebase, confirmed a behavioral no-op by direct inspection and by a dedicated
+  before/after regression test.
+- **Daemon operability**: a `status`/`ping` verb (connection count, queue depth, uptime, both
+  chains' heads), structured logging on every connect/reject/admin-verb/error/shutdown event,
+  atomic (temp-then-rename) token-registry writes so a crash mid-write can't produce a
+  silently-wiped registry, a single-use short-TTL confirmation token binding
+  `list_pending_questions` to `resolve_pending` (closing the "any authenticated call can resolve
+  any dispute" gap), a corrected two-ceiling connection cap (an unauthenticated flood can no
+  longer starve authenticated capacity), and mandatory startup chain self-verification
+  (`verifyChainsAtStartup`, refuses to serve on a broken chain) plus an on-demand `verifyChains`
+  admin verb — see `OPERATIONS.md` §8.
+- **Store/durability test debt**: a cross-backend clone-parity regression test for
+  `getStrand`/`neighbors`/etc. (the fix had already landed pre-Wave-2; this closed the missing
+  coverage), a bounded-heap `topK` replacing the vector sidecar's full-materialize-then-sort
+  (O(n) memory to O(k)), a schema-migration mid-ladder rollback test, and a `ratify()`
+  atomicity test wired through the real default `createAgentMemory({ dbPath })` facade (Wave 1
+  only covered `approve()`).
+- **Perf debt on hot paths**: `explain()`'s three full linear ledger scans replaced with
+  point-lookup indexes; `ratify()`/`explain()` each stopped computing the same agreement set
+  twice; the activation walk stopped re-fetching a strand's out-edges up to three times per pop.
+
+Full suite at the end of this pass: `npm run typecheck` clean; `npx vitest run` — 798 passed, 43
+skipped, 0 failed, reproduced twice by an independent verifier with an untouched working tree.
+No movement in the Sybil or FactWorld trust-integrity gates.
+
+**Not done, and this file does not claim otherwise:** the audit's Wave 3 backlog (15 items,
+polish-level) is open.
 
 RE-MEASURED AFTER THE CRYPTO-FREE REBUILD (Phase 5, 2026-07-02 — full numbers + bucket breakdown in `docs/ARCHITECTURE_BENCHMARKS.md` §10): the 97-spec red-team suite scores **35 defended / 18 breached / 44 deferred** against the rebuilt system, vs the crypto-era baselines of 59 (V1) and 25 (V2, all documented residuals). All 18 surviving breaches are identical in id/name/mechanism to their V2 counterparts — zero new breaches. Five Merkle/audit-era attacks are RETIRED with the deleted surface (removed, not defended; their goal is covered by the asserted-attribution trade-off above). The triage produced two real fixes: (1) the weak-influence review queue in `ratification/disown.ts` was ONE-HOP — an incompleteness, not a trade-off — and is now a transitive backward BFS closure (still human-review-only, never auto-demotes; regression case in `disownHardening.test.ts`); (2) an external audit caught the red-team's ce-c3-02 "no PSL" spec still modeling a system that no longer exists — the shipped `identity/binders/publicSuffix.ts` eTLD+1 derivation, wired into `trustRegistry.ts`, defends that attack, so the spec now routes through the SHIPPED resolver (stale-harness artifact reclassified; default-suite regression in `publicSuffix.bothDirections.test.ts`). The locally-runnable poisoning arms re-ran at **0% ASR** (factworld substrate adjudication at poison rate 1.0; the Sybil capability bench at every cheap fleet size up to 500, with the expensive-paid-fleet honesty control flipping at A > 3 exactly as priced-not-prevented predicts). The external-dep benches (LLM-scored factworld, poisonedrag, retrieval, crossdb, deployment) were NOT re-run; their pre-rebuild numbers are labeled HISTORICAL in the benchmarks doc.
 
-STILL OPEN (a real gap, not a deliberate trade-off, found by the Wave-1 audit and not yet fixed — Wave 2 backlog):
-- **Convergence-ordered pop priority is dead code.** "Separate ordering from stopping" above is half-true: the HALTING half holds (the EWMA gate reads novelty, never `convergence_factor` — confirmed still correct), but the ORDERING half doesn't run. `walk.ts`'s `orderingKey`/`convergenceOrderingKey` reads `strand.register?.convergence_factor ?? 0`, and `Strand.register` is set to `null` for every strand the engine creates (`api.ts`) and never populated anywhere else — so the tiebreak always compares `0` to `0` and the walk pops in whatever order the frontier happens to hold ties in. Not a correctness bug (termination and the monotone-non-increasing proof don't depend on tie order) but a **shipped, tested-sounding feature that has never actually ordered a single pop**. No regression test exercises it because there is nothing to exercise. Fix tracked as `convergence-ordering-dead` in the Wave-2 backlog: either populate `register.convergence_factor` for real, or remove the dead tiebreak and correct the doc claim.
+CLOSED SINCE WAVE 2 (found by the Wave-1 audit, fixed 2026-07-07 — was "STILL OPEN" in this file until then):
+- **Convergence-ordered pop priority — removed, not activated.** "Separate ordering from stopping" above is now simply true: the HALTING half always held (the EWMA gate reads novelty, never `convergence_factor`), and the ORDERING half is gone rather than fixed to finally do something. `walk.ts`'s frontier comparator used to carry a secondary tiebreak reading `strand.register?.convergence_factor ?? 0`; since `Strand.register` was set to `null` at every construction site and never populated anywhere else, that term always compared `0` to `0` — a shipped, tested-sounding feature that never once ordered a real pop. Wave 2 deleted it rather than build out a `convergence_factor` nothing had ever exercised: `Strand.register`/`ActivationRegister` are gone from `core/types.ts`, along with `FrontierCandidate.orderingKey`, `orderingKeyFor`, and the already-unused `makeChildCandidate` helper. The frontier comparator is now a single term, `energy`. Confirmed a behavioral no-op two ways: by direct inspection (the removed term was provably `0 − 0` for every comparison — a stronger guarantee than any sampled repro could offer), and by `src/__tests__/convergenceOrderingDead.test.ts`, which pins the exact `lit`/`halt` output of a real energy-tied diamond graph via the unmodified `activationWalk` and was checked byte-identical against the pre-removal code.
 
 ACCEPTABLE (known, deliberate prototype limitations — each safe for a single-process durable prototype; these are exactly the "out-of-scope / operational-social" residuals `docs/history/ARCHITECTURE.md` enumerated):
 - **Cross-process / concurrent writers:** single-process is assumed. WAL gives ONE writer + many readers; two processes writing the same file concurrently is out of scope (no app-level lock / leader election). A second writer is rejected by SQLite's lock, not coordinated.

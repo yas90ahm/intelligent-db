@@ -16,6 +16,10 @@ multiple client processes (several IDE windows/agent sessions, a CLI, a
 background indexer) that need to share ONE memory instead of each opening its
 own SQLite file and fighting over the writer lock.
 
+§8 (backup, restore, chain verification) is the exception to the daemon-only
+scope above — it applies to any SQLite-backed deployment, in-process or
+daemon.
+
 ---
 
 ## 1. Starting and stopping the daemon
@@ -316,6 +320,138 @@ hidden gap.
 
 ---
 
+## 8. Backup, restore, and chain verification
+
+This section applies to any SQLite-backed deployment, daemon or in-process — backup and restore
+live in `store/backup.ts`, underneath the daemon, not inside it. It also covers the two
+chain-verification surfaces the daemon adds on top: mandatory startup self-verification and the
+on-demand `verifyChains` admin verb.
+
+### 8.1 What there is to back up
+
+A running deployment has up to two durable SQLite files:
+- **The memory db** (`--db`) — strands, edges, indexes, and, when the default
+  `createAgentMemory({ dbPath })` facade wires it onto the same handle, the fact/ratification
+  checksum chain (`ratification_records`).
+- **The daemon's own audit chain** (`--data-dir`'s `daemon-audit.db`, daemon mode only) —
+  connection/auth/revocation/admin/shutdown events, a separate genesis from the fact chain.
+
+Back up both if you run the daemon. A pure in-process deployment only has the first.
+
+### 8.2 Snapshot cadence
+
+`snapshotDb(db, destPath, { chainHead })` (`store/backup.ts`) takes an online, consistent copy via
+`VACUUM INTO` plus a fsynced sidecar manifest (`<destPath>.manifest.json`: `createdAt`,
+`chainHead`, `userVersion`, `schemaHash`). It does not block writers beyond the time the copy
+itself takes, so it is safe to run against a live handle.
+
+There is no built-in scheduler — call it from cron / a systemd timer / Windows Task Scheduler.
+A reasonable starting cadence for a single-owner or small-team deployment is one snapshot a day
+(off-peak) plus WAL archiving running continuously in between (§8.3), so point-in-time restore
+never has to replay more than a day of segments. Tighten it if your tolerance for lost history is
+smaller than that, or if the memory db grows large enough that a day of WAL segments would be
+slow to replay.
+
+Copy the resulting file and its `.manifest.json` off-host. A snapshot that never leaves the
+machine it was taken on protects against corruption, not against losing the machine.
+
+### 8.3 WAL-archive layout
+
+`createWalArchiver(db, { dir, intervalMs? })` maintains a directory that looks like this:
+
+```
+<dir>/
+  base.db              # plain byte copy of the live file, taken once, at first activation
+  base.meta.json        # { createdAt, userVersion }
+  seg-000001.wal         # archived WAL segment, oldest first
+  seg-000001.meta.json    # { seq, walFile, checkpointedAt, userVersion, chainHead }
+  seg-000002.wal
+  seg-000002.meta.json
+  ...
+```
+
+`base.db` is a plain copy, deliberately never a `VACUUM INTO` output — see the module doc in
+`store/backup.ts` for the empirical reason a defragmented base can't safely take a spliced-on WAL
+segment. Segments are copied out before each checkpoint truncates the live `-wal` file, so nothing
+committed is ever lost between one archive cycle and the next.
+
+Call `.checkpoint()` on a timer (`intervalMs`) or after N writes, whichever cadence fits your
+write volume — every call either archives one segment or is a no-op if nothing is pending.
+`.listSegments()` gives you the full ordered history; `.close()` stops the timer, if one is
+running, without touching anything already archived.
+
+### 8.4 Restore runbook
+
+1. Locate the most recent snapshot (`destPath` + its `.manifest.json`) and the WAL-archive
+   directory that has been running since before that snapshot was taken.
+2. Pick the target timestamp `t` (usually "now," for disaster recovery; an earlier point for
+   "undo a bad write").
+3. Call `restoreToTimestamp(snapshotPath, walArchiveDir, t, outputPath, { chainVerifier })`.
+   - `chainVerifier` is a `(restoredDb) => { ok, firstBrokenSeq, chainHead }` callback — wire it
+     to a `PendingLedger`'s `verifyChain()`/`chainHead()` against the just-restored file. Pass one
+     whenever the source deployment ever carried ratification history: if the reconstructed
+     database has any `ratification_records` rows and no verifier was supplied, the restore
+     throws `UnverifiedLedgerRestoreError` rather than handing back an unverified chain silently.
+   - The call reconstructs from the archive directory's own `base.db` plus every segment up to
+     `t`, cross-checks the snapshot's manifest (`userVersion`, and — if the snapshot predates `t`
+     — that the reconstruction can reach at least the snapshot's recorded `chainHead`), and runs
+     `PRAGMA integrity_check`.
+4. On any verification failure, the partially-written output is deleted before the error is
+   thrown — never leave a half-restored file that could be mistaken for a good one.
+5. On success, point `--db` at `outputPath` (daemon mode) or your app's `dbPath` (in-process) and
+   start normally.
+
+Restoring the daemon's own audit chain (`daemon-audit.db`) is the identical recipe against that
+file, if you archive it separately; most deployments treat it as replaceable operational history
+rather than something to restore bit-for-bit, since it records the daemon's own connection/admin
+trail, not user data.
+
+### 8.5 Chain verification: startup and on-demand
+
+Every daemon start self-verifies **both** checksum chains — its own audit chain and the shared
+memory db's fact/ratification chain — before opening the listener (`cli.ts`'s
+`verifyChainsAtStartup`). A broken chain refuses to start the daemon at all
+(`ChainVerificationFailedError`, naming which chain and the first broken seq), on the reasoning
+that serving from a database that already failed its own integrity check is worse than refusing
+to serve. If you hit this on a real deployment, that is the signal to restore from the most recent
+snapshot + WAL archive (§8.4), not to work around the refusal.
+
+For on-demand re-verification without a restart, any OWNER-grade connection can call the
+`verifyChains` admin verb:
+
+```jsonc
+{"id": 1, "method": "verifyChains", "params": {}}
+// <- {"id": 1, "ok": true, "result": {
+//      "daemonChain": {"ok": true, "firstBrokenSeq": null, "chainHead": {...}},
+//      "factChain": {"ok": true, "firstBrokenSeq": null, "chainHead": {...}}
+//    }}
+```
+
+Both verb calls are recorded as an admin-verb event in the daemon's own audit chain, so a
+scheduled `verifyChains` sweep is itself part of the audit trail.
+
+### 8.6 Health and status
+
+Any authenticated connection, at any grade, can call `status` (or its alias `ping`) — this verb
+bypasses the FIFO write queue entirely, so a slow or stuck write never blocks a health check:
+
+```jsonc
+{"id": 1, "method": "status", "params": {}}
+// <- {"id": 1, "ok": true, "result": {
+//      "connectionCount": 3,
+//      "queueDepth": 0,
+//      "uptimeMs": 184203,
+//      "daemonChainHead": {"seq": 41, "headHash": "..."},
+//      "factChainHead": {"seq": 128, "headHash": "..."}
+//    }}
+```
+
+Poll this from whatever monitors the daemon process. A climbing `queueDepth` that never drains is
+the signal to look at R4 (§3) — the single serialized write queue is a known v1 bottleneck, not a
+bug, but it is one your monitoring should be watching for.
+
+---
+
 ## Quick reference
 
 | Task | Command / verb |
@@ -327,5 +463,10 @@ hidden gap.
 | Revoke one token | `revokeToken` (OWNER connection only) |
 | Revoke everything, re-mint owner token | `revokeAllTokens` (OWNER connection only) |
 | Reload token registry from disk | `reloadTokens` (OWNER connection only) |
+| Health check | `status` / `ping` (any authenticated grade, bypasses the write queue) |
+| Re-verify both chains on demand | `verifyChains` (OWNER connection only) |
+| Snapshot the memory db | `snapshotDb(db, destPath, opts)` (`store/backup.ts`) |
+| Archive WAL segments continuously | `createWalArchiver(db, { dir, intervalMs? })` (`store/backup.ts`) |
+| Point-in-time restore | `restoreToTimestamp(snapshotPath, walArchiveDir, t, outputPath, opts)` (`store/backup.ts`, §8) |
 | Connection cap | 32 (typed `CONNECTION_CAP` error beyond it) |
 | Queue depth | 1024 default (typed `BACKPRESSURE` error beyond it) |
