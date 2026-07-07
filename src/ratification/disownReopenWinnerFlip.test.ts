@@ -36,6 +36,7 @@ import {
   FactOrigin,
   Tier,
   AnchorClass,
+  EdgeType,
   asEpochMs,
   asStrandId,
 } from "../index.js";
@@ -249,6 +250,22 @@ describe("REGRESSION disown-reopen-cannot-change-winner: a re-opened dispute can
     expect(chalAfter.provenance).toEqual(chalStrand.provenance);
     expect(winAfter.content_hash).toBe(winStrand.content_hash);
     expect(winAfter.provenance).toEqual(winStrand.provenance);
+
+    // GRAPH HYGIENE (stale-reverse-OUTRANKS-edge fix): after a winner-flip there must be
+    // exactly ONE OUTRANKS edge between the two strands — the NEW winner -> old winner —
+    // never two contradictory edges. The prior resolution's winStrand -> chalStrand edge
+    // must have been superseded (removed), or a provenance walker would render a
+    // self-contradictory history. Belief itself is on fact_state/outranked_by (asserted
+    // above), so this is graph hygiene, not a belief check.
+    const outranksBetween = [...store.allEdges()].filter(
+      (e) =>
+        e.edgeType === EdgeType.OUTRANKS &&
+        ((e.from === winStrand.id && e.to === chalStrand.id) ||
+          (e.from === chalStrand.id && e.to === winStrand.id)),
+    );
+    expect(outranksBetween).toHaveLength(1);
+    expect(outranksBetween[0]!.from).toBe(chalStrand.id); // new winner
+    expect(outranksBetween[0]!.to).toBe(winStrand.id); // old winner, now the loser
 
     // The dispute is genuinely closed and the audit chain still verifies.
     expect(db.listPending().find((p) => p.contradictionSetId === csid)).toBeUndefined();

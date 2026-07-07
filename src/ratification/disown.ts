@@ -59,6 +59,7 @@ import {
   type EdgeId,
   type EpochMs,
   type IndependenceClassId,
+  type ProvenanceRoot,
   type ReviewQueueEntry,
   type SourceId,
   type Strand,
@@ -205,6 +206,17 @@ export interface DisownHardeningDeps {
    * rests on the tainted derivation and is demoted (matching the prior contract).
    */
   readonly minSurvivingSupport?: number;
+  /**
+   * The CANONICAL independence count (the SAME `SourceIdentityLayer.independentRootCount`
+   * — Bron-Kerbosch, operator-fleet-aware — that RC-5's approve-gate and the forgetting
+   * layer use, so HARDENING 4 shares "exactly ONE independence notion, no drift"). When
+   * wired, {@link survivingIndependentSupport} counts a derived strand's surviving support
+   * via this, correctly COLLAPSING two roots that carry different `independenceClass`
+   * strings but sit behind the same operator/registrar fleet (which a raw class-string
+   * Set would wrongly count as two). Omitted ⇒ the coarser class-string fallback (never
+   * grants extra credit; only ever more conservative about demoting).
+   */
+  readonly independentRootCount?: (rootSet: readonly ProvenanceRoot[]) => number;
 }
 
 /** Default decisive-margin threshold for re-opening (mirrors the adjudication policy). */
@@ -333,21 +345,36 @@ export const CORROBORATION_CREDIT_SUBSTRATE_SPEC: string =
  * classes (collapsing same-class echoes), and a strand keeps LIVE iff that count is
  * `>= minSurvivingSupport`.
  *
- * @returns the number of distinct NON-tainted, non-disowned-source surviving support
- *          classes backing `derived`.
+ * The surviving roots are counted with the CANONICAL, operator-fleet-aware independence
+ * notion (`independentRootCount`, the same Bron-Kerbosch the RC-5 gate and forgetting use)
+ * when it is supplied, so two roots behind one attacker-controlled registrar/tenant collapse
+ * to a single support instead of being miscounted as two independent ones. Without it (a
+ * raw ledger-level caller with no identity layer), a coarser distinct-`independenceClass`
+ * Set is the documented fallback — it can only OVER-count relative to the canonical notion,
+ * so it is strictly more conservative about demoting and never grants unearned survival.
+ *
+ * @returns the number of NON-tainted, non-disowned-source, genuinely-independent surviving
+ *          supports backing `derived`.
  */
 function survivingIndependentSupport(
   derived: Strand,
   disowned: SourceId,
   taintedClasses: ReadonlySet<IndependenceClassId>,
+  independentRootCount?: (rootSet: readonly ProvenanceRoot[]) => number,
 ): number {
-  const surviving = new Set<IndependenceClassId>();
+  const survivingRoots: ProvenanceRoot[] = [];
+  const survivingClasses = new Set<IndependenceClassId>();
   for (const root of derived.provenance) {
     if (root.sourceId === disowned) continue; // the disowned key's own root never counts
     if (taintedClasses.has(root.independenceClass)) continue; // tainted class never counts
-    surviving.add(root.independenceClass);
+    survivingRoots.push(root);
+    survivingClasses.add(root.independenceClass);
   }
-  return surviving.size;
+  // Canonical, fleet-aware count when the identity layer is wired; else the coarser
+  // distinct-class fallback (an upper bound on the canonical count — see the doc above).
+  return independentRootCount !== undefined
+    ? independentRootCount(survivingRoots)
+    : survivingClasses.size;
 }
 
 /** A stable string fingerprint for echo-collapse: prefer content_hash, else id. */
@@ -479,6 +506,7 @@ export function downstreamDisownSweep(
   const survivingMargin = hardening?.survivingMargin ?? defaultSurvivingMargin;
   const checkSurvivingSupport = hardening?.checkSurvivingSupport === true;
   const minSurvivingSupport = hardening?.minSurvivingSupport ?? 2;
+  const independentRootCount = hardening?.independentRootCount;
   // ATOMIC: the whole sweep is ONE all-or-nothing unit of work over the shared handle
   // (crater + every demotion/edge + every contradict + every precise credit reversal).
   // A mid-sweep crash leaves either the FULL sweep or NONE — never a half-clawed state.
@@ -650,8 +678,12 @@ export function downstreamDisownSweep(
         // outcome — moved to run after this branch, unconditionally, below.
         const survived =
           checkSurvivingSupport &&
-          survivingIndependentSupport(derived, sourceId, taintedClasses) >=
-            minSurvivingSupport;
+          survivingIndependentSupport(
+            derived,
+            sourceId,
+            taintedClasses,
+            independentRootCount,
+          ) >= minSurvivingSupport;
 
         if (survived) {
           survivedDemotion.push(derived.id);

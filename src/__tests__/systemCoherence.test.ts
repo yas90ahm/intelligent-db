@@ -216,6 +216,8 @@ describe("END-TO-END SYSTEM COHERENCE — the whole pipeline over one shared SQL
       verifiedTenantDomains: {
         "tenant:winner": "winner.example",
         "tenant:corrob": "corrob.example",
+        "tenant:suppa": "suppa.example",
+        "tenant:suppb": "suppb.example",
       },
     });
 
@@ -267,6 +269,25 @@ describe("END-TO-END SYSTEM COHERENCE — the whole pipeline over one shared SQL
     }).sourceId; // independent witness
     const challengerSrc = "src:challenger" as SourceId; // fresh, weightless, bare
     const beneficiarySrc = "src:beneficiary" as SourceId; // earns corroboration credit
+    // Two genuinely INDEPENDENT, anchored sources (distinct verified domains ⇒ distinct
+    // fleets) that corroborate the surviving derivative below — so HARDENING-4's survival
+    // check sees TWO *verifiable* independent supports under the SAME operator-fleet-aware
+    // notion RC-5/forgetting use, not two anchorless string-classes ("no anchor → no
+    // independent voice" applies here too).
+    const survSupportA = trust.registerSsoMember({
+      issuer: "https://idp.suppa.example",
+      subject: "carol",
+      tenantId: "tenant:suppa",
+      verifiedCustomDomain: "suppa.example",
+      label: "surviving-support-a",
+    }).sourceId;
+    const survSupportB = trust.registerSsoMember({
+      issuer: "https://idp.suppb.example",
+      subject: "dave",
+      tenantId: "tenant:suppb",
+      verifiedCustomDomain: "suppb.example",
+      label: "surviving-support-b",
+    }).sourceId;
 
     // FAIL-CLOSED, twice over:
     //  - an unresolvable publisher URL must never mint a source;
@@ -425,7 +446,7 @@ describe("END-TO-END SYSTEM COHERENCE — the whole pipeline over one shared SQL
     store.putEdge(derivationEdge(derivedTainted.id, winStrand.id));
 
     const derivedSurvives: Strand = {
-      ...fileStrand(store, "strand:derived-survives", "src:i1" as SourceId, "class:IND1", {
+      ...fileStrand(store, "strand:derived-survives", survSupportA, "class:IND1", {
         v: "independently corroborated",
       }),
       origin: FactOrigin.DERIVED,
@@ -433,13 +454,13 @@ describe("END-TO-END SYSTEM COHERENCE — the whole pipeline over one shared SQL
         {
           rootId: "root:ds1" as ProvenanceRoot["rootId"],
           independenceClass: "class:IND1" as IndependenceClassId,
-          sourceId: "src:i1" as SourceId,
+          sourceId: survSupportA,
           establishedAt: NOW,
         },
         {
           rootId: "root:ds2" as ProvenanceRoot["rootId"],
           independenceClass: "class:IND2" as IndependenceClassId,
-          sourceId: "src:i2" as SourceId,
+          sourceId: survSupportB,
           establishedAt: NOW,
         },
       ],
@@ -544,8 +565,8 @@ describe("END-TO-END SYSTEM COHERENCE — the whole pipeline over one shared SQL
       corroboratorSrc,
       challengerSrc,
       beneficiarySrc,
-      "src:i1" as SourceId,
-      "src:i2" as SourceId,
+      survSupportA,
+      survSupportB,
     ];
     const snapshots: AlphaSnapshot[] = sources.map((s) => ({
       sourceId: s,

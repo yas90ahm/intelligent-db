@@ -225,6 +225,14 @@ export class MemoryStrandStore implements StrandStore {
     this.bucket(this.inAdj, e.to).add(id);
   }
 
+  removeEdge(id: EdgeId): void {
+    const prev = this.edgeMap.get(id);
+    if (prev === undefined) return; // unknown id: no-op
+    this.outAdj.get(prev.from)?.delete(id);
+    this.inAdj.get(prev.to)?.delete(id);
+    this.edgeMap.delete(id);
+  }
+
   outEdges(id: StrandId): Edge[] {
     return this.collectEdges(this.outAdj.get(id));
   }

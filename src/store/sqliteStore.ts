@@ -355,6 +355,7 @@ class SqliteStrandStoreImpl implements SqliteStrandStore {
   readonly #putStrand;
   readonly #getEdge;
   readonly #putEdge;
+  readonly #removeEdge;
   readonly #outEdges;
   readonly #inEdges;
   readonly #byEntity;
@@ -453,6 +454,7 @@ class SqliteStrandStoreImpl implements SqliteStrandStore {
          to_id = excluded.to_id,
          edge_type = excluded.edge_type`,
     );
+    this.#removeEdge = this.#db.prepare("DELETE FROM edges WHERE id = ?");
     this.#outEdges = this.#db.prepare("SELECT json FROM edges WHERE from_id = ?");
     this.#inEdges = this.#db.prepare("SELECT json FROM edges WHERE to_id = ?");
     this.#byEntity = this.#db.prepare("SELECT json FROM strands WHERE entity = ?");
@@ -509,6 +511,12 @@ class SqliteStrandStoreImpl implements SqliteStrandStore {
 
   putEdge(e: Edge): void {
     this.#runPutEdge(e);
+  }
+
+  removeEdge(id: EdgeId): void {
+    // Adjacency is derived from the indexed from_id/to_id columns, so a single DELETE
+    // unwires both directions; DELETE of an absent id affects 0 rows (a clean no-op).
+    this.#removeEdge.run(id as string);
   }
 
   /** Bind one edge to the reused #putEdge statement (shared by put + batch + recompute). */

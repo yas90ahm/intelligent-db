@@ -192,6 +192,17 @@ export interface StrandStore {
   putEdge(e: Edge): void;
 
   /**
+   * Remove an edge by its {@link Edge.id}, unwiring it from both adjacency indexes
+   * (so it no longer appears in `outEdges(from)` / `inEdges(to)`). A no-op for an
+   * unknown id. Like `putEdge`, this does NOT itself fix share-normalization — the
+   * caller recomputes {@link StrandStore.recomputeOutWeightSum} for the `from` node
+   * if the removed edge carried weight. Used to supersede a stale OUTRANKS edge when
+   * a re-opened dispute flips its winner (the old winner->new-winner edge would
+   * otherwise contradict the new new-winner->old-winner edge in the persisted graph).
+   */
+  removeEdge(id: EdgeId): void;
+
+  /**
    * All out-edges (threads leaving) the given strand, in no guaranteed order.
    * This is the activation walk's primary expansion primitive: popping a strand
    * means iterating its out-edges and spreading `parent * (w / out_weight_sum) * γ`

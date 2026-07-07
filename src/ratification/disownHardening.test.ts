@@ -466,6 +466,49 @@ describe("HARDENING 4 — false-disown survival check", () => {
     expect(store.getStrand(derived.id)!.fact_state).toBe(FactState.LIVE);
   });
 
+  it("uses the CANONICAL fleet-aware independence count when wired: two classes behind ONE operator collapse to a single surviving support ⇒ DEMOTED", () => {
+    // Same 2-distinct-class derived strand as the test above (which SURVIVES under the
+    // coarse distinct-class-string fallback). But the canonical `independentRootCount`
+    // (operator-fleet-aware Bron-Kerbosch — the SAME notion RC-5 and forgetting use)
+    // correctly collapses two roots that carry different class STRINGS yet sit behind a
+    // single attacker-controlled registrar/tenant into ONE independent support. Wired,
+    // that count no longer clears minSurvivingSupport=2, and the strand is demoted. This
+    // is the anti-drift fix: HARDENING-4 must not count fleet-correlated roots as two.
+    const store: StrandStore = createMemoryStore();
+    const ledger = ledgerWithCap();
+    const fraud = "src:fraud" as SourceId;
+
+    const seed = makeStrand({ idRaw: "s:seed", roots: [{ classRaw: "class:A", sourceIdRaw: fraud }] });
+    const derived = makeStrand({
+      idRaw: "s:derived",
+      origin: FactOrigin.DERIVED,
+      roots: [
+        { classRaw: "class:IND1", sourceIdRaw: "src:i1", rootIdRaw: "r1" },
+        { classRaw: "class:IND2", sourceIdRaw: "src:i2", rootIdRaw: "r2" },
+      ],
+    });
+    store.putStrand(seed);
+    store.putStrand(derived);
+    store.putEdge(derivationEdge(derived.id, seed.id));
+
+    let observedRootCount = -1;
+    const res = downstreamDisownSweep(fraud, [seed.id], store, ledger, NOW, undefined, undefined, {
+      checkSurvivingSupport: true,
+      // The real fleet-aware count would return 1 for two single-operator roots; stub it
+      // to prove the wiring drives the decision (and that it receives exactly the
+      // surviving, non-tainted, non-disowned roots).
+      independentRootCount: (rootSet) => {
+        observedRootCount = rootSet.length;
+        return 1;
+      },
+    });
+
+    expect(observedRootCount).toBe(2); // fed the two surviving roots, not the tainted seed
+    expect(res.survivedDemotion).not.toContain(derived.id);
+    expect(res.demotedDownstream).toContain(derived.id);
+    expect(store.getStrand(derived.id)!.fact_state).toBe(FactState.DEMOTED);
+  });
+
   it("a derived strand resting SOLELY on tainted input is still DEMOTED", () => {
     const store: StrandStore = createMemoryStore();
     const ledger = ledgerWithCap();

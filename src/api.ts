@@ -3013,6 +3013,20 @@ class IntelligentDbImpl implements IntelligentDb {
               ),
             );
           }
+
+          // Supersede the STALE reverse-direction OUTRANKS edge the PRIOR resolution
+          // minted (old-winner -> this now-promoted winner). Without removal it sits in
+          // the persisted graph contradicting THIS resolution's new winner -> old-winner
+          // edge (two OUTRANKS edges pointing opposite ways between the same pair). Scoped
+          // to THIS dispute's demoted losers, so no unrelated OUTRANKS relationship is
+          // touched. Belief was never edge-derived (it lives on fact_state / outranked_by),
+          // so this is graph-hygiene for a provenance-walking consumer, not a belief change.
+          const flipLoserIds = new Set<StrandId>(plan.demotions.map((d) => d.demoted));
+          for (const stale of this.#store.inEdges(winnerStrandId)) {
+            if (stale.edgeType === EdgeType.OUTRANKS && flipLoserIds.has(stale.from)) {
+              this.#store.removeEdge(stale.id);
+            }
+          }
         }
 
         // HARDENING 3 (RE-AUDIT FIX, 2026-07-07 — "winner-flip promotions never
@@ -3149,6 +3163,11 @@ class IntelligentDbImpl implements IntelligentDb {
       ...(opts?.minSurvivingSupport !== undefined
         ? { minSurvivingSupport: opts.minSurvivingSupport }
         : {}),
+      // HARDENING 4 shares the ONE canonical independence notion (operator-fleet-aware
+      // Bron-Kerbosch) with RC-5 and forgetting — so two roots behind one attacker fleet
+      // collapse to a single surviving support instead of miscounting as two.
+      independentRootCount: (rootSet): number =>
+        this.#identity.independentRootCount(rootSet),
     };
 
     // The sweep already wraps itself in ONE store transaction (withSweepTxn): the
