@@ -494,6 +494,63 @@ describe("7. ESCAPE HATCH — quarantineThreshold 0 restores always-LIVE; 0.5 ho
 });
 
 // ============================================================================
+// 7b. CONSTRUCTION VALIDATION (quarantine-threshold-unvalidated) — the gate's
+//     own threshold must itself be a sane number, or it silently defeats itself
+// ============================================================================
+
+describe("7b. quarantineThreshold is validated at construction — a bad knob throws, never silently disarms the gate", () => {
+  /** The exact createIntelligentDb(...) construction call path (real production code,
+   *  not a re-derived assertion) — only `ingest` varies across cases. */
+  function construct(quarantineThreshold: number): IntelligentDb {
+    const store = createMemoryStore();
+    const trust = createTrustRegistry();
+    const repCapOf = (s: SourceId): Unit => repCapFor([...trust.anchorsOf(s)]);
+    const reputation = createReputationLedger(repCapOf, undefined, () => NOW);
+    const identity = createSourceIdentityLayer({
+      sources: trust,
+      anchors: trust,
+      reputation: { scoreOf: (s) => reputation.scoreOf(s) },
+    });
+    return createIntelligentDb(store, identity, null, reputation, null, {
+      quarantineThreshold,
+    });
+  }
+
+  it("NaN throws (the exact audit repro: NaN < anything is false, silently identical to the always-LIVE escape hatch with zero signal)", () => {
+    expect(() => construct(NaN)).toThrow(/quarantineThreshold/);
+  });
+
+  it("1.5 (above the [0,1] anchor-weight range) throws", () => {
+    expect(() => construct(1.5)).toThrow(/quarantineThreshold/);
+  });
+
+  it("-1 (below the [0,1] anchor-weight range) throws", () => {
+    expect(() => construct(-1)).toThrow(/quarantineThreshold/);
+  });
+
+  it("Infinity / -Infinity throw (non-finite, same failure mode as NaN)", () => {
+    expect(() => construct(Infinity)).toThrow(/quarantineThreshold/);
+    expect(() => construct(-Infinity)).toThrow(/quarantineThreshold/);
+  });
+
+  it("0 (the documented escape hatch) and 0.1 (the default) construct successfully", () => {
+    expect(() => construct(0)).not.toThrow();
+    expect(() => construct(0.1)).not.toThrow();
+  });
+
+  it("the thrown error is the typed InvalidQuarantineThresholdError, catchable by name", () => {
+    let caught: unknown;
+    try {
+      construct(NaN);
+    } catch (err) {
+      caught = err;
+    }
+    expect(caught).toBeInstanceOf(Error);
+    expect((caught as Error).name).toBe("InvalidQuarantineThresholdError");
+  });
+});
+
+// ============================================================================
 // 8. RELAY INTERACTION — who SPEAKS gates belief; what was CONSULTED shapes class
 // ============================================================================
 

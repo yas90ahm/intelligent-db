@@ -837,6 +837,41 @@ export interface IngestPolicy {
  */
 export const DEFAULT_QUARANTINE_THRESHOLD = 0.1;
 
+/**
+ * Thrown by {@link createIntelligentDb} when {@link IngestPolicy.quarantineThreshold}
+ * is not a finite number in `[0, 1]` (the same range every `independenceWeight` in
+ * `identity/anchors.ts`'s `ANCHOR_TABLE` lives in — the gate compares the two
+ * directly, `strongest < quarantineThreshold`). A `NaN`/`Infinity`/out-of-range value
+ * would silently defeat the trust-tiered ingest gate (e.g. `NaN` makes every
+ * comparison `false`, identical to the explicit `quarantineThreshold: 0` escape hatch,
+ * with zero signal that anything is misconfigured) — fail CLOSED at construction
+ * instead of fail-open-forever at every ingest.
+ */
+export class InvalidQuarantineThresholdError extends Error {
+  constructor(public readonly value: number) {
+    super(
+      `createIntelligentDb: IngestPolicy.quarantineThreshold must be a finite number ` +
+        `in [0, 1] (compared directly against each anchor class's independenceWeight, ` +
+        `all of which live in that range); got ${JSON.stringify(value)}. Pass 0 for the ` +
+        `explicit legacy always-LIVE escape hatch, or omit the option entirely for the ` +
+        `default (${DEFAULT_QUARANTINE_THRESHOLD}).`,
+    );
+    this.name = "InvalidQuarantineThresholdError";
+  }
+}
+
+/**
+ * Validate {@link IngestPolicy.quarantineThreshold} at construction time — see
+ * {@link InvalidQuarantineThresholdError}. A bare function (not a method) so it runs
+ * before `this` exists, guarding the FIRST thing the constructor would otherwise do
+ * with an unchecked caller value.
+ */
+function assertValidQuarantineThreshold(threshold: number): void {
+  if (!Number.isFinite(threshold) || threshold < 0 || threshold > 1) {
+    throw new InvalidQuarantineThresholdError(threshold);
+  }
+}
+
 // ---------------------------------------------------------------------------
 // Factory
 // ---------------------------------------------------------------------------
@@ -1568,12 +1603,15 @@ class IntelligentDbImpl implements IntelligentDb {
     ingest: IngestPolicy | null,
     retrieval: RetrievalDeps | null = null,
   ) {
+    const quarantineThreshold = ingest?.quarantineThreshold ?? DEFAULT_QUARANTINE_THRESHOLD;
+    assertValidQuarantineThreshold(quarantineThreshold);
+
     this.#store = store;
     this.#identity = identity;
     this.#consolidation = consolidation;
     this.#reputation = reputation;
     this.#ratification = ratification;
-    this.#quarantineThreshold = ingest?.quarantineThreshold ?? DEFAULT_QUARANTINE_THRESHOLD;
+    this.#quarantineThreshold = quarantineThreshold;
     this.#retrieval = retrieval;
   }
 

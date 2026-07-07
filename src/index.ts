@@ -435,7 +435,11 @@ export type {
 // api — the top-level three-verb engine
 // ===========================================================================
 
-export { createIntelligentDb, DEFAULT_QUARANTINE_THRESHOLD } from "./api.js";
+export {
+  createIntelligentDb,
+  DEFAULT_QUARANTINE_THRESHOLD,
+  InvalidQuarantineThresholdError,
+} from "./api.js";
 
 export type {
   IntelligentDb,
