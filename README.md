@@ -181,10 +181,10 @@ canonical, who is independent) is a gate or an external signal, never a model ju
 |---|---|---|
 | **Storage** (`src/store/`) | Pluggable `StrandStore`: in-memory + durable SQLite/WAL, no delete operation (forgetting is downward tier movement). | [`docs/ARCHITECTURE_ENGINE.md`](./docs/ARCHITECTURE_ENGINE.md) §4 |
 | **Traversal** (`src/traversal/`, `src/recall/`) | Cue → seeds → share-normalized best-first spreading activation → two-phase halting (local saturation + mandatory bridge sweep). | [`docs/ARCHITECTURE_ENGINE.md`](./docs/ARCHITECTURE_ENGINE.md) §5 |
-| **Forgetting** (`src/forgetting/`) | Tier decay (`HOT→WARM→COLD→ARCHIVE_STUB`, never delete) + fail-closed eviction gates; echo collapse and decisive-or-defer contradiction adjudication. | [`docs/ARCHITECTURE_ENGINE.md`](./docs/ARCHITECTURE_ENGINE.md) §6 |
+| **Forgetting** (`src/forgetting/`) | Tier decay (`HOT→WARM→COLD→ARCHIVE_STUB`, never delete) + fail-closed eviction gates; echo collapse and decisive-or-defer contradiction adjudication; invoked via the engine's `runForgetting()` verb (caller-triggered, not a background timer). | [`docs/ARCHITECTURE_ENGINE.md`](./docs/ARCHITECTURE_ENGINE.md) §6 |
 | **Source-Identity Layer** (`src/identity/`) | Crypto-free trust registry, anchor-cost table + independence math, Beta(α,β) reputation, exact max-independent-set count. | [`docs/ARCHITECTURE_ENGINE.md`](./docs/ARCHITECTURE_ENGINE.md) §7 |
 | **Ratification** (`src/ratification/`) | Tamper-evident checksum-chain audit ledger, the dispute doorbell, the retroactive disown/undo sweep, enterprise dispute routing. | [`docs/ARCHITECTURE_ENGINE.md`](./docs/ARCHITECTURE_ENGINE.md) §9 |
-| **Engine verbs** (`src/api.ts`) | `writeFact` / `recall` / `ratify` / `adjudicate` / `disown` / `explain` / `beliefTimeline` — the composed `IntelligentDb` surface. | [`docs/ARCHITECTURE_ENGINE.md`](./docs/ARCHITECTURE_ENGINE.md) §10 |
+| **Engine verbs** (`src/api.ts`) | `writeFact` / `recall` / `ratify` / `adjudicate` / `disown` / `runForgetting` / `explain` / `beliefTimeline` — the composed `IntelligentDb` surface. | [`docs/ARCHITECTURE_ENGINE.md`](./docs/ARCHITECTURE_ENGINE.md) §10 |
 | **Agent facade + MCP** (`src/agent/`, `src/mcp/`) | `remember` / `recall` / `pendingQuestions` / `resolvePending` for a zero-config personal deployment, plus the stdio MCP server. | [`docs/ARCHITECTURE_ENGINE.md`](./docs/ARCHITECTURE_ENGINE.md) §11 |
 
 The full module-by-module reference, including the hard theorem that makes the
@@ -209,20 +209,33 @@ a caller explicitly reaches for one of these:
 
 None of this weakens the existing durability floor: SQLite/WAL transaction atomicity, the
 tamper-evident audit chain, and `integrity_check` are unchanged — these are additive
-capabilities layered in front of guarantees that already held. Full detail, including two
-disclosed design deviations (why WAL-archive replay uses its own base file rather than
-splicing onto a `VACUUM INTO` snapshot, and why the encrypted adapter is value-level rather
-than full-file), plus the crash-torture invariant list and the one non-crash finding it
-surfaced: [`CLAUDE.md`](./CLAUDE.md) Known Limitations, [`docs/BENCHMARK_NARRATIVE.md`](./docs/BENCHMARK_NARRATIVE.md) §3.
+capabilities layered in front of guarantees that already held (that floor itself had a real
+gap in the actual default `createAgentMemory({dbPath})` wiring until 2026-07-07, since fixed —
+see the audit remediation note below). Full detail, including two disclosed design deviations
+(why WAL-archive replay uses its own base file rather than splicing onto a `VACUUM INTO`
+snapshot, and why the encrypted adapter is value-level rather than full-file), plus the
+crash-torture invariant list and the one non-crash finding it surfaced:
+[`CLAUDE.md`](./CLAUDE.md) Known Limitations, [`docs/BENCHMARK_NARRATIVE.md`](./docs/BENCHMARK_NARRATIVE.md) §3.
 An **opt-in daemon mode** lets several client processes (multiple IDE windows/agent
 sessions, a CLI, a background indexer) share one memory instead of each opening its own
 SQLite file: a Unix-socket/Windows-named-pipe transport, bearer-token auth through the same
-crypto-free trust registry, and a single serialized write queue — approved by a binding
-security review ([`docs/specs/PHASE3_DAEMON_SPEC.md`](./docs/specs/PHASE3_DAEMON_SPEC.md))
+crypto-free trust registry, every trust-mutating verb (`registerSource`/`disown`/`approve`/
+`adjudicate`/`ratify`) gated to an OWNER-grade token, and a single serialized write queue —
+approved by a binding security review ([`docs/specs/PHASE3_DAEMON_SPEC.md`](./docs/specs/PHASE3_DAEMON_SPEC.md))
 and verified end-to-end against a real spawned daemon process plus 30 real `SIGKILL` crash
 cycles. The in-process default (`createAgentMemory()`, above) is unchanged and remains the
 default forever; reach for `intelligent-db-daemon` (see [`OPERATIONS.md`](./OPERATIONS.md))
 only once you actually have multiple processes needing shared memory.
+
+**Audit remediation (Wave 1), 2026-07-07:** a hostile pre-launch audit found eight places where
+this README/CLAUDE.md described intent rather than the shipped code — including the daemon
+verb-grading claim above and the atomicity-floor claim above. Ten critical/high findings were
+fixed and independently re-verified (source read, live repro, and revert-and-observe for the
+trust-critical ones); seven of the eight invariant claims are now genuinely true and test-backed,
+one (convergence-ordered pop priority) is still dead code and is named as such rather than
+claimed fixed. Full list, fix-by-fix, with the regression test for each:
+[`CLAUDE.md`](./CLAUDE.md#audit-remediation-wave-1--2026-07-07). The audit's Wave 2/3 backlog
+(hardening and polish items, none of them a broken invariant) remains open.
 
 ---
 
