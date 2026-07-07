@@ -3205,11 +3205,21 @@ class IntelligentDbImpl implements IntelligentDb {
     return { stamp, independentSourceCount, outrankerState };
   }
 
-  /** True iff a CONFIRMED CROSS_WEB_BRIDGE edge connects `a` and `b` (either direction). */
-  #isBridgeBetween(a: StrandId, b: StrandId): boolean {
+  /**
+   * True iff a CONFIRMED CROSS_WEB_BRIDGE edge connects the SUBJECT strand (whose
+   * out/in edges the caller already fetched ONCE) and `b` (either direction).
+   * RE-AUDIT FIX (perf/test-quality lane, MEDIUM): this used to take the subject's
+   * id and re-fetch `store.outEdges`/`store.inEdges` on EVERY call — but
+   * `#forgettingNeighborsOf` calls this once per same-entity neighbor for the SAME
+   * fixed subject strand, so the subject's own edges were re-fetched once per
+   * neighbor (the exact redundant-refetch shape Wave-2 fixed for the activation
+   * walk's `outEdgesCache`, reintroduced here). Callers now fetch the subject's
+   * edges ONCE and pass them in; this method is a pure in-memory array scan.
+   */
+  #isBridgeBetween(outEdgesOfSubject: readonly Edge[], inEdgesOfSubject: readonly Edge[], b: StrandId): boolean {
     const isBridge = (e: Edge): boolean => e.edgeType === EdgeType.CROSS_WEB_BRIDGE;
-    for (const e of this.#store.outEdges(a)) if (e.to === b && isBridge(e)) return true;
-    for (const e of this.#store.inEdges(a)) if (e.from === b && isBridge(e)) return true;
+    for (const e of outEdgesOfSubject) if (e.to === b && isBridge(e)) return true;
+    for (const e of inEdgesOfSubject) if (e.from === b && isBridge(e)) return true;
     return false;
   }
 
@@ -3225,6 +3235,10 @@ class IntelligentDbImpl implements IntelligentDb {
    */
   #forgettingNeighborsOf(strand: Strand): EvictionNeighborView[] {
     const out: EvictionNeighborView[] = [];
+    // Fetch the SUBJECT's own edges ONCE per strand (was once per same-entity
+    // neighbor — see `#isBridgeBetween`'s doc above).
+    const outEdgesOfSubject = this.#store.outEdges(strand.id);
+    const inEdgesOfSubject = this.#store.inEdges(strand.id);
     for (const n of this.#store.strandsByEntity(strand.entity)) {
       if (n.id === strand.id) continue;
       out.push({
@@ -3233,7 +3247,7 @@ class IntelligentDbImpl implements IntelligentDb {
         origin: n.origin,
         provenance: n.provenance,
         description_value: n.description_value,
-        bridgesToSubject: this.#isBridgeBetween(strand.id, n.id),
+        bridgesToSubject: this.#isBridgeBetween(outEdgesOfSubject, inEdgesOfSubject, n.id),
       });
     }
     return out;
