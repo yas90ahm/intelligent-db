@@ -950,7 +950,28 @@ export function tryConsolidate(
   const classes = independenceClassesOf(memberStrands);
   if (classes.size > 1) {
     const top = ranked[0]!;
-    const second = ranked[1]!;
+
+    // THE TRUE COMPETING CLAIM (never an agreeing corroborator) — reused by BOTH
+    // the M4 depth-margin gate and the decisive-gap computation below (bug fix,
+    // decisive-margin-may-rank-corroborator-as-runner-up). `ranked` is sorted by
+    // raw strength across ALL members, so `ranked[1]` can land on a member who
+    // AGREES with `top` (same payload — an independent corroborator of the SAME
+    // claim, ranked #2 overall only because it happens to be the second-strongest
+    // signal) rather than the strongest DIFFERING claim. Reusing M4's
+    // runner-up-finding logic here (filter by DIFFERING payload fingerprint) means
+    // the decisive gap is always computed against the actual competitor, never an
+    // agreeing co-asserter — an agreeing corroborator ranked #2 can only ever have
+    // pulled `ranked[1]`'s reputation ABOVE the true competitor's (it is ranked
+    // ahead of it), so using it in place of the true competitor could only ever
+    // SHRINK the computed gap relative to the real one, biasing toward spurious
+    // DEFERs, never a false auto-resolve — still worth closing since it makes the
+    // gate miscompute against the wrong member entirely. `classes.size > 1` is
+    // reached only after the earlier `distinctClaims.size >= 2` NOOP check, so at
+    // least one member differs from `top`'s claim and `.find` always succeeds;
+    // the `?? ranked[1]!` fallback is defensive-only totality, never reached here.
+    const topFp = payloadFingerprint(byId.get(top.strandId)!);
+    const runnerUp =
+      ranked.find((ms) => payloadFingerprint(byId.get(ms.strandId)!) !== topFp) ?? ranked[1]!;
 
     // ====================================================================
     // F4a [STRUCTURAL, UNCONDITIONAL] + SCOPE RATIONALE — multi-class ONLY.
@@ -1008,25 +1029,24 @@ export function tryConsolidate(
     if (agreementRootCountOf !== DEFAULT_AGREEMENT_ROOT_COUNT_OF) {
       // The runner-up is the strongest-ranked member asserting a DIFFERENT value than
       // the winner — the competing CLAIM, NOT an agreeing co-asserter (a same-value
-      // corroborator shares the winner's depth and is not a challenger). The multi-class
-      // branch is only reached with >= 2 distinct claims, so a differing member exists.
-      const topFp = payloadFingerprint(byId.get(top.strandId)!);
-      const runnerUp = ranked.find((ms) => payloadFingerprint(byId.get(ms.strandId)!) !== topFp);
-      if (runnerUp !== undefined) {
-        const dWin = agreementRootCountOf(top.strandId);
-        const dRun = agreementRootCountOf(runnerUp.strandId);
-        if (dWin < dRun + policy.depthMargin) {
-          return deferPending();
-        }
+      // corroborator shares the winner's depth and is not a challenger). Reuses the
+      // SHARED `runnerUp` computed above (one "who is the runner-up" notion for both
+      // this gate and the decisive-gap computation below).
+      const dWin = agreementRootCountOf(top.strandId);
+      const dRun = agreementRootCountOf(runnerUp.strandId);
+      if (dWin < dRun + policy.depthMargin) {
+        return deferPending();
       }
     }
 
     // DECISIVE-OR-DEFER (on the LCB readout): auto-resolve only if BOTH gates pass —
-    //  (a) a clear EARNED LCB gap top-vs-second (>= decisiveMargin), AND
+    //  (a) a clear EARNED LCB gap top-vs-the-TRUE-competitor (>= decisiveMargin), AND
     //  (b) the winner itself holds genuinely-earned trust (>= minWinnerReputation).
     // A weightless flood (all LCB ~0) fails (b); two comparable high-rep independents
-    // fail (a). Either failure DEFERS to the human (a genuine tie).
-    const decisiveGap = top.reputation - second.reputation >= policy.decisiveMargin;
+    // fail (a). Either failure DEFERS to the human (a genuine tie). The gap is computed
+    // against `runnerUp` (the true competing claim), never an agreeing corroborator
+    // that happens to rank #2 overall by raw strength.
+    const decisiveGap = top.reputation - runnerUp.reputation >= policy.decisiveMargin;
     const earnedWinner = top.reputation >= policy.minWinnerReputation;
     if (decisiveGap && earnedWinner) {
       // HIGH-IMPACT GATE: for an irreversible decision the decisive LCB margin is

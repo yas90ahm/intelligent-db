@@ -429,6 +429,69 @@ describe("tryConsolidate — multiple independence classes (the INDEPENDENT disp
     expect([...out.pending.members]).toEqual([a.id, b.id]);
   });
 
+  it("bug fix (decisive-margin-may-rank-corroborator-as-runner-up): an AGREEING corroborator ranked #2 overall must never stand in for the true competing claim", () => {
+    // THREE members, genuinely multi-class (classes A/A2/B):
+    //  - `top`      claims "A", reputation 0.6 (the winner).
+    //  - `corrob`   AGREES with `top` (SAME payload "A"), independent class A2,
+    //               reputation 0.5 — ranked #2 OVERALL by raw strength, but it is a
+    //               CO-ASSERTER of the winning claim, not a competitor.
+    //  - `rival`    the TRUE competing claim ("B"), independence class B,
+    //               reputation 0.2.
+    //
+    // Pre-fix, `second = ranked[1]` landed on `corrob` (0.5): gap = 0.6-0.5 = 0.1,
+    // below decisiveMargin (0.30) => the gate would spuriously DEFER even though the
+    // winner clears the REAL competing claim by a wide, decisive margin.
+    // Post-fix, `runnerUp` is found by filtering to a DIFFERING payload fingerprint
+    // (M4's own runner-up logic, reused here) => runnerUp = `rival` (0.2): gap =
+    // 0.6-0.2 = 0.4 >= 0.30 => decisive, and 0.6 >= 0.20 (minWinnerReputation) =>
+    // RESOLVED. The agreeing corroborator is never demoted (same claim as the
+    // winner); the true rival is the sole loser.
+    const top = claimStrand({
+      idRaw: "strand:top",
+      rootIdRaw: "root:top",
+      cls: "class:A",
+      payload: { v: "A" },
+    });
+    const corrob = claimStrand({
+      idRaw: "strand:corrob",
+      rootIdRaw: "root:corrob",
+      cls: "class:A2",
+      payload: { v: "A" }, // AGREES with top — an independent corroborator, not a rival
+    });
+    const rival = claimStrand({
+      idRaw: "strand:rival",
+      rootIdRaw: "root:rival",
+      cls: "class:B",
+      payload: { v: "B" }, // the TRUE competing claim
+    });
+    const stampsByRoot = new Map<ProvenanceRootId, IdentityStamp>([
+      ["root:top" as ProvenanceRootId, stamp({ sourceIdRaw: "src:top", reputation: 0.6 })],
+      ["root:corrob" as ProvenanceRootId, stamp({ sourceIdRaw: "src:corrob", reputation: 0.5 })],
+      ["root:rival" as ProvenanceRootId, stamp({ sourceIdRaw: "src:rival", reputation: 0.2 })],
+    ]);
+
+    const out = tryConsolidate(
+      buildContradictionSet([top, corrob, rival]),
+      [top, corrob, rival],
+      stampsByRoot,
+      NOW,
+    );
+
+    // THE GATE USES THE REAL COMPETITOR: resolves decisively instead of spuriously
+    // deferring against the agreeing corroborator's reputation.
+    expect(out.kind).toBe("RESOLVED");
+    if (out.kind !== "RESOLVED") throw new Error("unreachable");
+
+    expect(out.demotions.map((d) => d.demoted)).toEqual([rival.id]);
+    expect(top.fact_state).toBe(FactState.LIVE);
+    expect(top.outranked_by).toBeNull();
+    // The agreeing corroborator shares the winner's claim — never demoted.
+    expect(corrob.fact_state).toBe(FactState.LIVE);
+    expect(corrob.outranked_by).toBeNull();
+    expect(rival.fact_state).toBe(FactState.DEMOTED);
+    expect(rival.outranked_by).not.toBeNull();
+  });
+
   it("a decisive gap whose winner is below the floor DEFERS (fails minWinnerReputation)", () => {
     // The gap (0.18) is decisive on its own, but the winner's reputation (0.18) is
     // BELOW minWinnerReputation (0.20) — a weightless near-fresh source. Gate (b)
