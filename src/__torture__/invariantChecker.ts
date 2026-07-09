@@ -65,19 +65,12 @@ export interface InvariantReport {
 }
 
 /**
- * KNOWN, PRE-EXISTING, NON-CRASH violation kinds — found while building this suite,
- * reproducible on a single clean, un-killed engine call (no SIGKILL involved), and
- * therefore NOT a crash-consistency/atomicity bug: `ratification/pendingLedger.ts`'s
- * `approve()` credits the winning strand's author(s) via `reputation.ratify(author,
- * now)` with NO corroboration-event recording (unlike `api.ts`'s `#ratifyImpl`,
- * which conditionally records one when the ratified strand has a genuine agreement
- * set) — so `reconcileLedger` reports a permanent "earned > explained" drift for any
- * source that ever wins an `approve()` resolution. Documented here (not silently
- * dropped) so callers that want a hard-fail-only-on-structural-breaks signal (the
- * CI smoke job, the vitest kill-loop smoke test) have ONE shared, named place this
- * exclusion lives, rather than each re-deriving/duplicating the same string set.
+ * Historically held `RECONCILE_DRIFT` for the approve()-without-corroboration-event
+ * gap. That gap is CLOSED (`api.ts` `approve()` now records the winner's α-mass).
+ * Kept as an empty named set so torture callers still have one shared exclusion
+ * hook if a future non-crash reconcile quirk is documented here.
  */
-export const KNOWN_NONCRASH_VIOLATION_KINDS: ReadonlySet<string> = new Set(["RECONCILE_DRIFT"]);
+export const KNOWN_NONCRASH_VIOLATION_KINDS: ReadonlySet<string> = new Set();
 
 /** `report.violations` minus {@link KNOWN_NONCRASH_VIOLATION_KINDS} — the "heart of the suite" signal. */
 export function structuralViolations(

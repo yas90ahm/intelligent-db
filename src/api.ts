@@ -3097,6 +3097,33 @@ class IntelligentDbImpl implements IntelligentDb {
               ),
             );
           }
+
+          // RECONCILE_DRIFT FIX: `ledger.approve()` credits winner authors via
+          // `reputation.ratify` but historically wrote NO corroboration event, so
+          // `reconcileLedger` permanently flagged earned > explained drift. Record
+          // the EXACT α-mass each winner author just earned — same discipline as
+          // `#ratifyImpl`. Empty `corroboratingStrandIds`: human approval is not
+          // agreement-funded (disown of the author still craters via `disownSweep`;
+          // empty ids never intersect a tainted closure, so we do not falsely
+          // reverse approval credit when an unrelated loser is disowned).
+          const corrob = this.#ratification!.corroboration;
+          if (corrob !== undefined) {
+            for (const a of sortIds(winnerAuthors)) {
+              const beforeAlpha = repBefore.get(a)?.alpha ?? 1;
+              const afterAlpha = this.#reputation.stateOf(a)?.alpha ?? 1;
+              const deltaAlpha = afterAlpha - beforeAlpha;
+              if (deltaAlpha > 0) {
+                corrob.record({
+                  ratifiedStrandId: winnerStrandId,
+                  corroboratingStrandIds: [],
+                  beneficiarySourceId: a,
+                  reputationDelta: deltaAlpha,
+                  corroborationDepthAtEvent: 0,
+                  at: when,
+                });
+              }
+            }
+          }
         }
         return plan;
       });

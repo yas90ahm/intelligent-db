@@ -508,7 +508,11 @@ function safeErrorMessage(err: unknown): string {
 // (see that module's `call(...)` invocations) — this is the shared contract.
 // ---------------------------------------------------------------------------
 
-type MemoryHandler = (memory: AgentMemory, params: unknown, actor: SourceId) => unknown;
+type MemoryHandler = (
+  memory: AgentMemory,
+  params: unknown,
+  actor: SourceId,
+) => unknown | Promise<unknown>;
 
 const MEMORY_METHODS: Record<string, MemoryHandler> = {
   remember: (memory, params, actor) => {
@@ -1261,9 +1265,9 @@ export class DaemonServer {
       );
       return;
     }
-    this.#enqueue(state, id, () => {
+    this.#enqueue(state, id, async () => {
       try {
-        const result = handler(this.#memory, params, state.sourceId!);
+        const result = await handler(this.#memory, params, state.sourceId!);
         this.#writeLine(state.socket, envOk(id, result));
       } catch (err) {
         const code = err instanceof AnchorValidationError ? DAEMON_ERR_INVALID_ANCHOR : DAEMON_ERR_INTERNAL;
@@ -1302,10 +1306,10 @@ export class DaemonServer {
     this.#enqueue(state, id, () => this.#executeAdminVerb(state, id, method, params));
   }
 
-  #enqueue(state: ConnectionState, requestId: number, run: () => void): void {
+  #enqueue(state: ConnectionState, requestId: number, run: () => void | Promise<void>): void {
     try {
-      this.#queue.enqueue(state.id, () => {
-        run();
+      this.#queue.enqueue(state.id, async () => {
+        await run();
         this.#afterExecute(state.id);
       });
     } catch (err) {

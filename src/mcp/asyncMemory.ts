@@ -48,7 +48,8 @@
  * STACK NOTE: ESM + NodeNext ⇒ relative imports carry `.js`; `verbatimModuleSyntax`.
  */
 
-import type { AgentMemory } from "../agent/agentMemory.js";
+import type { AgentMemory, RecallOutput } from "../agent/agentMemory.js";
+import type { StrandId } from "../core/types.js";
 
 /**
  * The async projection of exactly the {@link AgentMemory} methods
@@ -56,10 +57,8 @@ import type { AgentMemory } from "../agent/agentMemory.js";
  * doc for why this is narrow and who implements it.
  */
 export interface AsyncAgentMemory {
-  remember(
-    input: Parameters<AgentMemory["remember"]>[0],
-  ): Promise<ReturnType<AgentMemory["remember"]>>;
-  recall(cue: Parameters<AgentMemory["recall"]>[0]): Promise<ReturnType<AgentMemory["recall"]>>;
+  remember(input: Parameters<AgentMemory["remember"]>[0]): Promise<{ id: StrandId }>;
+  recall(cue: Parameters<AgentMemory["recall"]>[0]): Promise<RecallOutput>;
   pendingQuestions(): Promise<ReturnType<AgentMemory["pendingQuestions"]>>;
   resolvePending(
     contradictionSetId: Parameters<AgentMemory["resolvePending"]>[0],
@@ -83,8 +82,8 @@ export function syncToAsyncMemory(mem: AgentMemory): AsyncAgentMemory {
   const cached = ASYNC_WRAPPERS.get(mem);
   if (cached !== undefined) return cached;
   const wrapper: AsyncAgentMemory = {
-    remember: async (input) => mem.remember(input),
-    recall: async (cue) => mem.recall(cue),
+    remember: async (input) => await mem.remember(input),
+    recall: async (cue) => await mem.recall(cue),
     pendingQuestions: async () => mem.pendingQuestions(),
     resolvePending: async (contradictionSetId, chosenStrandId) =>
       mem.resolvePending(contradictionSetId, chosenStrandId),

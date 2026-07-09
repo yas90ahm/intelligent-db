@@ -11,6 +11,20 @@
  *     const { facts } = mem.recall("what is the capital of Germany?");
  *     // facts: cited, grounded, prompt-ready
  *
+ * DEFAULT RECALL honors the spider-web rule: only the activation walk speaks.
+ * Pass an embedder to seed the walk (cosine proposes candidates; belief never
+ * reads similarity). Blend/RRF presentation is OPT-IN via `rankMode: "blend"`:
+ *
+ *     import { createOllamaEmbedder } from "./examples/embedders.js";
+ *     const mem = createAgentMemory({
+ *       embedder: createOllamaEmbedder(),
+ *       rankMode: "blend", // explicit — omit for walk-only presentation
+ *     });
+ *     await mem.remember({ text: "..." });
+ *     const { facts } = await mem.recall("...");
+ *
+ * Omit the embedder for the pure lexical walk (no vector sidecar).
+ *
  * IT WIRES: a store (SQLite if `dbPath`, else in-memory) + the Source-Identity Layer
  * over the crypto-free trust registry + the three-verb engine + the cue resolver,
  * and AUTO-PROVISIONS a default single-agent SOURCE (the deployment OWNER — the
@@ -46,6 +60,7 @@ import type {
   EpochMs,
   ContradictionSetId,
   FactState,
+  EmbedderPort,
 } from "../core/types.js";
 import { asEpochMs } from "../core/types.js";
 
@@ -86,8 +101,23 @@ import type { PendingLedger, PendingPayload, ResolvedDispute } from "../ratifica
 import { sourceIdFor } from "../identity/sources.js";
 import type { DownstreamDisownResult } from "../ratification/disown.js";
 
-import { createLexicalCueResolver, strandText } from "../recall/cueResolver.js";
-import type { Cue, CueResolver, LexicalCueResolverOptions } from "../recall/cueResolver.js";
+import { createLexicalCueResolver, createEmbeddingCueResolver, strandText } from "../recall/cueResolver.js";
+import type {
+  Cue,
+  CueResolver,
+  EmbeddingSeededCueResolver,
+  LexicalCueResolverOptions,
+} from "../recall/cueResolver.js";
+import { rankRecallResult } from "../recall/presentationRank.js";
+import type { RecallOptions } from "../recall/presentationRank.js";
+import { FROZEN_PRESENTATION_OPTIONS } from "../recall/frozenPresentationConfig.js";
+import {
+  createMemoryVectorSidecar,
+  createSqliteVectorSidecar,
+} from "../store/vectorSidecar.js";
+import type { VectorSidecar } from "../store/vectorSidecar.js";
+import { createCorroborationLedger, createSqliteCorroborationLedger } from "../ratification/corroboration.js";
+import type { CorroborationLedger } from "../ratification/corroboration.js";
 
 // ---------------------------------------------------------------------------
 // Public shapes
@@ -282,6 +312,29 @@ export interface AgentMemoryOptions {
    * only insider, so there is no one to protect the history from).
    */
   readonly onLedgerAppend?: AppendSink;
+  /**
+   * OPTIONAL embedder (Phase 1 / 1c). When provided, seeds the activation walk
+   * (cosine proposes candidates, unioned with lexical/entity seeds — never
+   * replaces them). Belief (`fact_state`, adjudication, independence,
+   * reputation, eviction) NEVER reads cosine. Presentation stays walk-ordered
+   * unless the caller explicitly sets {@link rankMode} / {@link recallOptions}
+   * to `'blend'` (Phase 1c frozen RRF: walk lit-set ∪ cosine top-N).
+   * Omit for the pure lexical walk (byte-compatible with pre-embedder callers).
+   */
+  readonly embedder?: EmbedderPort;
+  /**
+   * Presentation ranking mode. Default `'walk'` (activation-ordered lit set) —
+   * the spider-web rule. Pass `'blend'` with an {@link embedder} to opt into
+   * Phase 1c frozen RRF presentation ranking. Ignored (always walk) when no
+   * embedder is provided.
+   */
+  readonly rankMode?: "walk" | "blend";
+  /**
+   * Override any subset of the frozen Phase 1c {@link RecallOptions}. Only
+   * meaningful with an embedder + explicit `rankMode: 'blend'`; ignored on the
+   * default walk path.
+   */
+  readonly recallOptions?: RecallOptions;
 }
 
 /**
@@ -295,6 +348,10 @@ export type ApproverIdentity = Parameters<IntelligentDb["approve"]>[2];
  * zero identity management for the single-agent case, with the richer engine verbs
  * (adjudicate / disown / ratify / listPending / approve) exposed for the multi-source
  * case.
+ *
+ * Default construction (no embedder) is fully synchronous. Pass an
+ * {@link AgentMemoryOptions.embedder} to get {@link AgentMemoryWithEmbedder}
+ * (async remember/recall; walk presentation by default, blend only if opted in).
  */
 export interface AgentMemory {
   /**
@@ -424,6 +481,21 @@ export interface AgentMemory {
   close(): void;
 }
 
+/**
+ * {@link AgentMemory} with an embedder wired: `remember`/`recall` are async
+ * (vector write + cue embedding). Presentation defaults to walk ordering;
+ * pass `rankMode: 'blend'` for Phase 1c frozen RRF. Belief never reads cosine.
+ */
+export interface AgentMemoryWithEmbedder extends Omit<AgentMemory, "remember" | "recall"> {
+  remember(input: RememberInput): Promise<{ id: StrandId }>;
+  recall(cue: string | Cue): Promise<RecallOutput>;
+}
+
+/** Options that include a required embedder (selects the async facade overload). */
+export type AgentMemoryOptionsWithEmbedder = AgentMemoryOptions & {
+  readonly embedder: EmbedderPort;
+};
+
 // ---------------------------------------------------------------------------
 // In-process pillar wiring the facade owns
 //
@@ -495,7 +567,11 @@ export function deriveEntity(text: string): EntityId {
  * so they roll back together. The in-memory path (`dbPath` omitted) is unaffected —
  * it stays the fast, non-durable, already-atomic-per-call default.
  */
-export function createAgentMemory(opts?: AgentMemoryOptions): AgentMemory {
+export function createAgentMemory(opts: AgentMemoryOptionsWithEmbedder): AgentMemoryWithEmbedder;
+export function createAgentMemory(opts?: AgentMemoryOptions): AgentMemory;
+export function createAgentMemory(
+  opts?: AgentMemoryOptions,
+): AgentMemory | AgentMemoryWithEmbedder {
   // The single shared handle this facade OWNS when durable (null for in-memory).
   // Only the owner may close it — see `close()` below. `createSharedSqliteHandle`
   // (shared-handle-close-footgun fix) owns the open + WAL-set-and-verify step and
@@ -512,6 +588,29 @@ export function createAgentMemory(opts?: AgentMemoryOptions): AgentMemory {
   let ratification: RatificationDeps;
   let engine: IntelligentDb;
   let resolver: CueResolver;
+  let embeddingResolver: EmbeddingSeededCueResolver | null = null;
+  let vectors: VectorSidecar | null = null;
+  let embedder: EmbedderPort | null = null;
+  let corroboration: CorroborationLedger | null = null;
+
+  // Default presentation is walk (spider-web rule). Blend/RRF only when the
+  // caller explicitly opts in with `rankMode: 'blend'` (and an embedder is
+  // present for the cosine side). An embedder alone seeds the walk — it does
+  // NOT flip presentation to blend.
+  const requestedRankMode = opts?.rankMode ?? opts?.recallOptions?.rankMode ?? "walk";
+  const presentationOptions: RecallOptions | null =
+    opts?.embedder !== undefined
+      ? requestedRankMode === "blend"
+        ? {
+            ...FROZEN_PRESENTATION_OPTIONS,
+            ...opts.recallOptions,
+            rankMode: "blend",
+          }
+        : {
+            ...opts.recallOptions,
+            rankMode: "walk",
+          }
+      : null;
 
   // RE-AUDIT FIX (durability lane, MEDIUM): the multi-step shared-handle
   // construction sequence below (open handle -> store -> reputation ledger ->
@@ -577,15 +676,54 @@ export function createAgentMemory(opts?: AgentMemoryOptions): AgentMemory {
       ownedDb !== null
         ? createSqlitePendingLedger({ db: ownedDb, reputation: reputationLedger, ...onAppend })
         : createPendingLedger(onAppend);
+
+    // Corroboration-event ledger (approve/ratify reconcile discipline): share the
+    // durable handle when present so approve credits stay crash-consistent with
+    // reputation; in-memory otherwise (same lifetime as the pending ledger).
+    corroboration =
+      ownedDb !== null
+        ? createSqliteCorroborationLedger({ db: ownedDb })
+        : createCorroborationLedger();
+
     ratification = {
       ledger,
       // The engine's own voice on system-authored PENDING/MUTATION records —
       // asserted attribution only, deliberately NOT a registered witness (the
       // system must never count as a source of truth about claims).
       systemSource: sourceIdFor("iddb:system", "agent-memory"),
+      corroboration,
     };
-    engine = createIntelligentDb(store, identity, null, reputationLedger, ratification);
-    resolver = createLexicalCueResolver(store, opts?.resolver);
+
+    // OPTIONAL retrieval wiring: embedder + vector sidecar. When present, the
+    // engine's writeFactWithEmbeddingAsync populates vectors; recall uses the
+    // embedding cue resolver to SEED the walk. Blend presentation ranking is
+    // opt-in via `rankMode: 'blend'` (see presentationOptions above).
+    embedder = opts?.embedder ?? null;
+    let retrieval = null as
+      | { embedder: EmbedderPort; vectors: VectorSidecar }
+      | null;
+    if (embedder !== null) {
+      vectors =
+        ownedDb !== null
+          ? createSqliteVectorSidecar({ db: ownedDb })
+          : createMemoryVectorSidecar();
+      retrieval = { embedder, vectors };
+    }
+
+    engine = createIntelligentDb(store, identity, {
+      reputation: reputationLedger,
+      ratification,
+      ...(retrieval !== null ? { retrieval } : {}),
+    });
+
+    const lexical = createLexicalCueResolver(store, opts?.resolver);
+    resolver = lexical;
+    if (embedder !== null && vectors !== null) {
+      embeddingResolver = createEmbeddingCueResolver(store, embedder, vectors, {
+        base: lexical,
+      });
+      resolver = embeddingResolver;
+    }
   } catch (err) {
     sharedHandle?.closeAll();
     throw err;
@@ -678,12 +816,70 @@ export function createAgentMemory(opts?: AgentMemoryOptions): AgentMemory {
     return `source ${prefix} @ ${new Date(observedAt as number).toISOString()}`;
   }
 
+  function citeRecallResult(
+    result: ReturnType<IntelligentDb["recall"]>,
+    preservePresentationOrder: boolean,
+  ): RecallOutput {
+    // CONTESTED-FACT LABELS (feature C): the open-dispute member set, computed
+    // ONCE per recall call AFTER the walk returns — O(open pendings), never per
+    // strand-pop, so the recall hot path stays hot. No caching across calls (a
+    // dispute can open/close between recalls; freshness beats micro-perf). The
+    // walk itself observed nothing: ordering/energy/filtering are byte-identical
+    // to a no-dispute run — this is a LABEL at the consumption boundary.
+    const contestedIds = new Set<string>();
+    for (const p of engine.listPending()) {
+      for (const m of p.members) contestedIds.add(String(m));
+    }
+
+    const facts: CitedFact[] = [];
+    for (const lit of result.lit) {
+      const strand = store.getStrand(lit.strandId);
+      if (strand === null) continue;
+
+      // NO PROVENANCE → NO VOICE: only return strands grounded in a REAL source.
+      // A strand whose provenance is empty or whose every root has a null sourceId
+      // is ungrounded and must never be spoken.
+      let groundingSource: SourceId | null = null;
+      let groundingRoot: ProvenanceRoot | null = null;
+      for (const root of strand.provenance) {
+        if (root.sourceId !== null) {
+          groundingSource = root.sourceId;
+          groundingRoot = root;
+          break;
+        }
+      }
+      if (groundingSource === null || groundingRoot === null) continue;
+
+      facts.push({
+        strandId: strand.id,
+        fact: strand.payload,
+        text: strandText(strand),
+        source: groundingSource,
+        citation: citationFor(groundingSource, strand.observedAt),
+        activation: lit.activation,
+        // Carry the belief state to the caller VERBATIM (never filtered here:
+        // the web shows superpositions by design — labeled, not hidden).
+        fact_state: strand.fact_state,
+        // Label, never hide: a member of an OPEN dispute is flagged, not dropped.
+        contested: contestedIds.has(String(strand.id)),
+      });
+    }
+
+    // Walk path: most-activated first. Blend path: preserve rankRecallResult order
+    // (presentation score), which already sorted candidates.
+    if (!preservePresentationOrder) {
+      facts.sort((a, b) => b.activation - a.activation);
+    }
+
+    return { facts, halt: result.halt };
+  }
+
   return {
     defaultSourceId: defaultSource.sourceId,
     trust,
     engine,
 
-    remember(input: RememberInput): { id: StrandId } {
+    remember(input: RememberInput): { id: StrandId } | Promise<{ id: StrandId }> {
       const entity: EntityId =
         input.entity !== undefined
           ? (input.entity as EntityId)
@@ -693,7 +889,7 @@ export function createAgentMemory(opts?: AgentMemoryOptions): AgentMemory {
       // fix collapses classes on). Omitted/user origin ⇒ today's owner stamp.
       const { stamp, causalOrigin } = resolveOrigin(input);
 
-      const id = engine.writeFact({
+      const writeInput = {
         entity,
         ...(input.attribute !== undefined
           ? { attribute: input.attribute as AttributeKey }
@@ -701,73 +897,67 @@ export function createAgentMemory(opts?: AgentMemoryOptions): AgentMemory {
         payload: { text: input.text },
         stamp,
         ...(causalOrigin !== undefined ? { causalOrigin } : {}),
-      });
+      };
 
-      // Index the freshly stored strand's tokens for cue resolution. Read it back so
-      // the resolver sees the exact provenance/entity/attribute the engine minted.
-      const stored = store.getStrand(id);
-      if (stored !== null) resolver.index(stored);
+      const finish = (id: StrandId): { id: StrandId } => {
+        // Index the freshly stored strand's tokens for cue resolution. Read it back so
+        // the resolver sees the exact provenance/entity/attribute the engine minted.
+        const stored = store.getStrand(id);
+        if (stored !== null) resolver.index(stored);
+        return { id };
+      };
 
-      return { id };
+      // With an embedder: populate the vector sidecar (accelerator only). Without:
+      // sync writeFact — byte-compatible with pre-embedder callers.
+      if (embedder !== null) {
+        return engine.writeFactWithEmbeddingAsync(writeInput).then(finish);
+      }
+      return finish(engine.writeFact(writeInput));
     },
 
-    recall(cue: string | Cue): RecallOutput {
+    recall(cue: string | Cue): RecallOutput | Promise<RecallOutput> {
       const c: Cue = typeof cue === "string" ? { text: cue } : cue;
-      const seeds = resolver.resolve(c);
 
-      // No seeds resolved ⇒ nothing to walk. Return an empty, non-degraded result by
-      // running the (empty-seed) walk so the halt stamp is still real, never invented.
-      const result = engine.recall({ seeds });
-
-      // CONTESTED-FACT LABELS (feature C): the open-dispute member set, computed
-      // ONCE per recall call AFTER the walk returns — O(open pendings), never per
-      // strand-pop, so the recall hot path stays hot. No caching across calls (a
-      // dispute can open/close between recalls; freshness beats micro-perf). The
-      // walk itself observed nothing: ordering/energy/filtering are byte-identical
-      // to a no-dispute run — this is a LABEL at the consumption boundary.
-      const contestedIds = new Set<string>();
-      for (const p of engine.listPending()) {
-        for (const m of p.members) contestedIds.add(String(m));
+      // No embedder: pure lexical walk, sync result.
+      if (embeddingResolver === null || presentationOptions === null) {
+        const seeds = resolver.resolve(c);
+        const result = engine.recall({ seeds });
+        return citeRecallResult(result, false);
       }
 
-      const facts: CitedFact[] = [];
-      for (const lit of result.lit) {
-        const strand = store.getStrand(lit.strandId);
-        if (strand === null) continue;
+      // Embedder present: always seed the walk with embeddings. Presentation
+      // stays walk-ordered unless the caller explicitly opted into blend.
+      const useBlend = presentationOptions.rankMode === "blend";
+      return (async (): Promise<RecallOutput> => {
+        const seeds = await embeddingResolver.resolveWithEmbeddings(c);
+        const walkResult = engine.recall({ seeds });
 
-        // NO PROVENANCE → NO VOICE: only return strands grounded in a REAL source.
-        // A strand whose provenance is empty or whose every root has a null sourceId
-        // is ungrounded and must never be spoken.
-        let groundingSource: SourceId | null = null;
-        let groundingRoot: ProvenanceRoot | null = null;
-        for (const root of strand.provenance) {
-          if (root.sourceId !== null) {
-            groundingSource = root.sourceId;
-            groundingRoot = root;
-            break;
+        if (!useBlend) {
+          return citeRecallResult(walkResult, false);
+        }
+
+        // Opt-in Phase 1c frozen blend/RRF presentation ranking.
+        let cueVector: Float32Array | null = null;
+        if (c.text !== undefined && c.text.trim().length > 0 && vectors !== null && embedder !== null) {
+          try {
+            const [vec] = await embedder.embed([c.text]);
+            cueVector = vec ?? null;
+          } catch {
+            // FAIL-OPEN: embeddings are an accelerator — degrade to walk ordering.
+            cueVector = null;
           }
         }
-        if (groundingSource === null || groundingRoot === null) continue;
 
-        facts.push({
-          strandId: strand.id,
-          fact: strand.payload,
-          text: strandText(strand),
-          source: groundingSource,
-          citation: citationFor(groundingSource, strand.observedAt),
-          activation: lit.activation,
-          // Carry the belief state to the caller VERBATIM (never filtered here:
-          // the web shows superpositions by design — labeled, not hidden).
-          fact_state: strand.fact_state,
-          // Label, never hide: a member of an OPEN dispute is flagged, not dropped.
-          contested: contestedIds.has(String(strand.id)),
-        });
-      }
-
-      // Most-activated first (prompt-ready ordering).
-      facts.sort((a, b) => b.activation - a.activation);
-
-      return { facts, halt: result.halt };
+        const cosineDeps =
+          cueVector !== null && vectors !== null && embedder !== null
+            ? { vectors, modelId: embedder.modelId, cueVector }
+            : null;
+        const ranked = rankRecallResult(store, walkResult, cosineDeps, presentationOptions);
+        return citeRecallResult(
+          ranked,
+          cosineDeps !== null,
+        );
+      })();
     },
 
     ratify(strandId: StrandId, source?: SourceSelector): void {
@@ -926,7 +1116,7 @@ export function createAgentMemory(opts?: AgentMemoryOptions): AgentMemory {
       if (typeof closable.close === "function") closable.close();
       if (sharedHandle !== null) sharedHandle.closeAll();
     },
-  };
+  } as AgentMemory | AgentMemoryWithEmbedder;
 }
 
 // Re-export the Cue/CueResolver seam + RatificationDeps for callers wiring the

@@ -1,0 +1,15 @@
+---
+description: Point agents at AGENTS.md and the fast verify loop
+alwaysApply: true
+---
+
+# Agent verify loop
+
+Before claiming a change is done, follow [`AGENTS.md`](../../AGENTS.md):
+
+1. `npm run typecheck`
+2. Scoped tests: `npx vitest run <path>` for files you touched
+3. `npm test` when the change spans modules or trust/durability paths
+4. `npm run build` if you touch shipped `src/` that compiles to `dist/`
+
+Node `>=22.13`. No ESLint/Prettier stack — validation is typecheck + tests. Gated benches need env flags and are not part of the default loop. Daemon MCP token handoff: raw bearer file only — see OPERATIONS.md §7 / AGENTS.md.

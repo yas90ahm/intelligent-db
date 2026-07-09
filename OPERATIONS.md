@@ -89,11 +89,13 @@ bearer token into `<data-dir>/daemon-token` (JSON: `{token, fingerprint,
 endpoint, mintedAt}`), best-effort `chmod 0600` on POSIX. On Windows, the
 file's privacy comes from the user-profile directory's own ACLs (there is no
 POSIX permission-bit equivalent to set — a disclosed, not hidden, gap; see
-§4). A client reads the token (and, on Windows, the actual bound pipe
-endpoint — see §4) from this file. **Connection without a token is never
-identity** — every connection must present one, in every preset, including a
-single-user PERSONAL deployment (R1's ruling: "any process running as this OS
-user" is not an acceptable floor once multiple agents share one memory).
+§4). A raw daemon client reads the `token` field (and, on Windows, the actual
+bound pipe `endpoint` — see §4) from this JSON file. **Do not point MCP at
+this JSON file** — see §7: `MEMORY_DAEMON_TOKEN_FILE` must contain the raw
+bearer token only. **Connection without a token is never identity** — every
+connection must present one, in every preset, including a single-user PERSONAL
+deployment (R1's ruling: "any process running as this OS user" is not an
+acceptable floor once multiple agents share one memory).
 
 **Issuing a per-agent token** — over an already-authenticated OWNER-grade
 connection, the `issueToken` admin verb:
@@ -240,15 +242,14 @@ run log):
   what shipped before it and why). `verifyChain()` on this chain passes on
   every reopen across every kill cycle tested, and it CONTINUES the same
   chain across a restart rather than starting over.
-- **The fact/ratification checksum chain is NOT durable when backed by the
-  ergonomic `createAgentMemory()` facade** (which the daemon uses) —
-  `agent/agentMemory.ts` wires its `PendingLedger` in-memory regardless of
-  `dbPath` (its own doc comment: "an open pending is RE-DERIVABLE"). This is a
-  pre-existing facade characteristic, not something the daemon introduced or
-  could fix without rewiring the whole facade's durability model — it applies
-  identically to the plain MCP stdio server today. It resets on every daemon
-  restart, clean or crashed, not only under `SIGKILL`. See the KNOWN
-  LIMITATIONS addition in `CLAUDE.md`.
+- **The fact/ratification checksum chain IS durable when the daemon (or MCP)
+  uses `createAgentMemory({ dbPath })`.** The facade shares one SQLite handle
+  across the strand store, reputation ledger, and `createSqlitePendingLedger`
+  (Wave-1 `approve-desync-default-facade` fix — see `agent/agentMemory.ts`).
+  Open disputes and the audit checksum chain survive a clean or crashed
+  restart with the memory db. The in-memory pending ledger remains only when
+  `dbPath` is omitted (the fast non-durable default; an open pending is
+  RE-DERIVABLE by re-running `adjudicate` over the same LIVE members).
 - **Client outcome for a request in flight when the daemon dies: UNKNOWN,
   never fabricated.** `daemon/client.ts`'s `createRemoteAgentMemory` surfaces
   a typed `DaemonUnknownOutcomeError` for every request that had no response
@@ -299,12 +300,20 @@ over.
 
 `mcp/server.ts` supports opting a stdio MCP server instance into daemon-backed
 memory via `MEMORY_DAEMON_SOCKET` (the daemon's socket/pipe path) +
-`MEMORY_DAEMON_TOKEN_FILE` (a file containing the bearer token — never the
-token itself in an env var). On startup it performs a REAL handshake round
-trip to validate the daemon is reachable and the token is accepted, bounded by
-`DAEMON_STARTUP_TIMEOUT_MS` (8s default) — a daemon that is unreachable or
-rejects the token fails startup fast with a clear error rather than silently
-falling back to in-process memory.
+`MEMORY_DAEMON_TOKEN_FILE` (a file whose entire contents are the raw bearer
+token — trimmed; never the token itself in an env var). **Do not point
+`MEMORY_DAEMON_TOKEN_FILE` at the auto-provisioned `<data-dir>/daemon-token`
+JSON** (`{token, fingerprint, endpoint, mintedAt}`): `resolveDaemonConfig`
+reads the file as the bearer string verbatim (`src/mcp/server.ts`), so a JSON
+blob fails auth. Extract the `token` field into a separate raw-token file
+(the e2e harness writes exactly that shape as `mcp-daemon-token` in
+`src/daemon/__e2e__/support.ts`). On Windows, set `MEMORY_DAEMON_SOCKET` to
+the `endpoint` field from that same JSON (the random-suffixed named pipe —
+§4), not a guessed `\\.\pipe\...` prefix. On startup the server performs a
+REAL handshake round trip to validate the daemon is reachable and the token
+is accepted, bounded by `DAEMON_STARTUP_TIMEOUT_MS` (8s default) — a daemon
+that is unreachable or rejects the token fails startup fast with a clear
+error rather than silently falling back to in-process memory.
 
 **Full per-request dispatch is wired.** The binding design decision
 (`docs/specs/PHASE3B_MCP_ASYNC_SPEC.md`): a synchronous bridge over async
@@ -518,7 +527,8 @@ bug, but it is one your monitoring should be watching for.
 |---|---|
 | Start | `intelligent-db-daemon --db <path> [--socket <path>] [--data-dir <path>]` |
 | Stop (graceful) | `SIGINT` / `SIGTERM` |
-| Find the owner token | `<data-dir>/daemon-token` (JSON) |
+| Find the owner token | `<data-dir>/daemon-token` (JSON: use `token`; on Windows also `endpoint`) |
+| MCP daemon token file | Separate file with raw bearer only — not the JSON `daemon-token` (§7) |
 | Issue a per-agent token | `issueToken` (OWNER connection only) |
 | Revoke one token | `revokeToken` (OWNER connection only) |
 | Revoke everything, re-mint owner token | `revokeAllTokens` (OWNER connection only) |

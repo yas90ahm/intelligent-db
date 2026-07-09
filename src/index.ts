@@ -517,6 +517,15 @@ export {
   rankRecallResult,
 } from "./recall/presentationRank.js";
 
+export {
+  FROZEN_EMBEDDER_MODEL_ID,
+  FROZEN_SCORE_MODE,
+  FROZEN_WEIGHTS,
+  FROZEN_RRF_K,
+  FROZEN_UNION_TOP_N,
+  FROZEN_PRESENTATION_OPTIONS,
+} from "./recall/frozenPresentationConfig.js";
+
 export type {
   RankMode,
   PresentationScoreMode,
@@ -537,7 +546,9 @@ export { createAgentMemory, deriveEntity } from "./agent/agentMemory.js";
 
 export type {
   AgentMemory,
+  AgentMemoryWithEmbedder,
   AgentMemoryOptions,
+  AgentMemoryOptionsWithEmbedder,
   ApproverIdentity,
   RememberInput,
   RememberOrigin,

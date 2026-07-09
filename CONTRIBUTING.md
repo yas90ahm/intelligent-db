@@ -31,17 +31,24 @@ that don't fit the project's direction. Use the issue templates under
 
 ## Development setup
 
-Requires Node `>=22.13` (`node:sqlite` unflagged; developed and tested on Node 24, per README). The library itself is
+Requires Node `>=22.13` (`node:sqlite` unflagged; developed and tested on Node 24, per README;
+pin files: `.nvmrc` / `.node-version`). The library itself is
 **zero-runtime-dependency** — only `node:` builtins ship in `dist/`; the packages in
-`devDependencies` (better-sqlite3, duckdb, qdrant client, transformers, pg, redis, lmdb)
-exist solely to power the competitive benchmark harness under `src/__bench__/` and are
-never imported by the shipped engine.
+`devDependencies` (better-sqlite3, duckdb, qdrant client, transformers, pg, redis, lmdb,
+faiss, hnswlib, …) exist solely to power the competitive benchmark harness under
+`src/__bench__/` and are never imported by the shipped engine. `npm install` may warn
+about allow-scripts / native builds for those adapters — safe to ignore for the
+in-process library demo, typecheck, and default tests; only gated benches need them.
 
 ```sh
 git clone <your fork>
 cd intelligent-db
 npm install
 ```
+
+Agent-oriented fast verify loop (typecheck → scoped Vitest → full suite → build):
+[`AGENTS.md`](./AGENTS.md). Validation is typecheck + tests — there is no separate
+ESLint/Prettier stack.
 
 ## Required checks — must be green before you open a PR
 

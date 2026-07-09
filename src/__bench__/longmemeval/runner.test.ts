@@ -27,7 +27,8 @@
  * this layer is purely additive, adapter-level (same discipline as every other bench).
  */
 
-import { createWriteStream, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { createWriteStream, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import { describe, it, expect } from "vitest";
@@ -36,12 +37,15 @@ import { loadLongMemEval, toConversation, buildLmeGraph, stratifiedSubsample } f
 import type { LmeItem } from "./dataset.js";
 import { embedTexts } from "../retrieval/embed.js";
 import { createLmeIdRetriever, lmeSeed, idbMemories, ragMemories } from "./arms.js";
+import { Mem0Sidecar, type Mem0Options } from "../reasoning/mem0Arm.js";
 import { buildQaPrompt } from "../retrieval/qa/qaPrompt.js";
 import { scoreAnswer } from "../retrieval/qa/qaScore.js";
 import { judgeAnswer } from "./judge.js";
 import { ollamaGenerate, ollamaReachable, ollamaHost } from "../retrieval/qa/ollama.js";
 
 const RUN = process.env["LME_BENCH"] === "1";
+
+type ArmId = "idb" | "rag" | "mem0";
 
 const envInt = (k: string, dflt: number): number => {
   const v = Number(process.env[k]);
@@ -54,10 +58,15 @@ const MODEL = process.env["LME_MODEL"] ?? "qwen2.5:7b";
 const JUDGE_MODEL = process.env["LME_JUDGE_MODEL"] ?? MODEL;
 const N = envInt("LME_N", 60);
 const TOP_K = envInt("LME_K", 10);
-const ARMS = envList("LME_ARMS", "idb,rag") as Array<"idb" | "rag">;
+const ARMS = envList("LME_ARMS", "idb,rag") as ArmId[];
 const CONCURRENCY = envInt("LME_CONCURRENCY", 4);
 const CACHE_PATH = process.env["LME_DATA"] ?? "D:\\Intelligent DB\\.arbor\\cache\\longmemeval\\longmemeval_oracle.json";
-const OUT_DIR = "D:\\Intelligent DB\\.arbor\\sessions\\longmemeval";
+const OUT_DIR =
+  process.env["LME_OUT_DIR"] ?? "D:\\Intelligent DB\\.arbor\\sessions\\longmemeval";
+const MEM0_PYTHON = process.env["MEM0_PYTHON"] ?? "D:\\Intelligent DB\\.arbor\\venv-mem0\\Scripts\\python.exe";
+const MEM0_LLM = process.env["MEM0_LLM"] ?? MODEL;
+const MEM0_EMBED = process.env["MEM0_EMBED"] ?? "nomic-embed-text";
+const MEM0_EMBED_DIMS = envInt("MEM0_EMBED_DIMS", 768);
 const ORACLE_URLS = [
   "https://huggingface.co/datasets/xiaowu0162/longmemeval-cleaned/resolve/main/longmemeval_oracle.json",
 ];
@@ -110,18 +119,52 @@ async function mapLimit<T, R>(items: readonly T[], limit: number, fn: (t: T, i: 
 
 interface Task {
   readonly item: LmeItem;
-  readonly arm: "idb" | "rag";
+  readonly arm: ArmId;
   readonly prompt: string;
 }
 
+async function mem0MemoriesForItem(item: LmeItem, k: number): Promise<string[]> {
+  const qdrantPath = join(tmpdir(), `idb-lme-mem0-${item.questionId.replace(/[^a-z0-9_-]/gi, "_")}-${process.pid}`);
+  const opts: Mem0Options = {
+    pythonBin: MEM0_PYTHON,
+    llm: MEM0_LLM,
+    embed: MEM0_EMBED,
+    embedDims: MEM0_EMBED_DIMS,
+    qdrantPath,
+    ollamaHost: ollamaHost(),
+  };
+  const sc = new Mem0Sidecar(opts);
+  try {
+    await sc.ready();
+    await sc.build(item.turns.map((t, i) => ({ idx: i, text: t.text })));
+    const hits = await sc.search(item.question, k);
+    return hits
+      .map((h) => item.turns[h.idx]?.text)
+      .filter((t): t is string => typeof t === "string" && t.length > 0)
+      .slice(0, k);
+  } finally {
+    await sc.close();
+    try {
+      rmSync(qdrantPath, { recursive: true, force: true });
+    } catch {
+      /* best-effort */
+    }
+  }
+}
+
 (RUN ? describe : describe.skip)(
-  "LongMemEval (oracle subset) — idb vs rag, dual-metric scored (containment/F1 + LLM judge)",
+  "LongMemEval (oracle subset) — idb vs rag vs mem0, dual-metric scored (containment/F1 + LLM judge)",
   () => {
     it(
       "retrieves top-K memories per arm, reads with a local LLM, scores vs gold two ways",
       async () => {
         if (!(await ollamaReachable())) {
           throw new Error(`Ollama unreachable at ${ollamaHost()} — start it and pull ${MODEL}${JUDGE_MODEL !== MODEL ? `, ${JUDGE_MODEL}` : ""}`);
+        }
+        for (const arm of ARMS) {
+          if (arm !== "idb" && arm !== "rag" && arm !== "mem0") {
+            throw new Error(`unknown LME_ARMS entry: ${arm}`);
+          }
         }
 
         // ---- 1) DATASET + deterministic stratified subsample --------------------
@@ -139,23 +182,28 @@ interface Task {
         }
 
         // ---- 2) EMBED (shared; batched across the whole subsample) --------------
+        const needVectors = ARMS.some((a) => a === "idb" || a === "rag");
         const turnTexts: string[] = [];
         const turnIds: string[] = [];
         for (const it of subsample) for (const t of it.turns) { turnTexts.push(t.text); turnIds.push(t.id); }
         const cueTexts = subsample.map((it) => it.question);
-        const vectors = await embedTexts([...turnTexts, ...cueTexts]);
+        const vectors = needVectors ? await embedTexts([...turnTexts, ...cueTexts]) : [];
         const vecByTurn = new Map<string, Float32Array>();
-        turnIds.forEach((id, i) => vecByTurn.set(id, vectors[i]!));
         const vecByQuestion = new Map<string, Float32Array>();
-        subsample.forEach((it, i) => vecByQuestion.set(it.questionId, vectors[turnTexts.length + i]!));
+        if (needVectors) {
+          turnIds.forEach((id, i) => vecByTurn.set(id, vectors[i]!));
+          subsample.forEach((it, i) => vecByQuestion.set(it.questionId, vectors[turnTexts.length + i]!));
+        }
         const turnText = new Map<string, string>();
         for (const it of subsample) for (const t of it.turns) turnText.set(t.id, t.text);
 
         // ---- 3) PER-QUESTION conversation graph + (if requested) idb retriever --
         const convOf = new Map(subsample.map((it) => [it.questionId, toConversation(it)] as const));
-        const graphOf = new Map(
-          [...convOf.entries()].map(([qid, conv]) => [qid, buildLmeGraph(conv, (id) => vecByTurn.get(id)!)] as const),
-        );
+        const graphOf = needVectors
+          ? new Map(
+              [...convOf.entries()].map(([qid, conv]) => [qid, buildLmeGraph(conv, (id) => vecByTurn.get(id)!)] as const),
+            )
+          : new Map<string, ReturnType<typeof buildLmeGraph>>();
         const idrOf = ARMS.includes("idb")
           ? new Map([...convOf.entries()].map(([qid, conv]) => [qid, createLmeIdRetriever(conv)] as const))
           : new Map<string, ReturnType<typeof createLmeIdRetriever>>();
@@ -163,16 +211,21 @@ interface Task {
         // ---- 4) RETRIEVE memories per (item, arm) --------------------------------
         const memoriesOf = new Map<string, string[]>(); // `${questionId}|${arm}` -> memories
         for (const it of subsample) {
-          const cueVec = vecByQuestion.get(it.questionId)!;
+          const cueVec = vecByQuestion.get(it.questionId);
           const conv = convOf.get(it.questionId)!;
-          const graph = graphOf.get(it.questionId)!;
+          const graph = graphOf.get(it.questionId);
           for (const arm of ARMS) {
-            const mem =
-              arm === "idb"
-                ? idbMemories(idrOf.get(it.questionId)!, graph, cueVec, turnText, TOP_K)
-                : ragMemories(conv, vecByTurn, cueVec, turnText, TOP_K);
+            let mem: string[];
+            if (arm === "idb") {
+              mem = idbMemories(idrOf.get(it.questionId)!, graph!, cueVec!, turnText, TOP_K);
+            } else if (arm === "rag") {
+              mem = ragMemories(conv, vecByTurn, cueVec!, turnText, TOP_K);
+            } else {
+              mem = await mem0MemoriesForItem(it, TOP_K);
+            }
             memoriesOf.set(`${it.questionId}|${arm}`, mem);
           }
+          process.stderr.write(`[longmemeval] retrieved ${it.questionId}\n`);
         }
         void lmeSeed; // (available for future entity-seeded variants; MultiSeedID seeds by vector-kNN only)
 
@@ -194,14 +247,14 @@ interface Task {
         );
 
         interface Row {
-          arm: "idb" | "rag";
+          arm: ArmId;
           n: number;
           f1: number;
           containment: number;
           judgeAcc: number;
           agreement: number; // containment bit === judge-correct bit
         }
-        const zero = (arm: "idb" | "rag"): Row => ({ arm, n: 0, f1: 0, containment: 0, judgeAcc: 0, agreement: 0 });
+        const zero = (arm: ArmId): Row => ({ arm, n: 0, f1: 0, containment: 0, judgeAcc: 0, agreement: 0 });
         const perArm: Record<string, Row> = {};
         for (const arm of ARMS) perArm[arm] = zero(arm);
         const perType: Record<string, Record<string, Row>> = {};
@@ -258,6 +311,9 @@ interface Task {
             requestedN: N, strata, nAbstention, host: ollamaHost(),
             dataset: "LongMemEval oracle (xiaowu0162/longmemeval-cleaned, longmemeval_oracle.json)",
             scoring: "dual: containment/F1 (retrieval/qa/qaScore.ts) + local LLM judge (CORRECT/WRONG)",
+            mem0: ARMS.includes("mem0")
+              ? { llm: MEM0_LLM, embed: MEM0_EMBED, embedDims: MEM0_EMBED_DIMS, python: MEM0_PYTHON }
+              : undefined,
           },
           perArm,
           perType,

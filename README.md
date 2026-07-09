@@ -195,8 +195,11 @@ Or via the package bin: `npx intelligent-db-mcp` (after `npm link` / a local ins
 
 **Multiple clients, one shared memory:** point the same server at a running
 [daemon](#durability-and-security) instead of a local file by setting `MEMORY_DAEMON_SOCKET`
-(the daemon's socket/pipe path) and `MEMORY_DAEMON_TOKEN_FILE` (a file holding the bearer
-token — never the token itself in an env var) instead of `MEMORY_DB`. Every request goes over
+(the daemon's socket/pipe path) and `MEMORY_DAEMON_TOKEN_FILE` (a file whose contents are
+the **raw bearer token only** — never the token itself in an env var, and never the
+auto-provisioned JSON `<data-dir>/daemon-token` file) instead of `MEMORY_DB`. Extract the
+`token` field from that JSON into a separate file; on Windows, set `MEMORY_DAEMON_SOCKET`
+from the JSON `endpoint` field (the random-suffixed named pipe). Every request goes over
 the wire to the daemon for the life of the process, so two Claude Code windows, a CLI session,
 and a background indexer can all remember and recall against the same facts instead of each
 opening its own SQLite file. Full setup: [`OPERATIONS.md`](./OPERATIONS.md) §7.
@@ -346,8 +349,9 @@ flood at cosine 1.0 can crowd the top ranks), and only rank fusion passes all ga
 that shipped is the best one that survives the adversarial suite, not the best one on the
 leaderboard. Similarity proposes candidates and orders presentation; belief still comes from
 provenance and independence, never from cosine. The frozen config re-passed the Sybil (24/24)
-and FactWorld (0.0% ASR) gates, and default retrieval stays walk-mode with blend as an explicit
-opt-in. Full iteration history, gate tables, and reproduction commands:
+and FactWorld (0.0% ASR) gates. **Default PERSONAL recall** is the activation walk. Pass an
+`embedder` into `createAgentMemory({ embedder })` to seed that walk; opt into frozen blend/RRF
+presentation with `rankMode: "blend"`. Full iteration history, gate tables, and reproduction commands:
 [`BENCH_RERUN_2026-07-06.md`](./BENCH_RERUN_2026-07-06.md),
 [`docs/BENCHMARK_NARRATIVE.md`](./docs/BENCHMARK_NARRATIVE.md).
 
@@ -378,8 +382,15 @@ npm run build      # tsc -p tsconfig.build.json -> dist/
 npm test           # vitest run — the full suite (benchmark suites are env-gated and skipped)
 ```
 
+`npm install` may warn about allow-scripts / native builds for optional bench adapters
+(`better-sqlite3`, `faiss-node`, `hnswlib-node`, DuckDB, etc.). Those packages power
+env-gated competitive benches under `src/__bench__/` only — they are **not** required for
+the in-process library, `npm run demo`, typecheck, or the default test suite. Skip or
+ignore those warnings unless you are running a gated bench. There is no separate ESLint/
+Prettier stack; validation is `typecheck` + tests (scoped: `npx vitest run <path>`).
+
 CI (`.github/workflows/ci.yml`) runs typecheck + test + build on Node 22.x and 24.x for
-every push and pull request to `main`.
+every push and pull request to `main`. Agent-oriented verify loop: [`AGENTS.md`](./AGENTS.md).
 
 ## Contributing, security, and license
 

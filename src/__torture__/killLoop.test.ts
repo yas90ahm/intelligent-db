@@ -14,17 +14,10 @@
  * works and a small run is clean," cheap enough for CI's optional torture-smoke job
  * (default 5 cycles here; CI runs the CLI separately at 50).
  *
- * KNOWN, PRE-EXISTING, NON-CRASH `RECONCILE_DRIFT` (documented, not asserted away):
- * `ratification/pendingLedger.ts`'s `approve()` credits the winning strand's
- * author(s) via `reputation.ratify(author, now)` with NO corroboration-event
- * recording (unlike `api.ts`'s `#ratifyImpl`, which conditionally records one) — so
- * `reconcileLedger` reports a permanent "earned > explained" drift for any source
- * that ever wins an `approve()` resolution, REPRODUCIBLE on a single clean,
- * un-killed `approve()` call (verified separately, no SIGKILL involved). This is a
- * genuine reconcile-audit gap this suite surfaced, but it is NOT a crash-consistency
- * bug — it is orthogonal to what SIGKILL does or doesn't interrupt, so this test
- * tolerates ONLY that specific, well-understood category and still hard-fails on
- * ANY other violation kind (which WOULD indicate a genuine atomicity break).
+ * KNOWN, PRE-EXISTING, NON-CRASH `RECONCILE_DRIFT` was CLOSED when `approve()`
+ * began recording corroboration-event α-mass (see
+ * `reconcileDriftApproveRegression.test.ts`). `KNOWN_NONCRASH_VIOLATION_KINDS` is
+ * now empty; this smoke still hard-fails on ANY violation kind.
  */
 
 import { mkdtempSync, rmSync } from "node:fs";

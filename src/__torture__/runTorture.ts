@@ -13,8 +13,9 @@
  * Prints one line per cycle to stdout (cheap progress for a backgrounded run being
  * polled) and a final summary; every violation is printed regardless of kind (never
  * silently dropped), but the PROCESS EXIT CODE reflects only STRUCTURAL violations
- * (`invariantChecker.ts`'s `KNOWN_NONCRASH_VIOLATION_KINDS` — see its doc: a
- * pre-existing, reproducible-without-a-kill `RECONCILE_DRIFT` this suite surfaced,
+ * (`invariantChecker.ts`'s `KNOWN_NONCRASH_VIOLATION_KINDS` — historically held
+ * `RECONCILE_DRIFT` for the approve-without-corroboration-event gap; that gap is
+ * CLOSED and the set is empty — see its doc), so callers that want a hard-fail-
  * not a crash-consistency bug) — exits 0 iff zero STRUCTURAL violations occurred,
  * else exits 1, so CI's smoke job fails loudly on any real atomicity regression
  * without perpetually red-lining on a known, already-reported, non-crash finding.
