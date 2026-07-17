@@ -442,7 +442,7 @@ for every sampled query (`:317-321`).
                                         │
                         ASR = incorrect ∈ reply ;  acc = correct ∈ reply
                                         │
-                    .arbor/sessions/poisonedrag/*.json ──► wilsonCI.mjs ──► confidence_intervals.md
+                    .arbor/sessions/poisonedrag/*.json ──► wilsonCI.mjs ──► src/__bench__/reports/confidence_intervals.md
 ```
 
 ### 5.2 The substrate arm's trust decision (the core mechanism)
@@ -586,7 +586,7 @@ Poisoned-bank variant: add `REASON_POISON=0.5`. Full env table + one-time datase
 node src/__bench__/verification/wilsonCI.mjs
 ```
 Reads the completed FactWorld + PoisonedRAG JSONs; writes
-`.arbor/sessions/verification/confidence_intervals.md`.
+`src/__bench__/reports/confidence_intervals.md`.
 
 ---
 

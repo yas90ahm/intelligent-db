@@ -447,5 +447,5 @@ injection resistance, and one end-to-end integration test
 (`src/__tests__/systemCoherence.test.ts`) that wires the whole pipeline over one shared
 SQLite handle. The 97-spec red-team suite and the poisoning benchmarks are documented in
 [`ARCHITECTURE_BENCHMARKS.md`](./ARCHITECTURE_BENCHMARKS.md); the review-findings log is
-[`launch/REVIEW_FINDINGS.md`](./launch/REVIEW_FINDINGS.md); known limitations are
+[`history/launch-2026-07/REVIEW_FINDINGS.md`](./history/launch-2026-07/REVIEW_FINDINGS.md); known limitations are
 enumerated in [`../CLAUDE.md`](../CLAUDE.md).

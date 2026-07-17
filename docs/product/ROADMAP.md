@@ -2,13 +2,13 @@
 
 > Status snapshot this roadmap is written against: **production-grade single-process
 > prototype** (TypeScript on Node 24), after the five-phase **crypto-free rebuild**
-> (`docs/launch/REBUILD_SUMMARY.md`): relay fix, crypto-free trust registry, trust-tiered
+> (`docs/history/launch-2026-07/REBUILD_SUMMARY.md`): relay fix, crypto-free trust registry, trust-tiered
 > quarantine ingest, per-tier dispute horn, and the re-measurement pass. The codebase
 > builds and owns zero cryptographic machinery; the full Vitest suite is green (see
 > `CLAUDE.md` for the current count — its Status line is the single canonical number).
 > This document does not restate what ships — it is the list of what is **not yet
 > built or decided**, drawn from `CLAUDE.md`'s "KNOWN LIMITATIONS" and
-> `docs/launch/REBUILD_SUMMARY.md` §7 ("What remains open"). Nothing here should read as
+> `docs/history/launch-2026-07/REBUILD_SUMMARY.md` §7 ("What remains open"). Nothing here should read as
 > a capability claim; every item is a gap in the shipped prototype today.
 
 ## How to read this roadmap
@@ -20,7 +20,7 @@ remain** — atomic compound writes, crash-consistent reopen, and corruption det
 (structural `integrity_check` + the semantic chain verifier) are done and tested, and the
 three launch-review findings (including the `ratify()` atomicity and `independentSources`
 fail-open bugs an earlier draft of this roadmap carried as open §0 items) are **fixed and
-regression-tested** — `docs/launch/BUGFIX_REPORT.md` is the closing record. Every item
+regression-tested** — `docs/history/launch-2026-07/BUGFIX_REPORT.md` is the closing record. Every item
 below is therefore an ACCEPTABLE-tier gap or an open deployment/ownership decision.
 
 ---
@@ -135,7 +135,7 @@ numbers as measurements of the system as it exists now.
 ## Retired (crypto era) — dropped, not deferred
 
 These items appeared on earlier versions of this roadmap and are **retired with the
-machinery they extended**, per the crypto-free rebuild (`docs/launch/REBUILD_SUMMARY.md`;
+machinery they extended**, per the crypto-free rebuild (`docs/history/launch-2026-07/REBUILD_SUMMARY.md`;
 historical design in `docs/history/ARCHITECTURE.md`). They are listed so their absence
 reads as a decision, not an omission:
 
@@ -156,7 +156,7 @@ reads as a decision, not an omission:
 ---
 
 *Source of truth for every gap-list claim above: `CLAUDE.md`, section "KNOWN LIMITATIONS",
-and `docs/launch/REBUILD_SUMMARY.md` §7. If this roadmap and `CLAUDE.md` ever disagree,
+and `docs/history/launch-2026-07/REBUILD_SUMMARY.md` §7. If this roadmap and `CLAUDE.md` ever disagree,
 `CLAUDE.md` is canonical. For process/maturity context (single-maintainer status,
 semver-`0.0.0`), see `docs/project-management/GOVERNANCE.md` and `RELEASE_PROCESS.md`; for
 the full, correctly-caveated benchmark number set, see `docs/marketing/COMPARISON.md`.*

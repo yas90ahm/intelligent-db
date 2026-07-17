@@ -114,7 +114,7 @@ This codebase has an explicit, hard-won ethos — please write to it, not around
 Past adversarial-review findings — including two high-severity ones (a fail-open
 `independentSources` predicate and a non-atomic `ratify()`) — are all fixed and
 regression-tested; the full log of each finding, its fix, and the guarding test lives in
-[`docs/launch/REVIEW_FINDINGS.md`](./docs/launch/REVIEW_FINDINGS.md). If you find something
+[`docs/history/launch-2026-07/REVIEW_FINDINGS.md`](./docs/history/launch-2026-07/REVIEW_FINDINGS.md). If you find something
 in the same class, that is exactly the report `SECURITY.md` asks for: open an issue per
 the policy above, or report privately per `SECURITY.md` if it shouldn't be public before a
 fix lands.

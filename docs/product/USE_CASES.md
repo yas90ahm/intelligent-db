@@ -84,7 +84,7 @@ signatures. There is also no encryption-at-rest yet (the SQLite file is plaintex
 OS-level full-disk encryption is the documented interim mitigation. Cross-process
 concurrency is likewise not yet supported. (An earlier draft flagged a then-open
 code-review finding that `ratify()` was not atomic; it was fixed and regression-tested —
-see `docs/launch/BUGFIX_REPORT.md`.)
+see `docs/history/launch-2026-07/BUGFIX_REPORT.md`.)
 
 ---
 
@@ -131,7 +131,7 @@ code cannot solve" — a class-assignment error silently weakens every downstrea
 bound, and no code change removes that responsibility from whoever operates the system.
 (An earlier draft flagged a then-open code-review finding that the `independentSources`
 predicate behind `approve()`'s independence gate failed open for unregistered sources; it
-was fixed to fail closed and regression-tested — see `docs/launch/BUGFIX_REPORT.md`.)
+was fixed to fail closed and regression-tested — see `docs/history/launch-2026-07/BUGFIX_REPORT.md`.)
 
 ---
 
@@ -175,7 +175,7 @@ concurrent writer rather than coordinating with it).
 `docs/ARCHITECTURE_ENGINE.md` (the current engine architecture, with file/line citations);
 most caveats are drawn from `CLAUDE.md`'s "KNOWN LIMITATIONS." The launch code review's two
 findings an earlier draft cited as open (persona 2 and persona 3) are fixed and
-regression-tested — `docs/launch/BUGFIX_REPORT.md` is the closing record. No benchmark
+regression-tested — `docs/history/launch-2026-07/BUGFIX_REPORT.md` is the closing record. No benchmark
 numbers appear in this document; for those, with correct historical and oracle-conditional
 caveats attached, see `docs/marketing/COMPARISON.md`. See `docs/product/ROADMAP.md`
 generally for what closing each caveat unlocks.*

@@ -106,39 +106,39 @@ Other repo-hygiene notes, checked directly against the working tree during this 
 
 ## 3. Marketing / Product / PM materials produced
 
-- **[docs/marketing/POSITIONING.md](../marketing/POSITIONING.md)** — tagline, pitch, target
+- **[docs/marketing/POSITIONING.md](../../marketing/POSITIONING.md)** — tagline, pitch, target
   audience, 8 key differentiators (structural retrieval, priced identity, Beta reputation,
   decisive-or-defer adjudication, demote-never-delete, tamper-evident Merkle audit,
   empirically validated benchmarks, zero runtime deps), and a "what this is not" section
   that now includes a "not a finished, audit-closed system" bullet reflecting the two HIGH
   code-review findings.
-- **[docs/marketing/COMPARISON.md](../marketing/COMPARISON.md)** — qualitative architecture
+- **[docs/marketing/COMPARISON.md](../../marketing/COMPARISON.md)** — qualitative architecture
   comparison table; the measured FactWorld (0% vs 98.7%/79.4% ASR) and PoisonedRAG
   (6–18% vs 93–99% ASR) tables pulled verbatim from `ARCHITECTURE_BENCHMARKS.md`; the
   oracle-conditional caveat plus the non-oracle 14–23% structural-only numbers; the
   disclosed costly-independent-boundary failure mode (Sybil priced, not prevented); a
   "where it's not the better tool" section pointing at `ROADMAP.md` for multi-tenant gaps.
-- **[docs/product/ROADMAP.md](../product/ROADMAP.md)** — current status (all four
+- **[docs/product/ROADMAP.md](../../product/ROADMAP.md)** — current status (all four
   ARCHITECTURE.md pillars shipped, zero CRITICAL gaps per CLAUDE.md at time of writing), a
   new **§0 "Recently identified, not yet in CLAUDE.md's canonical gap list"** section
   documenting the two HIGH code-review findings as reported-but-unconfirmed, then the full
   ACCEPTABLE gap list (HARDWARE/KYC/FINANCIAL_STAKE binders, real external anchor/witness
   services, cross-process concurrency, encryption-at-rest, backup/PITR, schema migration)
   with what each unlocks for real deployments.
-- **[docs/product/USE_CASES.md](../product/USE_CASES.md)** — four personas (agent framework
+- **[docs/product/USE_CASES.md](../../product/USE_CASES.md)** — four personas (agent framework
   builders, enterprise knowledge assistants, regulated industries, multi-agent systems
   needing shared corroborated memory), each capability claim traced to CLAUDE.md/
   ARCHITECTURE.md, with inline pointers to the two §0 findings where they qualify a
   persona's pitch (ratify's non-atomicity for the audit-trail claim; `independentSources`'
   fail-open for the `approve()` distinct-approver claim).
-- **[docs/project-management/GOVERNANCE.md](../project-management/GOVERNANCE.md)** — sizes
+- **[docs/project-management/GOVERNANCE.md](../../project-management/GOVERNANCE.md)** — sizes
   decision-making for the current one-maintainer, pre-launch state: Class 1 (ordinary PR +
   green checks + one approval) vs. Class 2 (written design proposal + explicit sign-off +
   CLAUDE.md update) split keyed off the settled invariants/hard theorem, with a concrete
   worked boundary test drawn straight from this pass's own findings (restoring a documented
   invariant, e.g. wrapping `ratify()` in the existing `withTxn` convention, is Class 1;
   redefining what "independent" or "atomic" means is Class 2).
-- **[docs/project-management/RELEASE_PROCESS.md](../project-management/RELEASE_PROCESS.md)**
+- **[docs/project-management/RELEASE_PROCESS.md](../../project-management/RELEASE_PROCESS.md)**
   — current-state facts re-verified against the repo this session (`version 0.0.0`,
   `private: true`, no `CHANGELOG.md`, no remote, `master` + `exp/sybil-redteam` branches,
   the linked `idb-rt` worktree), a pre-1.0 SemVer policy that treats CLAUDE.md's "CRITICAL:
@@ -195,7 +195,7 @@ isn't wrapped in a transaction at all.
 
 ## 5. Priced-identity alternatives analysis
 
-**[docs/history/PRICED_ALTERNATIVES.md](../history/PRICED_ALTERNATIVES.md)** — the author's ask, stated
+**[docs/history/PRICED_ALTERNATIVES.md](../PRICED_ALTERNATIVES.md)** — the author's ask, stated
 plainly: **keep "identity is priced, not prevented"; explore removing the cryptographic
 machinery specifically** (Ed25519 passports, hash-chained/signed audit ledger, RFC-6962
 Merkle proofs), not the anchor-pricing/independence/reputation design itself.

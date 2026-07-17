@@ -20,18 +20,18 @@ each row says what the file covers and why you'd open it.
 | [`RAW_SAMPLES.md`](./RAW_SAMPLES.md) | Raw, immediately-viewable transcripts from the poisoning benchmarks: real question, retrieved context per arm, verbatim model reply, gold/poison answers, per-metric verdicts. |
 | [`../BENCH_RERUN_2026-07-06.md`](../BENCH_RERUN_2026-07-06.md) | The 2026-07-06 full re-verification pass against the current engine — the source for every "re-verified" number in the top-level README. |
 
-## Launch-prep record (`launch/`)
+## July 2026 launch-prep record
+
+This work is useful history, but it is not the current operating guide. It lives under
+`history/launch-2026-07/` so old review notes do not look like present instructions.
 
 | Doc | Covers |
 |---|---|
-| [`launch/WHAT_IT_IS.md`](./launch/WHAT_IT_IS.md) | Plain-language framing: the two failure modes, what Intelligent DB is / is not. Good second read after the README. |
-| [`launch/REBUILD_SUMMARY.md`](./launch/REBUILD_SUMMARY.md) | Plain-language account of the five-phase crypto-free rebuild: what changed, what reviewers found, the measured before/after security numbers. |
-| [`launch/CRYPTO_FREE_IDENTITY_DESIGN.md`](./launch/CRYPTO_FREE_IDENTITY_DESIGN.md) | The design synthesis behind consuming identity from configuration instead of self-minted cryptography. |
-| [`launch/CODE_REVIEW_IDENTITY_RATIFICATION.md`](./launch/CODE_REVIEW_IDENTITY_RATIFICATION.md) | Findings-only adversarial review of `identity/` + `ratification/`. |
-| [`launch/CODE_REVIEW_TRAVERSAL_FORGETTING_STORE.md`](./launch/CODE_REVIEW_TRAVERSAL_FORGETTING_STORE.md) | Findings-only adversarial review of `traversal/` + `forgetting/` + `store/` + `api.ts`. |
-| [`launch/BUGFIX_REPORT.md`](./launch/BUGFIX_REPORT.md) | The fixes for the defects the two code reviews above surfaced, plus independent re-verification of each fix. |
-| [`launch/REVIEW_FINDINGS.md`](./launch/REVIEW_FINDINGS.md) | Master log of every disclosed defect across the project's history: who caught it, what changed, which regression test guards it. |
-| [`launch/WRITEUP.md`](./launch/WRITEUP.md) | Single start-to-end record of the launch-prep documentation pass: what every workstream found/wrote, plus the launch-readiness checklist. |
+| [`history/launch-2026-07/README.md`](./history/launch-2026-07/README.md) | A short note on what this archive is and how to read it. |
+| [`history/launch-2026-07/WHAT_IT_IS.md`](./history/launch-2026-07/WHAT_IT_IS.md) | The plain-language framing used during that pass. |
+| [`history/launch-2026-07/REBUILD_SUMMARY.md`](./history/launch-2026-07/REBUILD_SUMMARY.md) | What changed during the crypto-free rebuild. |
+| [`history/launch-2026-07/BUGFIX_REPORT.md`](./history/launch-2026-07/BUGFIX_REPORT.md) | Defects found in review and the fixes made at the time. |
+| [`history/launch-2026-07/REVIEW_FINDINGS.md`](./history/launch-2026-07/REVIEW_FINDINGS.md) | The review log from that work. |
 
 ## Positioning and comparisons (`marketing/`)
 
@@ -72,8 +72,8 @@ current design, use `ARCHITECTURE_ENGINE.md` and `CLAUDE.md` instead.
 ## Suggested reading order
 
 1. [`../README.md`](../README.md) — what this is, why it exists, quickstart.
-2. [`launch/WHAT_IT_IS.md`](./launch/WHAT_IT_IS.md) — the thesis in plain language.
+2. [`history/launch-2026-07/WHAT_IT_IS.md`](./history/launch-2026-07/WHAT_IT_IS.md) — the thesis in plain language, preserved from the launch-prep pass.
 3. [`ARCHITECTURE_ENGINE.md`](./ARCHITECTURE_ENGINE.md) — how it actually works.
 4. [`ARCHITECTURE_BENCHMARKS.md`](./ARCHITECTURE_BENCHMARKS.md) — how the poisoning-resistance claims are measured.
 5. [`../CLAUDE.md`](../CLAUDE.md) — the exact status and known limitations, for due diligence.
-6. `launch/`, `marketing/`, `product/`, `project-management/` — as needed, in any order.
+6. `marketing/`, `product/`, `project-management/` and the historical launch record — as needed.
