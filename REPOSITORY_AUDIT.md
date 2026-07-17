@@ -43,14 +43,14 @@ The cross-database adapters and external model/database packages are development
 
 | Check | Status | Evidence |
 | --- | --- | --- |
-| TypeScript | Pass in latest CI | `npm run typecheck` completed before the test failure |
-| Tests | Fail | 894 passed, 44 skipped and 1 failed in run `28993238344` |
+| TypeScript | Pass in current PR CI | Typecheck completed on both Node 22 and Node 24 |
+| Tests | Version/timing-sensitive failure | Node 22 passed; Node 24 reported 894 passed, 44 skipped and 1 failed in run `29604026147` |
 | Failure | Shutdown race | `src/daemon/__e2e__/adversarial.e2e.test.ts:277` observed a successful authentication after shutdown had begun |
-| Build | Not reached in the failed job | The workflow stopped after tests |
+| Crash-torture smoke | Pass | 50 kill-cycles passed in the current PR run |
 | Dependency audit | Needs review | CI installation reported three moderate, one high and one critical vulnerability |
 | Local rerun | Not performed | Dependencies were not installed in the audit clone; the clean GitHub runner gives the current failure evidence |
 
-The failure may be timing-sensitive, but it tests a security-relevant boundary: whether a new connection can finish authentication while the daemon is draining. It should not be dismissed as flaky without reproducing and understanding the race.
+The same shutdown test failed on Node 22 in an earlier default-branch run and on Node 24 in the current PR run, while the other matrix version passed. That makes the failure intermittent or timing/version-sensitive, but it tests a security-relevant boundary: whether a new connection can finish authentication while the daemon is draining. It should not be dismissed as flaky without reproducing and understanding the race.
 
 ## 5. Documentation problems
 
