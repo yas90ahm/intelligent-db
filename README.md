@@ -1,10 +1,10 @@
 # Intelligent DB
 
-AI agents forget things. More awkwardly, they can remember a claim without remembering where it came from.
+AI agents forget things. Sometimes they remember the claim and lose where it came from, which may be worse.
 
-I wanted a memory store where the source is part of the fact, not a footnote added later. So intelligent-db stores provenance, keeps contradictory claims visible and treats two copies from the same root as one source rather than two votes.
+I wanted the source to stay attached to the fact. Intelligent DB keeps contradictory claims visible too. And when two claims came from the same root, it does not count them as two independent votes.
 
-It is a TypeScript research prototype. The package is private and still version `0.0.0`, which is a better description of its maturity than some of the older documents in this repository.
+This is a TypeScript research prototype. The package is private and still at version `0.0.0`. That is probably the most honest description of where it is.
 
 [![CI](https://github.com/yas90ahm/intelligent-db/actions/workflows/ci.yml/badge.svg)](https://github.com/yas90ahm/intelligent-db/actions/workflows/ci.yml)
 [![License: Apache-2.0](https://img.shields.io/badge/License-Apache--2.0-blue.svg)](./LICENSE)
@@ -12,28 +12,26 @@ It is a TypeScript research prototype. The package is private and still version 
 
 ## What it does
 
-- stores facts as graph strands with source and citation data
-- recalls from a cue through spreading activation
-- keeps disputed facts visible instead of deleting the losing side
-- measures source independence before treating repetition as corroboration
-- persists to SQLite with migrations, snapshots and restore support
-- exposes an in-process API, MCP server and optional shared daemon
+- stores facts with their source and citation
+- recalls related facts through an activation walk
+- keeps disputes open until something resolves them
+- checks whether repeated claims are actually independent
+- persists to SQLite with migrations and restore support
+- runs as an in-process library, an MCP server or an optional shared daemon
 
-Vectors can help seed recall and reorder presentation. They do not decide belief or source independence.
+Vectors can help find a starting point and change the order of the result. They do not decide whether a source should be believed.
 
-## What it does not prove
+## Where it stops
 
-This project does not make poisoning impossible. A patient attacker who controls genuinely independent, expensive identities can still win. The system tries to make cheap coordinated repetition visible and less useful.
+Intelligent DB makes cheap repetition less useful. It cannot stop an attacker who controls genuinely independent and trusted identities.
 
-The identity layer consumes trust signals supplied by configuration and surrounding infrastructure. It does not prove that a domain, device or person is honest.
+The identity layer accepts trust information from the surrounding system. It does not prove that a person or device is honest. The local hash chain can show internal consistency, but someone with enough filesystem access can rewrite the data and recompute an unsigned chain.
 
-The local hash chains show internal consistency. Someone with enough filesystem access can rewrite data and recompute an unsigned chain. External immutable storage is still needed if that threat matters.
+The daemon also has an intermittent shutdown race under review. A connection has sometimes completed authentication after shutdown began.
 
-And the current daemon test matrix has an intermittent shutdown race: a connection has sometimes completed authentication after shutdown began. One Node version may pass while the other fails. Treat daemon shutdown as under review until that is resolved.
+## Start it
 
-## Quickstart
-
-Node 22.13 or newer is required.
+Use Node.js 22.13 or newer.
 
 ```bash
 git clone https://github.com/yas90ahm/intelligent-db.git
@@ -70,13 +68,9 @@ for (const fact of result.facts) {
 memory.close();
 ```
 
-Run the narrated example:
+Run the narrated example with `npm run demo`.
 
-```bash
-npm run demo
-```
-
-## MCP server
+## MCP
 
 Build first, then register the local server:
 
@@ -85,73 +79,41 @@ npm run build
 claude mcp add intelligent-db -- node /absolute/path/to/dist/mcp/server.js
 ```
 
-Set `MEMORY_DB` if you want a durable SQLite file.
+Set `MEMORY_DB` if you want a durable SQLite file. The MCP surface can remember and recall a fact. It can explain one too. Open disputes can be listed or resolved after confirmation.
 
-The MCP surface exposes five memory actions:
+Administrative trust changes are kept outside the MCP surface.
 
-- remember
-- recall
-- list pending questions
-- resolve a pending dispute with confirmation
-- explain why a fact is believed
+## Shared daemon
 
-Administrative trust mutations are not MCP tools.
-
-## Optional daemon
-
-The normal library runs in-process. Daemon mode is a separate, opt-in process for clients that need one shared memory store.
+The normal library runs inside the caller's process. Daemon mode is optional and gives several clients one memory store.
 
 ```bash
 npm run build
 node dist/daemon/cli.js --data-dir ./idb-data
 ```
 
-Read [`OPERATIONS.md`](./OPERATIONS.md) before using it. On Windows, take the endpoint from the generated daemon JSON. `MEMORY_DAEMON_TOKEN_FILE` must point to a file containing the raw bearer token, not the JSON file itself.
+Read [`OPERATIONS.md`](./OPERATIONS.md) before using it. On Windows, use the endpoint written to the daemon JSON file. `MEMORY_DAEMON_TOKEN_FILE` points to the raw bearer-token file.
 
-## How recall is ordered
+## Storage
 
-The default is the activation walk. A cue lights the graph and the strongest related strands surface.
+SQLite mode uses WAL and schema migrations. It can make an online snapshot and archive the WAL. Restoring to a timestamp is supported too. An optional AES-256-GCM adapter encrypts the stored fact payload.
 
-An optional embedder can propose additional seeds:
-
-```ts
-const memory = createAgentMemory({ embedder });
-```
-
-Blended vector/graph presentation is opt-in:
-
-```ts
-const memory = createAgentMemory({
-  embedder,
-  rankMode: "blend",
-});
-```
-
-Similarity changes which eligible facts appear first. It does not change their belief state.
-
-## Persistence and encryption
-
-SQLite mode includes WAL use, schema migrations, online snapshots, WAL archiving and point-in-time restore. An optional AES-256-GCM adapter encrypts strand payload values.
-
-Encryption needs a key provider supplied by the caller. Key rotation and backup handling remain the caller's job. Read the known limitations in [`CLAUDE.md`](./CLAUDE.md) and the runbook in [`OPERATIONS.md`](./OPERATIONS.md).
+The caller supplies the encryption key. Rotation and backup handling remain outside this package.
 
 ## Benchmarks
 
-The repository includes poisoning, retrieval and cross-store benchmarks. The July 2026 rerun measured:
+I included the weak results because they matter as much as the good ones.
 
-- 24/24 cheap-Sybil trials passed for intelligent-db; the ten trust-blind comparison stores scored 0/24 in that harness
-- 6% attack success for intelligent-db versus 96% for mem0 on the repository's PoisonedRAG-nq run
-- 0.0% attack success with 99.8% accuracy on the 601-question FactWorld run; flat RAG measured 98.7% attack success
+- the cheap-Sybil harness passed 24 of 24 trials for Intelligent DB in the committed configuration
+- the PoisonedRAG NQ run measured 6% attack success; mem0 measured 96% in the same repository harness
+- the 601-question FactWorld run measured 0.0% attack success with 99.8% clean accuracy
+- the first LoCoMo setup missed its target; the later blended setup reached recall@20 of 0.481 against the cited mem0 result of 0.484
 
-These are results from the committed harness, not independent production validation. The poor results are kept too. For example, the first seeded LoCoMo configuration missed its target, and the later blended configuration reached recall@20 of 0.481 against the cited mem0 value of 0.484.
+These are my tests of this repository. They are not independent production validation. The harnesses and concise reports remain in `src/__bench__/`, with the architecture notes under `docs/`.
 
-Start with:
+Start with [`docs/ARCHITECTURE_BENCHMARKS.md`](./docs/ARCHITECTURE_BENCHMARKS.md) and [`docs/INTEGRITY_AUDIT.md`](./docs/INTEGRITY_AUDIT.md).
 
-- [`BENCH_RERUN_2026-07-06.md`](./BENCH_RERUN_2026-07-06.md)
-- [`docs/ARCHITECTURE_BENCHMARKS.md`](./docs/ARCHITECTURE_BENCHMARKS.md)
-- [`docs/INTEGRITY_AUDIT.md`](./docs/INTEGRITY_AUDIT.md)
-
-## Development
+## Check it
 
 ```bash
 npm run typecheck
@@ -159,31 +121,25 @@ npm test
 npm run build
 ```
 
-Run one test while working:
+Benchmarks and torture tests have separate flags. Some also need native tools or local models, so they are outside the normal build.
 
-```bash
-npx vitest run src/path/to/file.test.ts
-```
-
-Benchmarks and torture tests use separate environment flags and may need native development dependencies. They are not required for the normal library build.
-
-There is no lint or formatting command yet. Typecheck and tests are the current code gate.
+There is no lint or formatting command yet.
 
 ## Repository map
 
 ```text
-src/                    runtime, tests and benchmark harnesses
-.arbor/sessions/        committed benchmark evidence
-docs/                   current architecture, product and operations documents
-docs/history/           superseded designs and dated launch records
-figures/                benchmark figures and their generator
-scripts/                demos and benchmark helpers
+src/            library, tests and benchmark harnesses
+docs/           current architecture and design notes
+figures/        benchmark figures and their generator
+scripts/        demos and benchmark helpers
+OPERATIONS.md   daemon and MCP runbook
+CLAUDE.md       long technical record and known limits
 ```
 
-The repository has a lot of evidence in it. Some of it should eventually move out of the source tree, but only after every published number has a manifest and a stable citation. Deleting first would make the claims cleaner and the evidence worse.
+Raw benchmark output belongs in `.arbor/` and is ignored. I kept the harness and the shorter evidence that explains the claims.
 
-## Contributing and security
+## Contributing
 
-Read [`AGENTS.md`](./AGENTS.md) and [`CONTRIBUTING.md`](./CONTRIBUTING.md) before changing code. Report security issues through [`SECURITY.md`](./SECURITY.md).
+Read [`CONTRIBUTING.md`](./CONTRIBUTING.md) before changing behaviour. Security reports go through [`SECURITY.md`](./SECURITY.md).
 
 Apache 2.0. See [`LICENSE`](./LICENSE) and [`NOTICE`](./NOTICE).
