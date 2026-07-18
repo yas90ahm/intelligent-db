@@ -227,8 +227,8 @@ than claiming a stronger guarantee than the platform can deliver.
 
 Verified end-to-end by this pass's crash-torture extension
 (`src/daemon/__torture__/daemonKillLoop.ts`, 30+ real `SIGKILL` cycles against
-the actual compiled daemon binary — see `BENCH_RERUN_2026-07-06.md` for the
-run log):
+the actual compiled daemon binary; see `docs/ARCHITECTURE_BENCHMARKS.md` for
+the current verification notes):
 
 - **The memory store (strands/edges) is fully crash-consistent.** It rides
   the same SQLite/WAL transactional guarantees the in-process engine always

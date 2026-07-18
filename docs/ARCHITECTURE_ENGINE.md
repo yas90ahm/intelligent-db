@@ -2,9 +2,8 @@
 
 **This documents the current, crypto-free engine** — the system as it ships today, after
 the rebuild that deleted all self-minted cryptography (keys, signing, Merkle log, staking)
-and replaced it with configuration-consumed identity. The pre-rebuild architecture is
-preserved in [`history/ARCHITECTURE_ENGINE_CRYPTO_ERA.md`](./history/ARCHITECTURE_ENGINE_CRYPTO_ERA.md);
-the original design plan is [`history/ARCHITECTURE.md`](./history/ARCHITECTURE.md).
+and replaced it with configuration-consumed identity. The older architecture documents
+remain available in Git history.
 Status, test counts, and known limitations live in [`../CLAUDE.md`](../CLAUDE.md) — the
 canonical status document. Citations here are `file → symbol`, not line numbers, so they
 survive edits; every named symbol is grep-able in `src/`.
@@ -446,6 +445,5 @@ per-invariant adversarial tests, mid-operation crash-rollback and WAL-recovery c
 injection resistance, and one end-to-end integration test
 (`src/__tests__/systemCoherence.test.ts`) that wires the whole pipeline over one shared
 SQLite handle. The 97-spec red-team suite and the poisoning benchmarks are documented in
-[`ARCHITECTURE_BENCHMARKS.md`](./ARCHITECTURE_BENCHMARKS.md); the review-findings log is
-[`history/launch-2026-07/REVIEW_FINDINGS.md`](./history/launch-2026-07/REVIEW_FINDINGS.md); known limitations are
+[`ARCHITECTURE_BENCHMARKS.md`](./ARCHITECTURE_BENCHMARKS.md). Known limitations are
 enumerated in [`../CLAUDE.md`](../CLAUDE.md).
