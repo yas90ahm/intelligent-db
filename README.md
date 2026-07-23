@@ -1,401 +1,145 @@
 # Intelligent DB
 
-**A memory substrate for AI agents, not a vector database: a deliberate inversion of one.**
+AI agents forget things. Sometimes they remember the claim and lose where it came from, which may be worse.
+
+I wanted the source to stay attached to the fact. Intelligent DB keeps contradictory claims visible too. And when two claims came from the same root, it does not count them as two independent votes.
+
+This is a TypeScript research prototype. The package is private and still at version `0.0.0`. That is probably the most honest description of where it is.
 
 [![CI](https://github.com/yas90ahm/intelligent-db/actions/workflows/ci.yml/badge.svg)](https://github.com/yas90ahm/intelligent-db/actions/workflows/ci.yml)
 [![License: Apache-2.0](https://img.shields.io/badge/License-Apache--2.0-blue.svg)](./LICENSE)
 [![Node](https://img.shields.io/badge/node-%3E%3D22.13-brightgreen)](https://nodejs.org)
 
-AI agents fail two ways: they **forget** (context evaporates within and across sessions),
-and they **hallucinate**. Worse, they can't tell their own recall from their own
-invention. The standard fix, a vector database, quietly makes the second failure *easier*:
-cosine similarity ranks by density, so whoever floods the most near-duplicate claims wins
-the retrieval. There is no concept of "this came from a trustworthy, independent source"
-versus "this is a plausible-sounding plant."
+## What it does
 
-Intelligent DB is a zero-runtime-dependency TypeScript memory substrate built against both
-failures at once. Facts are latent **strands** in a spider-web graph, surfaced only by
-**spreading activation** from a cue, never a flat nearest-neighbor scan. Recall is
-**provenance-first**: every fact carries its citation, and two facts from the same root are
-an echo, never corroboration. And the graph is protected by an **immune system** external
-to it: **priced identity** (independence costs something real: a domain, a device, a
-verified human), **earned reputation** (trust accrues slowly and craters fast on
-contradiction), and a **tamper-evident, checksum-chained audit ledger**. An adversarial
-council proved no rule living *inside* a memory graph can both let one true witness overturn
-a planted lie and stop two fake witnesses from overturning the truth (see
-[`CLAUDE.md`](./CLAUDE.md) §"The hard theorem"). Contradiction **demotes, never
-deletes**; genuinely independent disputes defer to a human instead of being settled by
-headcount.
+- stores facts with their source and citation
+- recalls related facts through an activation walk
+- keeps disputes open until something resolves them
+- checks whether repeated claims are actually independent
+- persists to SQLite with migrations and restore support
+- runs as an in-process library, an MCP server or an optional shared daemon
 
----
+Vectors can help find a starting point and change the order of the result. They do not decide whether a source should be believed.
 
-## Why not a vector database?
+## Where it stops
 
-A vector store has no notion of *who* asserted a fact or whether two assertions are
-*independent*: it only has distance. That is exactly the property a poisoning attack
-exploits: inject enough near-duplicate fabrications and they out-rank the truth. Intelligent
-DB inverts the model: identity is priced and independence is measured before a fact is
-ever allowed to out-rank another. The result, **re-verified 2026-07-06 against the current
-(crypto-free) engine**, full report: [`BENCH_RERUN_2026-07-06.md`](./BENCH_RERUN_2026-07-06.md):
+Intelligent DB makes cheap repetition less useful. It cannot stop an attacker who controls genuinely independent and trusted identities.
 
-- **Cheap-Sybil poisoning, cross-store comparison** (`src/__bench__/crossdb/`): every
-  trust-blind store benchmarked (10 in total, including **Qdrant**, **Postgres+pgvector**,
-  **Redis-Stack**, and the native vector indexes **faiss-node** and **hnswlib-node**,
-  alongside five embedded/on-disk backends) scored **0/24** against a 24-trial cheap-Sybil
-  attack (an attacker who mints throwaway identities for free). The IntelligentDB engine, the
-  11th arm in the same run, scored **24/24**.
-- **mem0 comparison** (PoisonedRAG-nq, n=100, real BEIR corpus + the paper's own attack
-  files): mem0, a genuine external memory framework with its own embedder and vector store,
-  suffers **96% attack-success rate**; the substrate scores **6%**.
-- **FactWorld** (601 poisoned closed-book questions, exact-match scoring, no LLM judge):
-  flat RAG scores **98.7% attack-success**; the substrate scores **0.0% attack-success at
-  99.8% accuracy**.
+The identity layer accepts trust information from the surrounding system. It does not prove that a person or device is honest. The local hash chain can show internal consistency, but someone with enough filesystem access can rewrite the data and recompute an unsigned chain.
 
-This does **not** claim Sybil resistance is impossible to beat; it converts an unbounded,
-free attack into a *priced, visible, self-limiting* one. An attacker who buys genuinely
-independent, expensive anchors (real domains, real devices, real reputations) **can** still
-win; the degradation curve as an attacker pays more is measured and published, not hidden
-(`docs/ARCHITECTURE_BENCHMARKS.md` §2.5, "costly-independent boundary"). The known,
-deliberate limitations of the current single-process prototype (the asserted-attribution
-trade-off, offline class-assignment liability — plus the opt-in daemon mode's own
-asserted-bearer-token and shared-fate-blast-radius trade-offs, see **MCP server** below)
-are enumerated in **Known Limitations** in
-[`CLAUDE.md`](./CLAUDE.md), not swept under the rug. Encryption-at-rest, schema migrations,
-and snapshot/point-in-time recovery are no longer gaps — see **Durability and security**
-below.
+The daemon also has an intermittent shutdown race under review. A connection has sometimes completed authentication after shutdown began.
 
-Full methodology, the arms, the fidelity notes, and every reproduction command:
-[`docs/ARCHITECTURE_BENCHMARKS.md`](./docs/ARCHITECTURE_BENCHMARKS.md).
+## Start it
 
----
+Use Node.js 22.13 or newer.
 
-## Quickstart
-
-The package is not yet published to npm (`private: true` in `package.json`); install from
-source:
-
-```sh
+```bash
 git clone https://github.com/yas90ahm/intelligent-db.git
 cd intelligent-db
 npm install
 npm run build
 ```
 
-```js
+The package is not published to npm. Use it from source.
+
+```ts
 import { createAgentMemory } from "./dist/index.js";
 
-// Zero configuration: the owner is the trust root. Pass { dbPath } for a durable
-// SQLite/WAL store instead of the in-memory default. `trust.verifiedTenantDomains`
-// configures one SSO tenant as DOMAIN-grade (0.35) — a genuinely independent,
-// trusted witness for the dispute below (the swappable trust root — see
-// "Source-Identity Layer" in CLAUDE.md).
 const memory = createAgentMemory({
-  trust: { verifiedTenantDomains: { "tenant:acme": "acme.example" } },
+  dbPath: "./memory.db",
 });
 
-// Remember: files a provenance-rooted strand, not a row in a table.
-const { id: ownerFactId } = memory.remember({
-  text: "the deploy target is prod-cluster-7",
-  entity: "entity:deploy",
-  attribute: "deploy#target",
-});
-
-// Recall: spreading activation from the cue, never a fuzzy nearest-neighbor scan.
-// Every fact carries a citation and a belief-state label — no provenance, no voice.
-const { facts } = memory.recall("what is the deploy target?");
-for (const f of facts) {
-  console.log(`[${f.fact_state}] "${f.text}" — ${f.citation}`);
-}
-
-// A rival, low-trust source contradicts it (e.g. a fetched web page). It lands
-// PROVISIONAL — visible, weightless, unable to displace the believed fact.
 memory.remember({
-  text: "the deploy target is evil-cluster-666",
-  entity: "entity:deploy",
-  attribute: "deploy#target",
-  origin: { kind: "web", resourceId: "https://untrusted.example/post" },
+  text: "the deployment window is Friday at 8pm",
+  entity: "entity:deployment",
+  attribute: "deployment#window",
+  origin: {
+    kind: "file",
+    resourceId: "change-record-1842",
+  },
 });
 
-// A genuinely independent, TRUSTED source disputes it instead: alice is a member
-// of the tenant CONFIGURED above, so her claim clears quarantine and lands LIVE —
-// two LIVE, independent claims. adjudicate() runs the check; with neither side
-// holding a decisive reputation margin, the engine refuses to pick a winner by
-// majority or arrival order — it defers to a human instead:
-const alice = memory.trust.registerSsoMember({
-  issuer: "https://idp.acme.example",
-  subject: "alice",
-  tenantId: "tenant:acme",
-  verifiedCustomDomain: "acme.example",
-  label: "alice@acme",
-});
-memory.remember({
-  text: "the deploy target is stage-cluster-2",
-  entity: "entity:deploy",
-  attribute: "deploy#target",
-  source: { sourceId: alice.sourceId },
-});
-memory.adjudicate("deploy#target");
+const result = memory.recall("when is the deployment window?");
 
-// The dispute horn surfaces as plain data:
-const disputes = memory.pendingQuestions();
-if (disputes.length > 0) {
-  const [question] = disputes;
-  // ... show question.options to the user, then record their answer:
-  memory.resolvePending(question.contradictionSetId, ownerFactId);
+for (const fact of result.facts) {
+  console.log(fact.text, fact.citation, fact.fact_state);
 }
 
 memory.close();
 ```
 
-Or run the narrated, four-act demo end-to-end against a real in-memory instance (a 50-fake-source
-flood, a real dispute, and the receipts from the audit ledger):
+Run the narrated example with `npm run demo`.
 
-```sh
-npm run demo
-```
+## MCP
 
-See [`src/examples/demo.ts`](./src/examples/demo.ts) for the full annotated walkthrough.
+Build first, then register the local server:
 
----
-
-## MCP server (Claude Code / Claude Desktop)
-
-Intelligent DB ships a zero-dependency stdio MCP server (`src/mcp/server.ts`) exposing five
-tools: `remember`, `recall`, `list_pending_questions`, `resolve_pending` (the personal-tier
-dispute horn — when two independent sources genuinely disagree, the agent asks the user and
-records their answer), and `why_do_you_believe_this` (a belief dossier: sources, anchors,
-independence count, demotion cause, dispute status, audit receipts).
-
-Build first, then register it:
-
-```sh
+```bash
 npm run build
-
-# Claude Code CLI:
-claude mcp add intelligent-db -- node /abs/path/to/dist/mcp/server.js
-# set a durable store with:  -e MEMORY_DB=/abs/path/to/memory.db
+claude mcp add intelligent-db -- node /absolute/path/to/dist/mcp/server.js
 ```
 
-Or a `mcpServers` JSON block (Claude Desktop and compatible clients):
+Set `MEMORY_DB` if you want a durable SQLite file. The MCP surface can remember and recall a fact. It can explain one too. Open disputes can be listed or resolved after confirmation.
 
-```json
-{
-  "mcpServers": {
-    "intelligent-db": {
-      "command": "node",
-      "args": ["/abs/path/to/dist/mcp/server.js"],
-      "env": { "MEMORY_DB": "/abs/path/to/memory.db" }
-    }
-  }
-}
+Administrative trust changes are kept outside the MCP surface.
+
+## Shared daemon
+
+The normal library runs inside the caller's process. Daemon mode is optional and gives several clients one memory store.
+
+```bash
+npm run build
+node dist/daemon/cli.js --data-dir ./idb-data
 ```
 
-Or via the package bin: `npx intelligent-db-mcp` (after `npm link` / a local install). Omit
-`MEMORY_DB` for an in-memory (non-durable) store — useful for a quick trial.
+Read [`OPERATIONS.md`](./OPERATIONS.md) before using it. On Windows, use the endpoint written to the daemon JSON file. `MEMORY_DAEMON_TOKEN_FILE` points to the raw bearer-token file.
 
-**Multiple clients, one shared memory:** point the same server at a running
-[daemon](#durability-and-security) instead of a local file by setting `MEMORY_DAEMON_SOCKET`
-(the daemon's socket/pipe path) and `MEMORY_DAEMON_TOKEN_FILE` (a file whose contents are
-the **raw bearer token only** — never the token itself in an env var, and never the
-auto-provisioned JSON `<data-dir>/daemon-token` file) instead of `MEMORY_DB`. Extract the
-`token` field from that JSON into a separate file; on Windows, set `MEMORY_DAEMON_SOCKET`
-from the JSON `endpoint` field (the random-suffixed named pipe). Every request goes over
-the wire to the daemon for the life of the process, so two Claude Code windows, a CLI session,
-and a background indexer can all remember and recall against the same facts instead of each
-opening its own SQLite file. Full setup: [`OPERATIONS.md`](./OPERATIONS.md) §7.
+## Storage
 
----
+SQLite mode uses WAL and schema migrations. It can make an online snapshot and archive the WAL. Restoring to a timestamp is supported too. An optional AES-256-GCM adapter encrypts the stored fact payload.
 
-## Architecture overview
-
-One engine, layered so every load-bearing decision (when to stop walking, what's
-canonical, who is independent) is a gate or an external signal, never a model judgment:
-
-| Layer | What it does | Docs |
-|---|---|---|
-| **Storage** (`src/store/`) | Pluggable `StrandStore`: in-memory + durable SQLite/WAL, no delete operation (forgetting is downward tier movement). | [`docs/ARCHITECTURE_ENGINE.md`](./docs/ARCHITECTURE_ENGINE.md) §4 |
-| **Traversal** (`src/traversal/`, `src/recall/`) | Cue → seeds → share-normalized best-first spreading activation → two-phase halting (local saturation + mandatory bridge sweep). | [`docs/ARCHITECTURE_ENGINE.md`](./docs/ARCHITECTURE_ENGINE.md) §5 |
-| **Forgetting** (`src/forgetting/`) | Tier decay (`HOT→WARM→COLD→ARCHIVE_STUB`, never delete) + fail-closed eviction gates; echo collapse and decisive-or-defer contradiction adjudication; invoked via the engine's `runForgetting()` verb (caller-triggered, not a background timer). | [`docs/ARCHITECTURE_ENGINE.md`](./docs/ARCHITECTURE_ENGINE.md) §6 |
-| **Source-Identity Layer** (`src/identity/`) | Crypto-free trust registry, anchor-cost table + independence math, Beta(α,β) reputation, exact max-independent-set count. | [`docs/ARCHITECTURE_ENGINE.md`](./docs/ARCHITECTURE_ENGINE.md) §7 |
-| **Ratification** (`src/ratification/`) | Tamper-evident checksum-chain audit ledger, the dispute doorbell, the retroactive disown/undo sweep, enterprise dispute routing. | [`docs/ARCHITECTURE_ENGINE.md`](./docs/ARCHITECTURE_ENGINE.md) §9 |
-| **Engine verbs** (`src/api.ts`) | `writeFact` / `recall` / `ratify` / `adjudicate` / `disown` / `runForgetting` / `explain` / `beliefTimeline` — the composed `IntelligentDb` surface. | [`docs/ARCHITECTURE_ENGINE.md`](./docs/ARCHITECTURE_ENGINE.md) §10 |
-| **Agent facade + MCP** (`src/agent/`, `src/mcp/`) | `remember` / `recall` / `pendingQuestions` / `resolvePending` for a zero-config personal deployment, plus the stdio MCP server. | [`docs/ARCHITECTURE_ENGINE.md`](./docs/ARCHITECTURE_ENGINE.md) §11 |
-
-The full module-by-module reference, including the hard theorem that makes the
-Source-Identity Layer mandatory, lives in
-[`docs/ARCHITECTURE_ENGINE.md`](./docs/ARCHITECTURE_ENGINE.md); the canonical
-design-and-status document (test counts, known limitations) is [`CLAUDE.md`](./CLAUDE.md).
-
----
-
-## Durability and security
-
-All opt-in — default behavior (in-memory or plain `createSqliteStore()`) is unchanged unless
-a caller explicitly reaches for one of these:
-
-| Capability | What it does | Module |
-|---|---|---|
-| **Optional embedder, seed-only** | `EmbedderPort` injected at construction; cosine similarity over a `strand_vectors` sidecar proposes candidate seeds, unioned with (never replacing) lexical/entity seeds, energy-capped at the strongest lexical seed. Belief — `fact_state`, adjudication, independence, reputation, eviction — never reads similarity. | `src/store/vectorSidecar.ts`, `src/recall/cueResolver.ts` |
-| **Schema migration ladder** | `PRAGMA user_version`-tracked, ordered migrations run in one transaction on open; refuses to open a database stamped newer than the running code knows about. | `src/store/migrations.ts` |
-| **Online snapshot + WAL archiving + point-in-time restore** | `snapshotDb()` (`VACUUM INTO` + a signed manifest), `createWalArchiver()` (segments copied out before checkpoint-truncation), `restoreToTimestamp()` — refuses to complete unless `integrity_check` and the audit chain both verify. | `src/store/backup.ts` |
-| **Value-level AES-256-GCM encryption** | `createEncryptedStore(inner, keyProvider)` wraps either backend and encrypts exactly `Strand.payload` (AAD-bound to the row id); ids, indexes, provenance, and the audit chain stay plaintext by design so traversal and `verifyChain()` keep working keyless. Wrong key or a swapped ciphertext surfaces as a named, typed error — never a crash or a silent wrong read. | `src/store/encryptedStore.ts` |
-| **Crash-torture suite** | A child process loops randomized compound operations while the parent `SIGKILL`s it at a random 5-50ms delay; a 6-point invariant checker runs on every reopen. 200/200 cycles, zero structural violations (one pre-existing, non-crash reconciliation-audit finding, documented not hidden). | `src/__torture__/` (env-gated `TORTURE=1`) |
-
-None of this weakens the existing durability floor: SQLite/WAL transaction atomicity, the
-tamper-evident audit chain, and `integrity_check` are unchanged — these are additive
-capabilities layered in front of guarantees that already held (that floor itself had a real
-gap in the actual default `createAgentMemory({dbPath})` wiring until 2026-07-07, since fixed —
-see the audit remediation note below). Full detail, including two disclosed design deviations
-(why WAL-archive replay uses its own base file rather than splicing onto a `VACUUM INTO`
-snapshot, and why the encrypted adapter is value-level rather than full-file), plus the
-crash-torture invariant list and the one non-crash finding it surfaced:
-[`CLAUDE.md`](./CLAUDE.md) Known Limitations, [`docs/BENCHMARK_NARRATIVE.md`](./docs/BENCHMARK_NARRATIVE.md) §3.
-An **opt-in daemon mode** lets several client processes (multiple IDE windows/agent
-sessions, a CLI, a background indexer) share one memory instead of each opening its own
-SQLite file: a Unix-socket/Windows-named-pipe transport, bearer-token auth through the same
-crypto-free trust registry, every trust-mutating verb — `registerSource`/`disown`/`approve`/
-`adjudicate`/`ratify`/`resolvePending`, all six (the sixth closed 2026-07-07 after a re-audit
-found it had been left out of the first five, see [`CLAUDE.md`](./CLAUDE.md)'s "Audit remediation
-(Wave 4 / re-audit fixes)") — gated to an OWNER-grade token, and a single serialized write queue —
-approved by a binding security review ([`docs/specs/PHASE3_DAEMON_SPEC.md`](./docs/specs/PHASE3_DAEMON_SPEC.md))
-and verified end-to-end against a real spawned daemon process plus 30 real `SIGKILL` crash
-cycles. The in-process default (`createAgentMemory()`, above) is unchanged and remains the
-default forever; reach for `intelligent-db-daemon` (see [`OPERATIONS.md`](./OPERATIONS.md))
-only once you actually have multiple processes needing shared memory.
-
-**Audit remediation, 2026-07-07:** a hostile pre-launch audit found eight places where this
-README/CLAUDE.md described intent rather than the shipped code — including the daemon
-verb-grading claim above and the atomicity-floor claim above. A first pass (Wave 1) fixed ten
-critical/high findings, independently re-verified (source read, live repro, and
-revert-and-observe for the trust-critical ones); seven of the eight invariant claims came out
-genuinely true and test-backed, and one — convergence-ordered pop priority — was named as still
-dead code rather than claimed fixed. A second pass (Wave 2) closed the remaining 28 findings on
-the backlog, including that eighth claim: the dead ordering tiebreak is now removed from the
-codebase rather than wired up, confirmed a behavioral no-op by direct inspection and a dedicated
-regression test. An independent verifier re-ran the full suite and the trust-integrity gates
-(Sybil 24/24 in both rank modes, FactWorld 0% ASR) with no regression and no belief/trust
-invariant weakened. Full list, fix-by-fix, with the regression test for each:
-[`CLAUDE.md`](./CLAUDE.md#audit-remediation-wave-1--2026-07-07) and
-[`CLAUDE.md`](./CLAUDE.md#audit-remediation-wave-2--2026-07-07).
-
-A Wave 3 polish pass and Phase 3b (wiring the MCP server to a daemon-backed memory over async
-dispatch) followed and were independently verified clean. Then a hostile RE-AUDIT of the whole
-remediation history found two of the Wave-1 fixes above were each still incomplete in a way their
-own narrow regression tests hadn't caught: the daemon's trust-mutating-verb gate was missing a
-sixth verb (`resolvePending` — the daemon security note above now names all six), and
-`reverseCredit`'s "exact" depth-floor unwind only genuinely moved the LCB at the one depth its sole
-test exercised, not at a realistic well-corroborated depth (see the credit-reversal note above).
-Both, plus three adjacent perf/durability/operability regressions the same re-audit surfaced, were
-fixed and independently re-verified over a real spawned daemon process and a hand-derived,
-independent re-implementation of the trust-math formula — full account:
-[`CLAUDE.md`](./CLAUDE.md#audit-remediation-wave-4--re-audit-fixes--2026-07-07).
-
----
+The caller supplies the encryption key. Rotation and backup handling remain outside this package.
 
 ## Benchmarks
 
-| Benchmark | bare | RAG | mem0 | IntelligentDB |
-|---|---|---|---|---|
-| Cheap-Sybil poisoning, 12-store comparison (24 trials/store) | — | 0/24 on all 11 trust-blind stores (incl. Qdrant, Postgres+pgvector, Redis-Stack, faiss-node, hnswlib-node, mem0) | 0/24 (see below) | **24/24** |
-| FactWorld (n=1200, 601 poisoned) — attack-success / accuracy | 0.0% / 0.0% | 98.7% / 50.3% | 78.9% / 60.2% | **0.0% / 99.8%** |
-| PoisonedRAG-nq (n=100, real attack files) — attack-success / accuracy | 4.0% / 50.0% | 93.0% / 22.0% | 96.0% / 22.0% | **6.0% / 86.0%** |
-| PoisonedRAG-hotpotqa (n=100) — attack-success / accuracy | 21.0% / 54.0% | 99.0% / 13.0% | 97.0% / 14.0% | **18.0% / 81–82%** |
-| PoisonedRAG-msmarco (n=100) — attack-success / accuracy | 12.0% / 63.0% | 93–94% / 15–16% | 93.0% / 21.0% | **6–7% / 84–85%** |
+I included the weak results because they matter as much as the good ones.
 
-Every row above, including the full mem0 column, is **re-verified 2026-07-06** against the
-current crypto-free engine — no historical or pre-rebuild figures remain in this table.
-mem0 tracks RAG's vulnerability almost exactly on the three PoisonedRAG datasets (its
-embedder+vector-store retrieval carries no provenance/independence model); on FactWorld it
-lands meaningfully between RAG's near-total collapse and IntelligentDB's clean defense,
-some internal dedup in mem0 partially resisting a near-duplicate Sybil cluster it doesn't
-resist on the PoisonedRAG attack shape. IntelligentDB is the only arm defended on every
-dataset. The crossdb mem0 adapter is now wired (routed through the same local-Ollama config
-its other arms use, no OpenAI key needed) and scores 0/24 — same trust-blind majority-vote
-failure as every other comparator store, and by a wide margin the slowest adapter measured
-(write_hz 32/s, recall 74ms) thanks to its own LLM-mediated ingest and embedded-Qdrant search
-round-trip. Full methodology, the label-free (non-oracle) structural defense, the
-disclosed costly-independent degradation boundary, and every reproduction command:
-[`docs/ARCHITECTURE_BENCHMARKS.md`](./docs/ARCHITECTURE_BENCHMARKS.md). The complete
-re-run log for this pass: [`BENCH_RERUN_2026-07-06.md`](./BENCH_RERUN_2026-07-06.md).
+- the cheap-Sybil harness passed 24 of 24 trials for Intelligent DB in the committed configuration
+- the PoisonedRAG NQ run measured 6% attack success; mem0 measured 96% in the same repository harness
+- the 601-question FactWorld run measured 0.0% attack success with 99.8% clean accuracy
+- the first LoCoMo setup missed its target; the later blended setup reached recall@20 of 0.481 against the cited mem0 result of 0.484
 
-### Day-to-day performance
+These are my tests of this repository. They are not independent production validation. The harnesses and concise reports remain in `src/__bench__/`, with the architecture notes under `docs/`.
 
-Setting the poisoning result aside, the same 12-adapter crossdb run also measured ordinary
-write/recall speed: IntelligentDB's median recall latency (0.003–0.02ms across runs) is on
-par with the fastest raw key-value stores measured (lmdb) and thousands of times faster than
-every production vector database in the comparison, including mem0 (74ms recall, and by far
-the slowest write path at 32/s) — though IntelligentDB and the plain KV/SQL stores are doing a
-single-fact-by-entity lookup, an easier query than the vector engines' KNN-over-embeddings.
-Write throughput sits mid-pack: behind the zero-index, no-durability engines (vector-
-bruteforce, sqlite variants) but ahead of every adapter doing real indexed vector storage,
-despite carrying the full provenance/trust/audit-chain write path those don't.
+Start with [`docs/ARCHITECTURE_BENCHMARKS.md`](./docs/ARCHITECTURE_BENCHMARKS.md) and [`docs/INTEGRITY_AUDIT.md`](./docs/INTEGRITY_AUDIT.md).
 
-On clean (unpoisoned) HotpotQA multi-hop questions, IntelligentDB's substrate arm matches RAG's
-answer accuracy exactly (86.0% vs 86.0%, n=100, qwen2.5:7b) — there is no retrieval-quality tax
-for carrying the trust/provenance layer when there's nothing to adjudicate, and both roughly
-double the no-retrieval baseline (54.0%). On LoCoMo retrieval quality (everyday conversational recall, no attacker), a genuine mem0 arm
-run in the same session originally beat IntelligentDB's best retriever on every ranking metric
-(recall@20 0.484 vs 0.375). Three measured iterations closed that to statistical parity:
-seed-only embedder integration scored 0.366 (an honest miss, reported as such at the time),
-blended presentation ranking reached 0.419, and rank fusion plus embedder parity reached
-**0.481**. The frozen configuration now matches or beats mem0 on three of the four metrics
-(recall@10 0.385 vs 0.382, nDCG@10 0.242 vs 0.242, MRR 0.221 vs 0.215) and trails by 0.003 on
-recall@20, roughly 4 questions out of 1,319.
+## Check it
 
-One detail from that sweep is worth more than the numbers. The tuning grid found a linear
-scoring configuration that measures 0.493 and would have beaten mem0 outright. It was rejected:
-every linear configuration fails the adversarial embedding-stuffing gate (a near-duplicate
-flood at cosine 1.0 can crowd the top ranks), and only rank fusion passes all gates. The config
-that shipped is the best one that survives the adversarial suite, not the best one on the
-leaderboard. Similarity proposes candidates and orders presentation; belief still comes from
-provenance and independence, never from cosine. The frozen config re-passed the Sybil (24/24)
-and FactWorld (0.0% ASR) gates. **Default PERSONAL recall** is the activation walk. Pass an
-`embedder` into `createAgentMemory({ embedder })` to seed that walk; opt into frozen blend/RRF
-presentation with `rankMode: "blend"`. Full iteration history, gate tables, and reproduction commands:
-[`BENCH_RERUN_2026-07-06.md`](./BENCH_RERUN_2026-07-06.md),
-[`docs/BENCHMARK_NARRATIVE.md`](./docs/BENCHMARK_NARRATIVE.md).
-
-Separately, a 200-cycle crash-torture suite (`src/__torture__/`, `TORTURE=1 npm run torture`)
-repeatedly `SIGKILL`s a child process mid-write against a real SQLite/WAL file and reopens it
-under a 6-point cross-op invariant checker. **200/200 cycles, zero structural violations** —
-no demotion ever lost its outranking edge, no approval record ever lost its demotions, no
-disown sweep was ever half-applied, and the audit checksum chain stayed clean on every reopen.
-One pre-existing, non-crash reconciliation-audit gap was found and is documented, not silently
-dropped (see [`CLAUDE.md`](./CLAUDE.md) Known Limitations). Durability now also includes an
-opt-in schema migration ladder, online snapshot/WAL-archive/point-in-time restore, and a
-value-level AES-256-GCM encrypted store adapter — all documented in
-[`CLAUDE.md`](./CLAUDE.md) and exercised in [`docs/BENCHMARK_NARRATIVE.md`](./docs/BENCHMARK_NARRATIVE.md) §3.
-
-Full tables and methodology: [`BENCH_RERUN_2026-07-06.md`](./BENCH_RERUN_2026-07-06.md).
-
----
-
-## Development
-
-Requires Node `>=22.13` (the first release line with `node:sqlite` unflagged, which the
-durable store uses; developed and tested on Node 24).
-
-```sh
-npm install        # dev deps only — the library itself has zero runtime dependencies
-npm run typecheck  # tsc --noEmit (strict, NodeNext, verbatimModuleSyntax, exactOptionalPropertyTypes)
-npm run build      # tsc -p tsconfig.build.json -> dist/
-npm test           # vitest run — the full suite (benchmark suites are env-gated and skipped)
+```bash
+npm run typecheck
+npm test
+npm run build
 ```
 
-`npm install` may warn about allow-scripts / native builds for optional bench adapters
-(`better-sqlite3`, `faiss-node`, `hnswlib-node`, DuckDB, etc.). Those packages power
-env-gated competitive benches under `src/__bench__/` only — they are **not** required for
-the in-process library, `npm run demo`, typecheck, or the default test suite. Skip or
-ignore those warnings unless you are running a gated bench. There is no separate ESLint/
-Prettier stack; validation is `typecheck` + tests (scoped: `npx vitest run <path>`).
+Benchmarks and torture tests have separate flags. Some also need native tools or local models, so they are outside the normal build.
 
-CI (`.github/workflows/ci.yml`) runs typecheck + test + build on Node 22.x and 24.x for
-every push and pull request to `main`. Agent-oriented verify loop: [`AGENTS.md`](./AGENTS.md).
+There is no lint or formatting command yet.
 
-## Contributing, security, and license
+## Repository map
 
-- [`CONTRIBUTING.md`](./CONTRIBUTING.md) — dev setup, required checks, code philosophy.
-- [`SECURITY.md`](./SECURITY.md) — supported versions, private vulnerability reporting, threat model.
-- [`CODE_OF_CONDUCT.md`](./CODE_OF_CONDUCT.md) — community standards.
-- Licensed under [Apache-2.0](./LICENSE); see [`NOTICE`](./NOTICE) for attribution requirements.
-- Full documentation index: [`docs/README.md`](./docs/README.md).
+```text
+src/            library, tests and benchmark harnesses
+docs/           current architecture and design notes
+figures/        benchmark figures and their generator
+scripts/        demos and benchmark helpers
+OPERATIONS.md   daemon and MCP runbook
+CLAUDE.md       long technical record and known limits
+```
+
+Raw benchmark output belongs in `.arbor/` and is ignored. I kept the harness and the shorter evidence that explains the claims.
+
+## Contributing
+
+Read [`CONTRIBUTING.md`](./CONTRIBUTING.md) before changing behaviour. Security reports go through [`SECURITY.md`](./SECURITY.md).
+
+Apache 2.0. See [`LICENSE`](./LICENSE) and [`NOTICE`](./NOTICE).

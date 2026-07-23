@@ -48,10 +48,8 @@ jobs:
     # OS process is spawned per cycle, forcibly killed at a random 5-50ms delay, and
     # reopened to run the dedicated cross-op invariant checker
     # (docs/specs/PHASE2_DURABILITY_SPEC.md §4a). Fails the build on any STRUCTURAL
-    # violation (a genuine atomicity break); a known, pre-existing, non-crash
-    # `RECONCILE_DRIFT` finding (see `src/__torture__/invariantChecker.ts`'s
-    # `KNOWN_NONCRASH_VIOLATION_KINDS`) does not fail this job — see that module's
-    # doc for why it is not a crash-consistency bug.
+    # violation (a genuine atomicity break). The non-crash allowlist is currently
+    # empty; see `src/__torture__/invariantChecker.ts`.
     steps:
       - name: Checkout
         uses: actions/checkout@v4

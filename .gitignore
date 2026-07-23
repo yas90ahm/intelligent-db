@@ -18,22 +18,9 @@ dist/
 !src/__tests__/fixtures/*.db
 
 # internal multi-agent run artifacts (kept local, not published) —
-# EXCEPT the benchmark evidence the docs cite, which is published below.
-.arbor/*
-!.arbor/sessions/
-.arbor/sessions/*
-!.arbor/sessions/factworld/
-!.arbor/sessions/poisonedrag/
-!.arbor/sessions/verification/
-!.arbor/sessions/generalization/
-!.arbor/sessions/reasoning-bench/
-!.arbor/sessions/cross-db-bench/
-!.arbor/sessions/retrieval-quality/
-!.arbor/sessions/transcripts/
-!.arbor/sessions/sybil-redteam/
-# orchestration internals inside published sessions stay local
-.arbor/sessions/*/.coordinator/
-.arbor/sessions/*/CONTRACT.md
+# Raw benchmark output stays local. The harness and concise reports are tracked.
+.arbor/
+.cursor/
 ARBOR_CONTRACT.md
 research_config.yaml
 idb-rt/

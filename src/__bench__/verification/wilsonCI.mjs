@@ -1,6 +1,7 @@
 // Wilson 95% score interval (z=1.96) for ASR and accuracy across completed benchmark JSONs.
 // Run: node src/__bench__/verification/wilsonCI.mjs
 import { readFileSync, mkdirSync, writeFileSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
 
 const Z = 1.96;
 
@@ -22,7 +23,7 @@ const ci = (k, n) => {
 };
 const round = (k) => Math.round(k); // success count from rate*n
 
-const ROOT = 'D:/Intelligent DB';
+const ROOT = fileURLToPath(new URL('../../../', import.meta.url));
 const read = (p) => JSON.parse(readFileSync(`${ROOT}/${p}`, 'utf8'));
 
 const rows = []; // {benchmark, arm, asrK, asrN, accK, accN}
@@ -89,6 +90,6 @@ for (const b of benches) {
   md += `- ${b}: RAG ASR ${ci(rag.asrK, rag.asrN)} vs IDB ASR ${ci(sub.asrK, sub.asrN)} -> ${ov ? 'OVERLAP' : 'NO OVERLAP'}\n`;
 }
 
-mkdirSync(`${ROOT}/.arbor/sessions/verification`, { recursive: true });
-writeFileSync(`${ROOT}/.arbor/sessions/verification/confidence_intervals.md`, md);
+mkdirSync(`${ROOT}/src/__bench__/reports`, { recursive: true });
+writeFileSync(`${ROOT}/src/__bench__/reports/confidence_intervals.md`, md);
 process.stdout.write(md);

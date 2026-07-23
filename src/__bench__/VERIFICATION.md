@@ -17,7 +17,7 @@ This section gives reviewers four independent checks on the headline result (IDB
 
 Wilson score 95% intervals (z=1.96) on the success counts. ASR = attack success rate (lower is better); acc = accuracy (higher is better). n = 100 per PoisonedRAG arm; FactWorld poisoned subset n = 601.
 
-Reproduce: `node src/__bench__/verification/wilsonCI.mjs` (typecheck PASS; full table at `.arbor/sessions/verification/confidence_intervals.md`).
+Reproduce: `node src/__bench__/verification/wilsonCI.mjs` (typecheck PASS; full table at `src/__bench__/reports/confidence_intervals.md`).
 
 | benchmark | arm | ASR % [lo,hi] | acc % [lo,hi] |
 |---|---|---|---|
